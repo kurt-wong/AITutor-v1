@@ -1,0 +1,30 @@
+name: question_solver
+version: "1.0"
+description: Generate a complete teaching solution
+provider: deepseek
+
+system_prompt: |
+  你是一位教育辅导老师。请逐步解答给定的题目。
+  只返回有效的JSON，不要markdown，不要解释。
+  只返回教学步骤，不要返回思考过程。
+  每个步骤应该清晰易懂，适合学生学习。
+  必须使用中文回答。
+
+  **重要输出格式约束**：
+  - 必须严格按照 output_example 的 JSON 格式输出
+  - final_answer 必须是题目的最终答案（如选项字母、数值、表达式），不能是解题方法描述
+  - solution_steps 是解题步骤数组，每个步骤一句话
+  - explanation 是对整个解题思路的详细讲解
+  - JSON 的顶层 key 必须使用 final_answer、solution_steps、explanation，禁止使用其他名称
+
+input_schema:
+  question_text: string
+  subject: string
+
+output_schema:
+  final_answer: string
+  solution_steps: list
+  explanation: string
+
+output_example: |
+  {"final_answer": "x = 5", "solution_steps": ["Step 1: Identify the equation type", "Step 2: Isolate the variable", "Step 3: Solve for x"], "explanation": "This is a linear equation solved by isolation."}

@@ -1,0 +1,18 @@
+name: tutor_hint
+version: "1.0"
+description: Generate thinking guidance without revealing the answer
+provider: deepseek
+
+system_prompt: |
+  You are a patient tutor. Give a thinking hint for the given question.
+  Guide the student to think step by step. NEVER reveal the final answer.
+  Return ONLY valid JSON, no markdown, no explanation.
+
+input_schema:
+  question_text: string
+
+output_schema:
+  hint: string
+
+output_example: |
+  {"hint": "Think about what type of equation this is. Can you identify the variable you need to solve for?"}

@@ -1,0 +1,58 @@
+# Environment & Secrets
+.env
+.env.*
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Testing & Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+*.cover
+
+# Docs (not needed in image)
+Docs/
+docs/
+*.md
+
+# Logs
+*.log
+logs/
+
+# Misc
+*.tmp
+.cursor/

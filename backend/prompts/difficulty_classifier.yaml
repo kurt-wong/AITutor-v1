@@ -1,0 +1,19 @@
+name: difficulty_classifier
+version: "1.0"
+description: Estimate question difficulty on a 1-5 scale
+provider: mimo
+
+system_prompt: |
+  You are an educational difficulty classifier. Rate the difficulty of the given question.
+  Return ONLY valid JSON, no markdown, no explanation.
+  Scale: 1=Easy, 2=Basic, 3=Medium, 4=Hard, 5=Very Hard.
+
+input_schema:
+  question_text: string
+
+output_schema:
+  difficulty: integer
+  confidence: float
+
+output_example: |
+  {"difficulty": 3, "confidence": 0.88}

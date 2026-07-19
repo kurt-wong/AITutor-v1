@@ -1,0 +1,175 @@
+/* ==========================================================================
+   Apple Design System — CSS Custom Properties
+   设计规范: Design.md
+   ========================================================================== */
+
+/* ════════════════════════════════════════════════
+   1. Brand / Seed Tokens (Apple 调色板)
+   ════════════════════════════════════════════════ */
+:root {
+  /* ── Primary: Action Blue #0066cc (唯一品牌色) ── */
+  --color-primary: #0066cc;
+  --color-primary-hover: #0077e6;
+  --color-primary-active: #0055aa;
+  --color-primary-bg: rgba(0, 102, 204, 0.08);
+  --color-primary-border: rgba(0, 102, 204, 0.2);
+  --color-primary-outline: rgba(0, 102, 204, 0.12);
+  --color-primary-on-dark: #2997ff;   /* Sky Link Blue — 深色表面专用 */
+
+  /* ── Semantic (Apple 体系) ── */
+  --color-success: #34c759;
+  --color-warning: #ff9500;
+  --color-error: #ff3b30;
+  --color-info: #0071e3;              /* Focus Blue */
+
+  /* ── Surface ── */
+  --color-canvas: #ffffff;            /* Pure White */
+  --color-canvas-parchment: #f5f5f7;  /* Parchment (page bg) */
+  --color-surface-black: #000000;     /* global-nav */
+  --color-surface-tile-1: #272729;    /* Near-Black Tile 1 */
+  --color-surface-pearl: #fafafc;     /* Pearl Button */
+
+  /* ── Text (Near-Black Ink #1d1d1f) ── */
+  --color-text: #1d1d1f;
+  --color-text-secondary: #7a7a7a;    /* Ink Muted 48 */
+  --color-text-tertiary: #cccccc;     /* Body Muted */
+  --color-text-quaternary: rgba(29, 29, 31, 0.25);
+  --color-text-on-dark: #ffffff;
+
+  /* ── Layout backgrounds ── */
+  --color-bg-layout: #f5f5f7;         /* Parchment */
+  --color-bg-container: #ffffff;      /* Pure White */
+  --color-bg-elevated: #ffffff;
+
+  /* ── Hairlines & Borders ── */
+  --color-border: #e0e0e0;            /* Hairline */
+  --color-border-secondary: #f0f0f0;  /* Divider Soft */
+
+  /* ── Sider (浅色 Parchment 风格) ── */
+  --color-sider-bg: #f5f5f7;
+  --color-sider-item-selected: #0066cc;
+  --color-sider-item-hover: rgba(0, 0, 0, 0.04);
+  --color-sider-text: #1d1d1f;
+  --color-sider-text-secondary: #7a7a7a;
+
+  /* ── Typography: SF Pro Display + SF Pro Text → Inter fallback ── */
+  --font-family: 'Inter', 'SF Pro Display', 'SF Pro Text', system-ui,
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Inter', 'SF Pro Display', system-ui, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  --font-size: 14px;
+  --font-size-body: 17px;             /* Apple body */
+  --font-size-lg: 21px;               /* tagline */
+  --font-size-sm: 12px;               /* fine-print */
+  --font-size-xs: 10px;
+
+  /* ── Spacing (8px base) ── */
+  --radius: 8px;                      /* {rounded.sm} */
+  --radius-lg: 18px;                  /* {rounded.lg} */
+  --radius-pill: 9999px;              /* {rounded.pill} */
+  --radius-sm: 5px;                   /* {rounded.xs} */
+  --control-height: 36px;
+
+  /* ── State-aware backgrounds ── */
+  --bg-solution: rgba(0, 102, 204, 0.06);
+  --bg-hint: rgba(52, 199, 89, 0.06);
+  --bg-reveal: rgba(255, 149, 0, 0.06);
+
+  /* ── Page layout ── */
+  --page-max-width: 980px;            /* Apple text-content max */
+  --page-padding: 24px;
+  --card-gap: 20px;                   /* Apple gutter */
+
+  /* ── Product Shadow (唯一阴影 — 仅产品图) ── */
+  --shadow-product: rgba(0, 0, 0, 0.22) 3px 5px 30px 0;
+  --shadow-card-hover: 0 2px 12px rgba(0, 0, 0, 0.04);
+  --shadow-card-active: 0 1px 4px rgba(0, 0, 0, 0.02);
+}
+
+/* ════════════════════════════════════════════════
+   2. Dark Mode Override
+   ════════════════════════════════════════════════ */
+[data-theme='dark'] {
+  --color-primary-bg: rgba(0, 102, 204, 0.16);
+  --color-primary-border: rgba(0, 102, 204, 0.3);
+  --color-primary-outline: rgba(0, 102, 204, 0.24);
+
+  --color-text: rgba(255, 255, 255, 0.85);
+  --color-text-secondary: rgba(255, 255, 255, 0.55);
+  --color-text-tertiary: rgba(255, 255, 255, 0.35);
+  --color-text-quaternary: rgba(255, 255, 255, 0.2);
+
+  --color-bg-layout: #0a0a0c;
+  --color-bg-container: #1c1c1e;
+  --color-bg-elevated: #2c2c2e;
+
+  --color-border: #38383a;
+  --color-border-secondary: #2c2c2e;
+
+  /* Sider in dark mode */
+  --color-sider-bg: #1c1c1e;
+  --color-sider-text: rgba(255, 255, 255, 0.85);
+  --color-sider-text-secondary: rgba(255, 255, 255, 0.55);
+  --color-sider-item-selected: #2997ff;
+  --color-sider-item-hover: rgba(255, 255, 255, 0.08);
+
+  --bg-solution: rgba(41, 151, 255, 0.12);
+  --bg-hint: rgba(52, 199, 89, 0.12);
+  --bg-reveal: rgba(255, 149, 0, 0.12);
+
+  --shadow-product: rgba(0, 0, 0, 0.5) 3px 5px 30px 0;
+  --shadow-card-hover: 0 2px 12px rgba(0, 0, 0, 0.3);
+  --shadow-card-active: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+/* ════════════════════════════════════════════════
+   3. Utility Classes
+   ════════════════════════════════════════════════ */
+
+/* Card hover lift — Apple subtle elevation */
+.card-hover-lift {
+  transition: box-shadow 0.25s ease, transform 0.25s ease;
+}
+.card-hover-lift:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
+}
+
+/* Apple-style full-bleed tile section */
+.apple-tile-light {
+  background: var(--color-canvas);
+  padding: 80px 24px;
+  text-align: center;
+}
+.apple-tile-parchment {
+  background: var(--color-canvas-parchment);
+  padding: 80px 24px;
+  text-align: center;
+}
+.apple-tile-dark {
+  background: var(--color-surface-tile-1);
+  color: var(--color-text-on-dark);
+  padding: 80px 24px;
+  text-align: center;
+}
+
+/* ════════════════════════════════════════════════
+   4. Theme Transition Smoothing
+   ════════════════════════════════════════════════ */
+.ant-layout,
+.ant-layout-header,
+.ant-layout-sider,
+.ant-layout-content,
+.ant-menu,
+.ant-card,
+.ant-table-wrapper,
+.ant-table,
+.ant-btn,
+.ant-input,
+.ant-select-selector,
+.ant-tag,
+.ant-alert,
+.ant-typography {
+  transition: background-color 0.2s ease, color 0.2s ease,
+    border-color 0.2s ease, box-shadow 0.2s ease;
+}

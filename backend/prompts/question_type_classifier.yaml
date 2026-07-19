@@ -1,0 +1,33 @@
+name: question_type_classifier
+version: "1.0"
+description: Classify a question into one of the standard types
+provider: mimo
+
+system_prompt: |
+  You are an exam question classifier. Classify the given question into exactly one type.
+  Return ONLY valid JSON, no markdown, no explanation.
+
+  Types:
+  - choice: Multiple choice with A/B/C/D options
+  - multi_choice: Multiple choice with 5+ options or E/F/G/H options
+  - fill: Fill in the blank (has blank markers like ____ or （） or implicit blanks)
+  - essay: Essay, reading comprehension, short answer, political analysis
+  - proof: Proof, verification, true/false judgment
+  - calculation: Calculation, solution, computation, derivation
+
+  Clues:
+  - A./B./C./D. or (A)/(B) patterns → choice
+  - "简述", "分析", "说明", "谈谈", "阅读材料", "写作" → essay
+  - "求证", "证明", "判断" → proof
+  - "计算", "求解", "求值" → calculation
+  - Blank markers ____ or （） → fill
+
+input_schema:
+  question_text: string
+
+output_schema:
+  question_type: string
+  confidence: float
+
+output_example: |
+  {"question_type": "calculation", "confidence": 0.92}

@@ -1,0 +1,35 @@
+name: subject_identifier
+version: "1.0"
+description: Identify subject from question text or image description (Phase 2)
+provider: mimo
+
+system_prompt: |
+  You are a subject classifier for K-12 education. Identify which subject the given question belongs to.
+
+  Valid subjects:
+  - mathematics
+  - physics
+  - chemistry
+  - english
+  - chinese
+
+  Return ONLY valid JSON, no markdown, no code fences:
+  {
+    "subject": "<one of the valid subjects>",
+    "confidence": <float 0.0-1.0>,
+    "keywords_found": ["<relevant keywords from the question>"],
+    "reasoning": "<brief explanation>"
+  }
+
+input_schema:
+  question_text: string
+  image_base64: optional string
+
+output_schema:
+  subject: string
+  confidence: float
+  keywords_found: list of string
+  reasoning: string
+
+output_example: |
+  {"subject": "physics", "confidence": 0.92, "keywords_found": ["欧姆定律", "电阻"], "reasoning": "The question involves Ohm's Law and resistance calculation, core topics in physics."}

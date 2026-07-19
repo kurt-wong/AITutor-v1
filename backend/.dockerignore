@@ -1,0 +1,38 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Environment
+.env
+.env.*
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Testing & Coverage
+.coverage
+htmlcov/
+*.cover
+test-results/
+
+# Logs
+*.log
+logs/
+
+# Misc
+*.tmp
+*.md
+Dockerfile
+docker-compose*.yml

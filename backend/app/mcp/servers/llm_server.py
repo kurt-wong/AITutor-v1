@@ -1,0 +1,598 @@
+"""
+LLM Gateway MCP Server (In-Process MCP)
+
+Implements LLM Gateway MCP tools per MIS §3.3:
+- solve_question: generate teaching solution via DeepSeek
+- generate_thinking_hint: Socratic thinking guidance (Phase 2, supports images)
+- review_solution: evaluate solution quality
+
+Architecture: All LLM calls go through llm_gateway (SAD §5).
+Prompts loaded from YAML via PromptLoader (prompt.md §2 Rule 4).
+"""
+
+import logging
+from typing import Any
+
+from app.mcp.base import MCPServerBase, MCPTool, success_response, error_response
+from app.gateway.router import llm_gateway
+from app.core.prompt_loader import get_system_prompt
+
+logger = logging.getLogger(__name__)
+
+
+# ── Key-name normalization (Session #57) ──
+# Some LLM models return Chinese key names instead of the English names
+# expected by the output schema.  This mapping handles the common cases.
+_KEY_ALIASES: dict[str, str] = {
+    # final_answer aliases
+    "最终答案": "final_answer",
+    "答案": "final_answer",
+    "answer": "final_answer",
+    "解答": "final_answer",
+    # solution_steps aliases
+    "教学步骤": "solution_steps",
+    "解题步骤": "solution_steps",
+    "步骤": "solution_steps",
+    "steps": "solution_steps",
+    "solution": "solution_steps",
+    # explanation aliases
+    "详解": "explanation",
+    "解析": "explanation",
+    "讲解": "explanation",
+    "解题思路": "explanation",
+    "分析": "explanation",
+    # ── Session #58: Additional key aliases for other LLM tools ──
+    # review_solution
+    "评分": "score",
+    "反馈": "feedback",
+    "意见": "feedback",
+    # compare_solutions
+    "对比": "comparison",
+    "比较": "comparison",
+    # evaluate_difficulty
+    "难度": "difficulty",
+    "置信度": "confidence",
+    "理由": "reasoning",
+    "推理": "reasoning",
+    # generate_thinking_hint
+    "提示": "hint",
+    "引导": "hint",
+    "概念关键词": "concept_keywords",
+    "难点提示": "difficulty_hint",
+    "难度提示": "difficulty_hint",
+    # extract_visual_structure
+    "题目文本": "question_text",
+    "图表元素": "diagram_elements",
+    "关系": "relationships",
+    "学科": "subject",
+    "知识点列表": "knowledge_points",
+}
+
+
+def _normalize_keys(parsed: dict[str, Any]) -> None:
+    """Normalize Chinese/alternate JSON key names to standard English names.
+
+    Mutates the dict in place.  Keys not in the alias map are left unchanged.
+    If a standard key already exists, aliased values are NOT overwritten.
+    """
+    for chinese_key, eng_key in _KEY_ALIASES.items():
+        if chinese_key in parsed and eng_key not in parsed:
+            parsed[eng_key] = parsed.pop(chinese_key)
+
+    # Nested: if a single "教学步骤" key contains a list of objects,
+    # extract the steps into solution_steps as string array.
+    if (isinstance(parsed.get("solution_steps"), list)
+            and parsed["solution_steps"]
+            and isinstance(parsed["solution_steps"][0], dict)):
+        steps = parsed["solution_steps"]
+        # Try common nested key names
+        parsed["solution_steps"] = [
+            s.get("具体操作", s.get("description", s.get("content", str(s))))
+            for s in steps
+        ]
+        # If no final_answer yet, check if the first step object contains one
+        if not parsed.get("final_answer"):
+            for s in steps:
+                if isinstance(s, dict) and "答案" in s:
+                    parsed["final_answer"] = s["答案"]
+                    break
+
+
+class LLMGatewayMCPServer(MCPServerBase):
+    """LLM Gateway MCP Server."""
+
+    name = "llm_gateway"
+
+    def _register_tools(self) -> None:
+        # ── Timeout strategy (P0 fix, 2026-07-13) ──
+        # MIMO cloud API latency is 10-90s per call.  solve_question makes
+        # up to 3 attempts (MIMO → DeepSeek → Ollama), so 120s covers the
+        # fallback chain.  Single-call tools use 60s.  Vision tools use
+        # 120s for image upload + inference.
+        self.tools = [
+            MCPTool(name="solve_question", description="Generate a complete teaching solution", handler=self._solve_question, timeout=120.0),
+            MCPTool(name="review_solution", description="Evaluate solution quality and provide feedback", handler=self._review_solution, timeout=60.0),
+            MCPTool(name="generate_explanation", description="Generate detailed explanation for a solution", handler=self._generate_explanation, timeout=60.0),
+            MCPTool(name="compare_solutions", description="Compare two solutions and provide analysis", handler=self._compare_solutions, timeout=60.0),
+            MCPTool(name="evaluate_difficulty_v2", description="Evaluate question difficulty (1-5) with reasoning; supports text and image input (Phase 2)", handler=self._evaluate_difficulty_v2, timeout=60.0),
+            MCPTool(name="generate_thinking_hint", description="Generate Socratic thinking hint (no answer reveal) for guided learning (Phase 2)", handler=self._generate_thinking_hint, timeout=60.0),
+            MCPTool(name="extract_visual_structure", description="Extract structured info from question images: geometry, circuits, chemistry (Phase 2)", handler=self._extract_visual_structure, timeout=120.0),
+            MCPTool(name="generate", description="Generic LLM call — passes mode+prompt through the Gateway router (MIMO/DeepSeek/Ollama). For specialized tasks prefer domain tools (solve_question, generate_explanation, etc.)", handler=self._generate, timeout=120.0),
+        ]
+
+    async def _solve_question(self, payload: dict[str, Any]) -> dict[str, Any]:
+        question_text = payload.get("question_text")
+        subject = payload.get("subject", "")
+        question_id = payload.get("question_id")
+        if not question_text:
+            return error_response("VALIDATION_ERROR", "question_text is required")
+        try:
+            system_prompt = get_system_prompt("question_solver")
+            full_prompt = f"{system_prompt}\n\nSubject: {subject}\nQuestion: {question_text}"
+
+            # Fallback chain: MIMO (fast) → DeepSeek (reasoning) → Ollama (local)
+            result = None
+            for mode in ["fast", "reasoning"]:
+                try:
+                    result = await llm_gateway.generate(mode=mode, prompt=full_prompt)
+                    raw_text = result.get("response", "").strip()
+                    if raw_text and len(raw_text) > 10:
+                        break  # Got meaningful content, stop
+                    logger.warning(f"solve_question mode={mode} empty/short response, trying next")
+                    result = None
+                except Exception as e:
+                    logger.warning(f"solve_question mode={mode} failed: {e}, trying next")
+                    result = None
+
+            # Last resort: local Ollama
+            if not result:
+                try:
+                    result = await self._call_ollama_solve(full_prompt)
+                    if result and result.get("response", "").strip():
+                        logger.info("solve_question: Ollama fallback succeeded")
+                    else:
+                        result = None
+                except Exception as e:
+                    logger.warning(f"solve_question Ollama fallback failed: {e}")
+                    result = None
+
+            if not result:
+                return error_response("LLM_FAILURE", "All LLM providers failed (MIMO → DeepSeek → Ollama)")
+
+            # Parse LLM response
+            parsed = self._parse_json_response(result)
+            raw_response = result.get("response", "")
+
+            # ── Key-name normalization (Session #57) ──
+            # Some models return Chinese key names (e.g. "教学步骤"
+            # instead of "solution_steps").  Normalize before checking.
+            if parsed:
+                _normalize_keys(parsed)
+
+            if parsed and str(parsed.get("final_answer", "")).strip():
+                # Successfully parsed with non-empty answer
+                solution = {
+                    "final_answer": parsed.get("final_answer", ""),
+                    "solution_steps": parsed.get("solution_steps", []),
+                    "explanation": parsed.get("explanation", ""),
+                    "model_used": result.get("model", "unknown"),
+                    "provider": result.get("provider", "unknown"),
+                    "question_id": question_id,
+                }
+            else:
+                # ── P2 fix (2026-07-13): Last-resort JSON extraction ──
+                # When _parse_json_response fails (LaTeX backslash escapes,
+                # trailing commas, NaN, etc.) but the raw response still
+                # contains valid JSON, extract final_answer from it via
+                # regex as a safety net.
+                # Without this, users see raw JSON like
+                #   {"final_answer":"B","solution_steps":[...]}
+                # as the answer text.
+                final_answer = raw_response
+                solution_steps = parsed.get("solution_steps", []) if parsed else []
+                explanation = parsed.get("explanation", "") if parsed else ""
+
+                # ── CoT / reasoning-chain leak guard ──
+                # If the raw response looks like a reasoning chain rather
+                # than an answer (e.g. "首先，用户要求我作为教育辅导老师…"),
+                # reject it instead of persisting CoT into the database.
+                import re  # 修复: 此前未导入导致 NameError → LLM_FAILURE
+                _COT_INDICATORS = re.compile(
+                    r"(?:首先[，,].*(?:要求|需要|让我)|"
+                    r"用户要求我|"
+                    r"输出必须是|"
+                    r"让我(?:分析|思考|想想)|"
+                    r"我需要(?:先|首先)|"
+                    r"Let me (?:think|analyze|consider)|"
+                    r"I need to (?:first|understand))",
+                    re.IGNORECASE,
+                )
+                if _COT_INDICATORS.search(raw_response[:500]):
+                    logger.warning(
+                        "CoT leak detected in solve_question response "
+                        "(question_id=%s). Replacing with placeholder.",
+                        question_id,
+                    )
+                    final_answer = "[解析失败]"
+                    solution_steps = []
+                    explanation = ""
+
+                elif raw_response.strip().startswith("{"):
+                    # Raw response looks like JSON — try regex salvage
+                    import re as _re
+                    # Extract "final_answer" value from JSON-like text
+                    fa_patterns = [
+                        _re.compile(r'"final_answer"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                        _re.compile(r'"最终答案"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                        _re.compile(r'"答案"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                        _re.compile(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                    ]
+                    for pat in fa_patterns:
+                        m = pat.search(raw_response)
+                        if m:
+                            extracted = m.group(1)
+                            # Unescape JSON string escapes
+                            try:
+                                import json as _json
+                                extracted = _json.loads(f'"{extracted}"')
+                            except Exception:
+                                pass
+                            if extracted and len(extracted.strip()) > 0:
+                                final_answer = extracted
+                                logger.info(
+                                    "P2 salvage: extracted final_answer='%s' from raw JSON",
+                                    final_answer[:80],
+                                )
+                                break
+
+                    # Also try to salvage solution_steps from raw JSON
+                    if not solution_steps:
+                        steps_match = _re.search(
+                            r'"(?:solution_steps|教学步骤|解题步骤|步骤|steps)"\s*:\s*(\[[^\]]*\])',
+                            raw_response, _re.DOTALL,
+                        )
+                        if steps_match:
+                            try:
+                                import json as _json
+                                salvaged_steps = _json.loads(steps_match.group(1))
+                                if isinstance(salvaged_steps, list):
+                                    solution_steps = [
+                                        str(s) for s in salvaged_steps
+                                    ]
+                                    logger.info(
+                                        "P2 salvage: extracted %d solution_steps from raw JSON",
+                                        len(solution_steps),
+                                    )
+                            except Exception:
+                                pass
+
+                if parsed:
+                    logger.warning("solve_question JSON parsed but final_answer empty, using raw text")
+                else:
+                    logger.warning("Failed to parse solve_question response, using raw text")
+                solution = {
+                    "final_answer": final_answer,
+                    "solution_steps": solution_steps,
+                    "explanation": explanation,
+                    "model_used": result.get("model", "unknown"),
+                    "provider": result.get("provider", "unknown"),
+                    "question_id": question_id,
+                }
+
+            # LLM Server does NOT persist — caller is responsible for saving the solution
+            return success_response(solution)
+        except Exception as e:
+            return error_response("LLM_FAILURE", str(e))
+
+    async def _call_ollama_solve(self, prompt: str) -> dict[str, Any] | None:
+        """Call local Ollama as last-resort fallback for solve_question."""
+        import httpx
+        from app.core.config import settings
+
+        ollama_url = getattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434")
+        model = getattr(settings, "VL_OCR_MODEL", "qwen3.6-plus")
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=120.0,
+                trust_env=False,  # P1: bypass system proxy for localhost
+            ) as client:
+                response = await client.post(
+                    f"{ollama_url}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.2, "num_predict": 2048},
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = data.get("response", "")
+                if content and len(content.strip()) > 10:
+                    return {
+                        "response": content,
+                        "model": f"ollama/{model}",
+                        "provider": "ollama",
+                        "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                    }
+            return None
+        except Exception as e:
+            logger.warning(f"Ollama fallback error: {e}")
+            return None
+
+    async def _review_solution(self, payload: dict[str, Any]) -> dict[str, Any]:
+        question_text = payload.get("question_text")
+        solution = payload.get("solution")
+        if not question_text or not solution:
+            return error_response("VALIDATION_ERROR", "question_text and solution are required")
+        try:
+            system_prompt = get_system_prompt("question_solver")
+            full_prompt = f"{system_prompt}\n\nQuestion: {question_text}\nSolution to review: {solution}"
+            result = await llm_gateway.generate(mode="reasoning", prompt=full_prompt)
+
+            # Parse LLM response
+            parsed = self._parse_json_response(result)
+            if parsed:
+                _normalize_keys(parsed)
+                return success_response({
+                    "score": float(parsed.get("score", 0.8)),
+                    "feedback": parsed.get("feedback", ""),
+                    "model_used": result.get("model", "unknown")
+                })
+
+            # Fallback: use raw response
+            logger.warning("Failed to parse review_solution response, using raw text")
+            return success_response({
+                "score": 0.8,
+                "feedback": result.get("response", ""),
+                "model_used": result.get("model", "unknown")
+            })
+        except Exception as e:
+            return error_response("LLM_FAILURE", str(e))
+
+    async def _generate_explanation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Generate detailed explanation for a solution.
+
+        Input: {"question_text": str, "solution": str}
+        Output: {"explanation": str, "model_used": str}
+        """
+        question_text = payload.get("question_text")
+        solution = payload.get("solution")
+        if not question_text or not solution:
+            return error_response("VALIDATION_ERROR", "question_text and solution are required")
+        try:
+            system_prompt = get_system_prompt("question_solver")
+            full_prompt = f"{system_prompt}\n\nQuestion: {question_text}\nSolution: {solution}\n\nPlease provide a detailed explanation of this solution."
+            result = await llm_gateway.generate(mode="reasoning", prompt=full_prompt)
+
+            parsed = self._parse_json_response(result)
+            if parsed:
+                _normalize_keys(parsed)
+            if parsed and "explanation" in parsed:
+                return success_response({
+                    "explanation": parsed["explanation"],
+                    "model_used": result.get("model", "unknown")
+                })
+
+            logger.warning("Failed to parse generate_explanation response, using raw text")
+            return success_response({
+                "explanation": result.get("response", ""),
+                "model_used": result.get("model", "unknown")
+            })
+        except Exception as e:
+            return error_response("LLM_FAILURE", str(e))
+
+    async def _compare_solutions(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Compare two solutions and provide analysis.
+
+        Input: {"question_text": str, "solution1": str, "solution2": str}
+        Output: {"comparison": str, "model_used": str}
+        """
+        question_text = payload.get("question_text")
+        solution1 = payload.get("solution1")
+        solution2 = payload.get("solution2")
+        if not question_text or not solution1 or not solution2:
+            return error_response("VALIDATION_ERROR", "question_text, solution1, and solution2 are required")
+        try:
+            system_prompt = get_system_prompt("question_solver")
+            full_prompt = f"{system_prompt}\n\nQuestion: {question_text}\n\nSolution 1: {solution1}\n\nSolution 2: {solution2}\n\nPlease compare these two solutions and provide analysis."
+            result = await llm_gateway.generate(mode="reasoning", prompt=full_prompt)
+
+            parsed = self._parse_json_response(result)
+            if parsed:
+                _normalize_keys(parsed)
+            if parsed and "comparison" in parsed:
+                return success_response({
+                    "comparison": parsed["comparison"],
+                    "model_used": result.get("model", "unknown")
+                })
+
+            logger.warning("Failed to parse compare_solutions response, using raw text")
+            return success_response({
+                "comparison": result.get("response", ""),
+                "model_used": result.get("model", "unknown")
+            })
+        except Exception as e:
+            return error_response("LLM_FAILURE", str(e))
+
+    async def _evaluate_difficulty_v2(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate question difficulty with reasoning (Phase 2).
+
+        Supports text-only and image-based input.
+        Uses P009 (difficulty_evaluator) prompt.
+
+        Input: {"question_text": str, "images": Optional[List[str]]}
+        Output: {"difficulty": int, "confidence": float, "reasoning": str, "model_used": str}
+        """
+        question_text = payload.get("question_text")
+        images = payload.get("images")
+
+        if not question_text and not images:
+            return error_response("VALIDATION_ERROR", "question_text or images is required")
+
+        try:
+            system_prompt = get_system_prompt("difficulty_evaluator")
+            prompt_text = question_text or "[Image-based question — evaluate based on visual content]"
+            full_prompt = f"{system_prompt}\n\nQuestion: {prompt_text}"
+
+            result = await llm_gateway.generate(
+                mode="fast",
+                prompt=full_prompt,
+                images=images,
+            )
+
+            # Parse LLM response
+            parsed = self._parse_json_response(result)
+            if parsed:
+                _normalize_keys(parsed)
+            if parsed and "difficulty" in parsed:
+                difficulty = int(parsed["difficulty"])
+                if 1 <= difficulty <= 5:
+                    return success_response({
+                        "difficulty": difficulty,
+                        "confidence": float(parsed.get("confidence", 0.5)),
+                        "reasoning": parsed.get("reasoning", ""),
+                        "model_used": result.get("model", "unknown"),
+                    })
+
+            # Fallback if parsing fails
+            logger.warning("Failed to parse evaluate_difficulty_v2 response, using fallback")
+            return success_response({
+                "difficulty": 3,
+                "confidence": 0.3,
+                "reasoning": "Failed to parse LLM response, using default",
+                "model_used": result.get("model", "unknown"),
+            })
+        except Exception as e:
+            return error_response("LLM_FAILURE", str(e))
+
+    async def _generate_thinking_hint(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Generate a Socratic thinking hint for guided learning (Phase 2).
+
+        Uses P011 (thinking_hint) prompt.
+        The hint guides the student to think without revealing the answer.
+        Supports text and image input for dual-mode learning (PRD §3.2.4).
+
+        Input: {"question_text": str, "subject": Optional[str], "images": Optional[List[str]]}
+        Output: {"hint": str, "concept_keywords": List[str], "difficulty_hint": str, "model_used": str}
+        """
+        question_text = payload.get("question_text", "")
+        subject = payload.get("subject", "")
+        images = payload.get("images")
+
+        if not question_text and not images:
+            return error_response("VALIDATION_ERROR", "question_text or images is required")
+
+        try:
+            system_prompt = get_system_prompt("thinking_hint")
+            prompt_text = question_text or "[Image-based question — guide student to think about the visual content]"
+            full_prompt = f"{system_prompt}\n\nSubject: {subject}\nQuestion: {prompt_text}"
+
+            result = await llm_gateway.generate(
+                mode="tutor",
+                prompt=full_prompt,
+                images=images,
+            )
+
+            # Parse LLM response
+            parsed = self._parse_json_response(result)
+            if parsed:
+                _normalize_keys(parsed)
+            if parsed and "hint" in parsed:
+                return success_response({
+                    "hint": parsed["hint"],
+                    "concept_keywords": parsed.get("concept_keywords", []),
+                    "difficulty_hint": parsed.get("difficulty_hint", "medium"),
+                    "model_used": result.get("model", "unknown"),
+                })
+
+            # Fallback: use raw response
+            logger.warning("Failed to parse generate_thinking_hint response, using raw text")
+            return success_response({
+                "hint": result.get("response", ""),
+                "concept_keywords": [],
+                "difficulty_hint": "medium",
+                "model_used": result.get("model", "unknown"),
+            })
+        except Exception as e:
+            return error_response("LLM_FAILURE", str(e))
+
+    async def _extract_visual_structure(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Extract structured information from question images (Phase 2).
+
+        Uses P012 (visual_extraction) prompt with vision model.
+        Supports geometry diagrams, circuit diagrams, chemistry setups.
+        Output follows PRD §5.3 structured format.
+
+        Input: {"images": List[str], "question_text": Optional[str]}
+        Output: {"question_text": str, "diagram_elements": List[dict], "relationships": List[dict], "subject": str, "knowledge_points": List[str], "model_used": str}
+        """
+        images = payload.get("images")
+        question_text = payload.get("question_text", "")
+
+        if not images or len(images) == 0:
+            return error_response("VALIDATION_ERROR", "images is required and must not be empty")
+
+        try:
+            system_prompt = get_system_prompt("visual_extraction")
+            prompt_text = question_text or "Analyze the question in this image and extract all structured information."
+            full_prompt = f"{system_prompt}\n\nExisting text context: {prompt_text}"
+
+            result = await llm_gateway.generate(
+                mode="vision",
+                prompt=full_prompt,
+                images=images,
+            )
+
+            # Parse LLM response
+            parsed = self._parse_json_response(result)
+            if parsed:
+                _normalize_keys(parsed)
+            if parsed and "question_text" in parsed:
+                return success_response({
+                    "question_text": parsed.get("question_text", ""),
+                    "diagram_elements": parsed.get("diagram_elements", []),
+                    "relationships": parsed.get("relationships", []),
+                    "subject": parsed.get("subject", "mathematics"),
+                    "knowledge_points": parsed.get("knowledge_points", []),
+                    "model_used": result.get("model", "unknown"),
+                })
+
+            # Fallback
+            logger.warning("Failed to parse extract_visual_structure response, using fallback")
+            return success_response({
+                "question_text": result.get("response", ""),
+                "diagram_elements": [],
+                "relationships": [],
+                "subject": "mathematics",
+                "knowledge_points": [],
+                "model_used": result.get("model", "unknown"),
+            })
+        except Exception as e:
+            return error_response("LLM_FAILURE", str(e))
+
+    async def _generate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Generic LLM generation — passes mode + prompt through the Gateway router.
+
+        Architectural fix (2026-07-14): Provides an MCP-compliant path for
+        pipeline code that needs raw LLM generation (e.g. multi-stage
+        explanation validation).  Domain-specific logic should prefer
+        the typed tools (solve_question, generate_explanation, etc.).
+
+        Input: {"mode": str, "prompt": str, "images"?: List[str]}
+        Output: {"response": str, "model": str, "provider": str, "usage": dict}
+        """
+        mode = payload.get("mode", "fast")
+        prompt = payload.get("prompt", "")
+        images = payload.get("images")
+        if not prompt:
+            return error_response("VALIDATION_ERROR", "prompt is required")
+
+        try:
+            result = await llm_gateway.generate(mode=mode, prompt=prompt, images=images)
+            if result.get("error"):
+                return error_response("LLM_FAILURE", result.get("error"))
+            return success_response(result)
+        except Exception as e:
+            return error_response("LLM_FAILURE", str(e))

@@ -1,0 +1,22 @@
+name: exam_generator
+version: "1.0"
+description: Generate a mock exam for a subject
+provider: deepseek
+
+system_prompt: |
+  You are an educational exam generator. Create a mock exam for the given subject.
+  Return ONLY valid JSON in the format: {"success": true, "data": {"exam_title": "...", "questions": [...]}}.
+  Include a mix of difficulties and question types.
+
+input_schema:
+  subject: string
+  difficulty: integer
+
+output_schema:
+  success: boolean
+  data:
+    exam_title: string
+    questions: list
+
+output_example: |
+  {"success": true, "data": {"exam_title": "Math Midterm", "questions": [{"question_text": "...", "difficulty": 3}]}}

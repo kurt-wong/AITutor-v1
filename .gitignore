@@ -1,0 +1,106 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables (contains API keys)
+.env
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== Python tooling =====
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.mypy_cache/
+*.pyc
+
+# ===== Logs =====
+logs/
+*.log
+
+# ===== Node / React =====
+node_modules/
+.pnp/
+.pnp.js
+coverage/
+.next/
+out/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Docker =====
+# (keep docker-compose.yml and Dockerfile)
+
+# ===== Test artifacts =====
+test-results/
+playwright-report/
+*.trx
+
+# ===== Claude Code local =====
+.claude/settings.local.json
+
+# ===== Env files =====
+.env.*
+!.env.example
+!.env.production.example
+
+# ===== Backend debug/temp scripts =====
+backend/_check*.py
+backend/_monitor*.py
+backend/_test*.py
+backend/_verify*.py
+backend/poc_*.py
+backend/test_full_integration.py
+backend/test_t*.py
+
+# ===== Test data / PDFs =====
+backend/*.pdf
+backend/*.png
+backend/*.jpg
+backend/test_data/
+test_data/
+backend/app/scripts/phase_c_results/
+
+# ===== Scripts (not production code) =====
+scripts/
+backend/scripts/*.json
+backend/scripts/*.txt
+backend/scripts/*.sh
+
+# ===== E2E / debug logs =====
+*.jsonl
+e2e_test_log_*.json
+upload_*.txt
+
+# ===== Archive tests =====
+backend/tests_archive/
+
+# ===== Coverage =====
+.coverage
+.coverage.*
+htmlcov/
+
+# ===== Misc =====
+*.tmp
+*.temp
+tmp/
+temp/

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案 C: 纯 Tailwind 重写</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Inter','ui-sans-serif','system-ui','sans-serif'],
+        display: ['Space Grotesk','sans-serif'],
+        mono: ['Fira Code','JetBrains Mono','monospace'],
+      },
+      colors: {
+        brand: { 50:'#f0fdf4',100:'#dcfce7',200:'#bbf7d0',400:'#4ade80',500:'#22c55e',600:'#16a34a',700:'#15803d' },
+        surface: { 50:'#f8fafc',100:'#f1f5f9',200:'#e2e8f0',400:'#94a3b8',500:'#64748b',700:'#334155',800:'#1e293b',900:'#0f172a' },
+      },
+      animation: {
+        'float-in': 'floatIn 0.4s ease-out',
+        'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
+        'slide-up': 'slideUp 0.3s ease-out',
+      },
+      keyframes: {
+        floatIn: { '0%':{opacity:'0',transform:'translateY(12px)'}, '100%':{opacity:'1',transform:'translateY(0)'} },
+        pulseSoft: { '0%,100%':{opacity:'1'}, '50%':{opacity:'0.6'} },
+        slideUp: { '0%':{opacity:'0',transform:'translateY(20px)'}, '100%':{opacity:'1',transform:'translateY(0)'} },
+      }
+    }
+  }
+}
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=Fira+Code:wght@400;600;700&display=swap');
+::-webkit-scrollbar{width:6px} ::-webkit-scrollbar-track{background:transparent} ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
+</style>
+</head>
+<body class="bg-surface-50 font-sans text-surface-800 antialiased">
+
+<!-- ═══ 方案 C — 纯 Tailwind 重写 (对标 V2 风格) ═══
+      完全移除 Ant Design, 手写所有组件
+      lucide-react 图标 + motion 动画
+      工作量: 7-10 天 ═══ -->
+
+<div class="flex flex-col h-screen overflow-hidden">
+
+  <header class="flex items-center justify-between h-14 px-6 bg-white border-b border-surface-200 shrink-0 z-20">
+    <div class="flex items-center gap-2.5">
+      <div class="w-8 h-8 bg-gradient-to-br from-brand-400 to-brand-600 rounded-lg flex items-center justify-center text-white font-bold text-sm shadow-sm shadow-brand-200">AI</div>
+      <span class="font-display text-lg font-bold text-surface-900 tracking-tight">AI Tutor</span>
+      <span class="text-[10px] font-mono font-bold bg-brand-50 text-brand-600 px-2 py-0.5 rounded border border-brand-100">方案 C</span>
+    </div>
+    <div class="flex gap-1 bg-surface-100 rounded-lg p-0.5">
+      <button class="px-4 py-1.5 rounded-md text-[13px] font-semibold bg-white text-surface-900 shadow-sm transition-all duration-200">🎓 学生端</button>
+      <button class="px-4 py-1.5 rounded-md text-[13px] font-medium text-surface-500 hover:text-surface-700 transition-all duration-200">⚙️ 管理端</button>
+    </div>
+    <div class="flex items-center gap-3">
+      <span class="relative text-surface-400 text-sm cursor-pointer">🔔<span class="absolute -top-0.5 -right-0.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></span></span>
+      <span class="text-[13px] text-surface-500">张同学</span>
+      <div class="w-8 h-8 rounded-full bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center text-white text-[13px] font-semibold ring-2 ring-brand-100">张</div>
+    </div>
+  </header>
+
+  <div class="flex flex-1 overflow-hidden">
+    <nav class="w-[230px] bg-surface-900 flex flex-col py-4 px-3 overflow-y-auto shrink-0 gap-0.5">
+      <div class="px-3 pt-2 pb-4">
+        <div class="flex items-center gap-2">
+          <div class="w-7 h-7 rounded-md bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center text-white text-xs font-bold">AI</div>
+          <div><div class="text-white text-[13px] font-semibold leading-tight font-display">AI Tutor</div><div class="text-[9px] text-surface-500 font-mono leading-tight">Personal Edition</div></div>
+        </div>
+      </div>
+      <div class="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 px-2.5 pt-2 pb-1.5">学习空间</div>
+      <a class="group flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all duration-150 cursor-pointer bg-brand-900/30 text-brand-400"><span class="text-base w-5 text-center">📝</span><span>智能提问</span><span class="ml-auto w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse-soft"></span></a>
+      <a class="group flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all duration-150 cursor-pointer text-surface-400 hover:bg-surface-800 hover:text-surface-200"><span class="text-base w-5 text-center">📊</span><span>错题本</span><span class="ml-auto text-[10px] font-mono text-surface-500 group-hover:text-surface-400">89</span></a>
+      <div class="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 px-2.5 pt-5 pb-1.5">知识管理</div>
+      <a class="group flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all duration-150 cursor-pointer text-surface-400 hover:bg-surface-800 hover:text-surface-200"><span class="text-base w-5 text-center">📚</span><span>题库浏览</span></a>
+      <a class="group flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all duration-150 cursor-pointer text-surface-400 hover:bg-surface-800 hover:text-surface-200"><span class="text-base w-5 text-center">🗂️</span><span>文档管理</span></a>
+      <div class="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 px-2.5 pt-5 pb-1.5">数据分析</div>
+      <a class="group flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all duration-150 cursor-pointer text-surface-400 hover:bg-surface-800 hover:text-surface-200"><span class="text-base w-5 text-center">📈</span><span>使用统计</span></a>
+      <div class="mt-auto pt-6">
+        <div class="mx-2.5 mb-3 p-3 rounded-xl bg-surface-800/50 border border-surface-700/30">
+          <div class="text-[10px] font-mono text-surface-500 mb-1.5 uppercase tracking-wider">模型状态</div>
+          <div class="flex items-center gap-2 text-[12px]"><span class="w-2 h-2 rounded-full bg-brand-400 animate-pulse-soft"></span><span class="text-surface-300">Qwen3.5 9B</span></div>
+          <div class="text-[10px] text-surface-500 mt-1 font-mono">VRAM: 5.2/8.0 GB</div>
+        </div>
+        <div class="text-[10px] font-mono text-surface-500 text-center">v2.0 · 本地部署</div>
+      </div>
+    </nav>
+
+    <main class="flex-1 overflow-y-auto py-7 px-8 flex flex-col gap-5 animate-slide-up">
+      <div class="flex items-center justify-between">
+        <div>
+          <h1 class="font-display text-[26px] font-bold text-surface-900 tracking-tight">智能提问</h1>
+          <p class="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-400 mt-1">AI-Powered Question Solver</p>
+        </div>
+        <span class="flex items-center gap-2 text-[13px] text-surface-500 bg-surface-100 px-3 py-1.5 rounded-lg"><span class="w-2 h-2 rounded-full bg-brand-400"></span>服务正常</span>
+      </div>
+
+      <div class="grid grid-cols-3 gap-4">
+        <div class="group bg-white border border-surface-200 rounded-2xl p-5 flex items-center gap-4 hover:shadow-lg hover:shadow-surface-200/50 hover:-translate-y-0.5 transition-all duration-300 cursor-default relative overflow-hidden">
+          <div class="absolute top-0 right-0 w-20 h-20 bg-brand-50 rounded-bl-[80px] -mr-4 -mt-4 opacity-60 group-hover:opacity-100 transition-opacity"></div>
+          <div class="w-12 h-12 rounded-xl bg-brand-50 flex items-center justify-center text-2xl flex-shrink-0 relative z-10">📝</div>
+          <div class="relative z-10"><div class="font-display text-[32px] font-bold text-surface-900 leading-none">1,523</div><div class="text-[13px] text-surface-500 mt-1 font-medium">总题目数</div></div>
+        </div>
+        <div class="group bg-white border border-surface-200 rounded-2xl p-5 flex items-center gap-4 hover:shadow-lg hover:shadow-amber-100/50 hover:-translate-y-0.5 transition-all duration-300 cursor-default relative overflow-hidden">
+          <div class="absolute top-0 right-0 w-20 h-20 bg-amber-50 rounded-bl-[80px] -mr-4 -mt-4 opacity-60 group-hover:opacity-100 transition-opacity"></div>
+          <div class="w-12 h-12 rounded-xl bg-amber-50 flex items-center justify-center text-2xl flex-shrink-0 relative z-10">⚠️</div>
+          <div class="relative z-10"><div class="font-display text-[32px] font-bold text-surface-900 leading-none">89</div><div class="text-[13px] text-surface-500 mt-1 font-medium">错题待复习</div></div>
+        </div>
+        <div class="group bg-white border border-surface-200 rounded-2xl p-5 flex items-center gap-4 hover:shadow-lg hover:shadow-blue-100/50 hover:-translate-y-0.5 transition-all duration-300 cursor-default relative overflow-hidden">
+          <div class="absolute top-0 right-0 w-20 h-20 bg-blue-50 rounded-bl-[80px] -mr-4 -mt-4 opacity-60 group-hover:opacity-100 transition-opacity"></div>
+          <div class="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center text-2xl flex-shrink-0 relative z-10">🔥</div>
+          <div class="relative z-10"><div class="font-display text-[32px] font-bold text-surface-900 leading-none">42</div><div class="text-[13px] text-surface-500 mt-1 font-medium">今日练习</div></div>
+        </div>
+      </div>
+
+      <div class="bg-white border border-surface-200 rounded-2xl p-6 shadow-sm">
+        <div class="flex items-center gap-3 mb-4">
+          <span class="w-8 h-8 rounded-lg bg-brand-50 flex items-center justify-center text-lg">💬</span>
+          <h2 class="font-display text-base font-bold text-surface-900">提出你的问题</h2>
+          <span class="text-[10px] font-mono text-surface-400 bg-surface-100 px-2 py-0.5 rounded">支持 LaTeX 公式</span>
+        </div>
+        <div class="relative">
+          <textarea class="w-full min-h-[120px] p-4 border border-surface-200 rounded-xl text-sm resize-y outline-none transition-all duration-200 bg-surface-50 leading-relaxed placeholder:text-surface-400 focus:border-brand-400 focus:ring-[4px] focus:ring-brand-50 focus:bg-white" placeholder="输入数学题目，或拖拽题目图片到此处...
+
+例如：已知函数 f(x) = x² + 2x + 1，求 f(x) 在区间 [-3, 1] 上的最大值和最小值。"></textarea>
+          <div class="absolute bottom-3 right-3 text-[10px] font-mono text-surface-400">0/2000</div>
+        </div>
+        <div class="flex gap-3 mt-4 items-center flex-wrap">
+          <select class="py-2.5 pl-3.5 pr-9 border border-surface-200 rounded-xl text-sm bg-white cursor-pointer outline-none text-surface-700 font-medium transition-all duration-200 focus:border-brand-400 focus:ring-[4px] focus:ring-brand-50 appearance-none bg-no-repeat" style="background-image:url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%2394a3b8%27 stroke-width=%272.5%27%3E%3Cpath d=%27M6 9l6 6 6-6%27%3E%3C/path%3E%3C/svg%3E');background-position:right 12px center;">
+            <option>📐 数学</option><option>⚡ 物理</option><option>🧪 化学</option><option>🧬 生物</option><option>📖 语文</option><option>🌍 英语</option></select>
+          <button class="px-4 py-2.5 border-2 border-dashed border-surface-300 rounded-xl text-sm font-semibold text-surface-600 bg-surface-50 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-all duration-200 flex items-center gap-2">📎 上传图片</button>
+          <div class="flex-1"></div>
+          <button class="px-5 py-2.5 rounded-xl text-sm font-semibold text-surface-600 hover:bg-surface-100 transition-all duration-200 flex items-center gap-1.5">💡<span class="hidden sm:inline">给我提示</span></button>
+          <button class="px-6 py-2.5 rounded-xl text-sm font-bold text-white bg-brand-600 hover:bg-brand-700 hover:shadow-lg hover:shadow-brand-200 active:scale-[0.98] transition-all duration-200 flex items-center gap-2">🚀 提交问题</button>
+        </div>
+      </div>
+
+      <div class="bg-white border border-surface-200 rounded-2xl overflow-hidden shadow-sm">
+        <div class="flex justify-between items-center px-5 py-4 bg-surface-50/50 border-b border-surface-200">
+          <div class="flex items-center gap-3">
+            <span class="font-semibold text-sm text-surface-700">📋 最近提问</span>
+            <span class="text-[10px] font-mono text-surface-400 bg-surface-100 px-2 py-0.5 rounded">127条记录</span>
+          </div>
+          <div class="flex gap-2 items-center">
+            <div class="relative">
+              <input class="py-1.5 pl-3 pr-8 border border-surface-200 rounded-lg text-xs bg-white outline-none text-surface-600 w-40 transition-all duration-200 focus:border-brand-400 focus:w-52" placeholder="搜索题目..." />
+              <span class="absolute right-2.5 top-1/2 -translate-y-1/2 text-surface-400 text-xs">🔍</span>
+            </div>
+            <select class="py-1.5 pl-2.5 pr-7 border border-surface-200 rounded-lg text-xs bg-white cursor-pointer outline-none text-surface-600 appearance-none bg-no-repeat" style="background-image:url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2710%27 height=%2710%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%2394a3b8%27 stroke-width=%272%27%3E%3Cpath d=%27M6 9l6 6 6-6%27%3E%3C/path%3E%3C/svg%3E');background-position:right 8px center;">
+              <option>全部学科</option><option>数学</option><option>物理</option><option>化学</option></select>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full border-collapse">
+            <thead><tr>
+              <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.07em] text-surface-400 font-mono bg-surface-50 border-b-2 border-surface-200 w-12">#</th>
+              <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.07em] text-surface-400 font-mono bg-surface-50 border-b-2 border-surface-200">题目摘要</th>
+              <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.07em] text-surface-400 font-mono bg-surface-50 border-b-2 border-surface-200 w-20">学科</th>
+              <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.07em] text-surface-400 font-mono bg-surface-50 border-b-2 border-surface-200 w-28">难度</th>
+              <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.07em] text-surface-400 font-mono bg-surface-50 border-b-2 border-surface-200 w-24">时间</th>
+              <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.07em] text-surface-400 font-mono bg-surface-50 border-b-2 border-surface-200 w-24">状态</th>
+            </tr></thead>
+            <tbody>
+              <tr class="hover:bg-surface-50/70 transition-colors duration-150 group cursor-pointer"><td class="px-5 py-4 text-sm text-surface-400 font-mono">01</td><td class="px-5 py-4 text-sm text-surface-700 font-medium group-hover:text-surface-900 transition-colors">已知函数 f(x)=x²+2x+1，求在区间[-3,1]上的最值</td><td class="px-5 py-4"><span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-100">📐 数学</span></td><td class="px-5 py-4"><span class="text-amber-500 tracking-[2px] text-sm">★★★☆☆</span></td><td class="px-5 py-4 text-[13px] text-surface-400">10分钟前</td><td class="px-5 py-4"><span class="inline-flex items-center gap-1 text-[13px] font-semibold text-brand-600"><span class="w-1.5 h-1.5 rounded-full bg-brand-400"></span>已解答</span></td></tr>
+              <tr class="hover:bg-surface-50/70 transition-colors duration-150 group cursor-pointer"><td class="px-5 py-4 text-sm text-surface-400 font-mono">02</td><td class="px-5 py-4 text-sm text-surface-700 font-medium group-hover:text-surface-900 transition-colors">质量为m的物体在光滑斜面上下滑，求加速度</td><td class="px-5 py-4"><span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-100">⚡ 物理</span></td><td class="px-5 py-4"><span class="text-amber-500 tracking-[2px] text-sm">★★★★☆</span></td><td class="px-5 py-4 text-[13px] text-surface-400">25分钟前</td><td class="px-5 py-4"><span class="inline-flex items-center gap-1 text-[13px] font-semibold text-amber-600"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse-soft"></span>思考中</span></td></tr>
+              <tr class="hover:bg-surface-50/70 transition-colors duration-150 group cursor-pointer"><td class="px-5 py-4 text-sm text-surface-400 font-mono">03</td><td class="px-5 py-4 text-sm text-surface-700 font-medium group-hover:text-surface-900 transition-colors">配平化学方程式：Fe+H₂O→Fe₃O₄+H₂</td><td class="px-5 py-4"><span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-brand-50 text-brand-700 border border-brand-100">🧪 化学</span></td><td class="px-5 py-4"><span class="text-amber-500 tracking-[2px] text-sm">★★☆☆☆</span></td><td class="px-5 py-4 text-[13px] text-surface-400">1小时前</td><td class="px-5 py-4"><span class="inline-flex items-center gap-1 text-[13px] font-semibold text-brand-600"><span class="w-1.5 h-1.5 rounded-full bg-brand-400"></span>已解答</span></td></tr>
+              <tr class="hover:bg-surface-50/70 transition-colors duration-150 group cursor-pointer"><td class="px-5 py-4 text-sm text-surface-400 font-mono">04</td><td class="px-5 py-4 text-sm text-surface-700 font-medium group-hover:text-surface-900 transition-colors">求 sin(x)+cos(x)的最大值及此时x的取值集合</td><td class="px-5 py-4"><span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-100">📐 数学</span></td><td class="px-5 py-4"><span class="text-amber-500 tracking-[2px] text-sm">★★★☆☆</span></td><td class="px-5 py-4 text-[13px] text-surface-400">2小时前</td><td class="px-5 py-4"><span class="inline-flex items-center gap-1 text-[13px] font-semibold text-brand-600"><span class="w-1.5 h-1.5 rounded-full bg-brand-400"></span>已解答</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="flex justify-between items-center px-5 py-3.5 bg-surface-50/50 border-t border-surface-200">
+          <span class="text-[13px] text-surface-500 font-medium">显示 1-4 条，共 <strong class="text-surface-700">127</strong> 条</span>
+          <div class="flex gap-1.5">
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-surface-200 bg-white flex items-center justify-center text-[13px] font-medium text-surface-500 hover:border-brand-400 hover:text-brand-600 transition-all cursor-pointer">←</button>
+            <button class="min-w-[34px] h-[34px] rounded-lg bg-brand-600 text-white flex items-center justify-center text-[13px] font-bold shadow-sm shadow-brand-200 cursor-default">1</button>
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-surface-200 bg-white flex items-center justify-center text-[13px] font-medium text-surface-700 hover:border-brand-400 hover:text-brand-600 transition-all cursor-pointer">2</button>
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-surface-200 bg-white flex items-center justify-center text-[13px] font-medium text-surface-700 hover:border-brand-400 hover:text-brand-600 transition-all cursor-pointer">3</button>
+            <span class="min-w-[34px] h-[34px] flex items-center justify-center text-[13px] text-surface-400">...</span>
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-surface-200 bg-white flex items-center justify-center text-[13px] font-medium text-surface-700 hover:border-brand-400 hover:text-brand-600 transition-all cursor-pointer">12</button>
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-surface-200 bg-white flex items-center justify-center text-[13px] font-medium text-surface-700 hover:border-brand-400 hover:text-brand-600 transition-all cursor-pointer">→</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="fixed bottom-4 right-4 bg-surface-900 text-surface-200 px-3.5 py-2 rounded-xl text-[11px] font-mono opacity-85 shadow-lg flex items-center gap-2">
+  <span class="w-2 h-2 rounded-full bg-brand-400"></span>方案 C — 纯 Tailwind 重写 (对标 V2 风格) | 工作量 7-10天
+</div>
+</body>
+</html>

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案 B: Tailwind + Ant Design 双轨 (推荐)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        display: ['Space Grotesk', 'sans-serif'],
+        mono: ['Fira Code', 'JetBrains Mono', 'monospace'],
+      },
+      colors: {
+        primary: { 50:'#f0fdf4',100:'#dcfce7',200:'#bbf7d0',500:'#22c55e',600:'#16a34a',700:'#15803d' },
+        accent: { 50:'#eff6ff',100:'#dbeafe',500:'#3b82f6',600:'#2563eb' },
+        sidebar: { bg:'#0f172a',hover:'#1e293b',text:'#cbd5e1' },
+      }
+    }
+  }
+}
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&family=Fira+Code:wght@400;600&display=swap');
+</style>
+</head>
+<body class="bg-slate-50 font-sans text-slate-800 antialiased">
+
+<!-- ═══ 方案 B — Tailwind + Ant Design 双轨 ═══
+      Tailwind: 布局/间距/色彩/排版
+      Ant Design: Table/Tree/Form/Upload 复杂组件
+      工作量: 3-5 天 (推荐) ═══ -->
+
+<div class="flex flex-col h-screen overflow-hidden">
+
+  <header class="flex items-center justify-between h-14 px-6 bg-white border-b border-slate-200 z-10 shrink-0">
+    <div class="flex items-center gap-2.5">
+      <div class="w-8 h-8 bg-gradient-to-br from-emerald-400 to-green-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">AI</div>
+      <span class="font-display text-lg font-bold text-slate-900 tracking-tight">AI Tutor</span>
+      <span class="text-[10px] font-mono font-bold bg-emerald-50 text-green-600 px-2 py-0.5 rounded">方案 B</span>
+    </div>
+    <div class="flex gap-1 bg-slate-100 rounded-lg p-0.5">
+      <button class="px-4 py-1.5 rounded-md text-[13px] font-medium bg-white text-slate-900 shadow-sm transition-all">🎓 学生端</button>
+      <button class="px-4 py-1.5 rounded-md text-[13px] font-medium text-slate-500 hover:text-slate-700 transition-all">⚙️ 管理端</button>
+    </div>
+    <div class="flex items-center gap-2.5 text-[13px] text-slate-500">
+      <span>张同学</span>
+      <div class="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-400 to-green-600 flex items-center justify-center text-white text-[13px] font-semibold">张</div>
+    </div>
+  </header>
+
+  <div class="flex flex-1 overflow-hidden">
+    <nav class="w-[220px] bg-sidebar-bg flex flex-col gap-0.5 py-4 px-3 overflow-y-auto shrink-0">
+      <div class="font-mono text-[10px] uppercase tracking-[0.12em] text-slate-500 font-bold px-2.5 pt-3 pb-1.5">学习空间</div>
+      <a class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all cursor-pointer bg-sidebar-hover text-emerald-400 border-l-[3px] border-emerald-400">📝 智能提问</a>
+      <a class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all cursor-pointer text-sidebar-text hover:bg-sidebar-hover hover:text-slate-200">📊 错题本</a>
+      <div class="font-mono text-[10px] uppercase tracking-[0.12em] text-slate-500 font-bold px-2.5 pt-4 pb-1.5">知识管理</div>
+      <a class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all cursor-pointer text-sidebar-text hover:bg-sidebar-hover hover:text-slate-200">📚 题库浏览</a>
+      <a class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all cursor-pointer text-sidebar-text hover:bg-sidebar-hover hover:text-slate-200">🗂️ 文档管理</a>
+      <div class="font-mono text-[10px] uppercase tracking-[0.12em] text-slate-500 font-bold px-2.5 pt-4 pb-1.5">数据分析</div>
+      <a class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-[14px] font-medium transition-all cursor-pointer text-sidebar-text hover:bg-sidebar-hover hover:text-slate-200">📈 使用统计</a>
+      <div class="mt-auto pt-6 px-2.5">
+        <div class="border-t border-slate-700/50 pt-4 text-[10px] font-mono text-slate-500 text-center">v2.0 · 本地部署</div>
+      </div>
+    </nav>
+
+    <main class="flex-1 overflow-y-auto py-7 px-8 flex flex-col gap-5">
+      <div>
+        <h1 class="font-display text-2xl font-bold text-slate-900 tracking-tight">智能提问</h1>
+        <p class="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400 mt-0.5">学习概览</p>
+      </div>
+
+      <div class="grid grid-cols-3 gap-4">
+        <div class="bg-white border border-slate-200 rounded-2xl p-5 flex items-center gap-4 hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 cursor-default">
+          <div class="w-12 h-12 rounded-xl bg-emerald-50 flex items-center justify-center text-2xl flex-shrink-0">📝</div>
+          <div><div class="font-display text-3xl font-bold text-slate-900 leading-none">1,523</div><div class="text-[13px] text-slate-500 mt-1">总题目数</div></div>
+        </div>
+        <div class="bg-white border border-slate-200 rounded-2xl p-5 flex items-center gap-4 hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 cursor-default">
+          <div class="w-12 h-12 rounded-xl bg-amber-50 flex items-center justify-center text-2xl flex-shrink-0">⚠️</div>
+          <div><div class="font-display text-3xl font-bold text-slate-900 leading-none">89</div><div class="text-[13px] text-slate-500 mt-1">错题待复习</div></div>
+        </div>
+        <div class="bg-white border border-slate-200 rounded-2xl p-5 flex items-center gap-4 hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 cursor-default">
+          <div class="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center text-2xl flex-shrink-0">🔥</div>
+          <div><div class="font-display text-3xl font-bold text-slate-900 leading-none">42</div><div class="text-[13px] text-slate-500 mt-1">今日练习</div></div>
+        </div>
+      </div>
+
+      <div class="bg-white border border-slate-200 rounded-2xl p-6">
+        <h2 class="font-display text-base font-bold text-slate-900 mb-4">💬 提出你的问题</h2>
+        <textarea class="w-full min-h-[110px] p-3.5 border border-slate-200 rounded-xl text-sm resize-y outline-none transition-all bg-slate-50 leading-relaxed focus:border-emerald-500 focus:ring-[3px] focus:ring-emerald-50 focus:bg-white" placeholder="输入数学题目，或上传题目图片...
+
+例如：已知函数 f(x) = x² + 2x + 1，求 f(x) 在区间 [-3, 1] 上的最大值和最小值。"></textarea>
+        <div class="flex gap-3 mt-3.5 items-center">
+          <select class="py-2 pl-3 pr-8 border border-slate-200 rounded-lg text-sm bg-white cursor-pointer outline-none text-slate-700 focus:border-emerald-500 focus:ring-[3px] focus:ring-emerald-50 appearance-none bg-no-repeat" style="background-image: url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%2364748b%27 stroke-width=%272%27%3E%3Cpath d=%27M6 9l6 6 6-6%27%3E%3C/path%3E%3C/svg%3E'); background-position: right 10px center;">
+            <option>📐 数学</option><option>⚡ 物理</option><option>🧪 化学</option><option>🧬 生物</option></select>
+          <button class="px-4 py-2 border border-slate-200 rounded-lg text-sm font-semibold text-slate-700 bg-white hover:bg-slate-50 hover:border-slate-300 transition-all">📎 上传图片</button>
+          <div class="flex-1"></div>
+          <button class="px-4 py-2 rounded-lg text-sm font-semibold text-slate-500 hover:bg-slate-100 transition-all">💡 给我提示</button>
+          <button class="px-5 py-2 rounded-lg text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 hover:shadow-lg hover:shadow-emerald-200 transition-all">🚀 提交问题</button>
+        </div>
+      </div>
+
+      <div class="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+        <div class="flex justify-between items-center px-5 py-3.5 bg-slate-50 border-b border-slate-200">
+          <span class="font-semibold text-sm text-slate-700">📋 最近提问</span>
+          <select class="py-1.5 pl-2.5 pr-7 border border-slate-200 rounded-md text-xs bg-white cursor-pointer outline-none text-slate-600 appearance-none bg-no-repeat" style="background-image: url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2710%27 height=%2710%27 viewBox=%270 0 24 24%27 fill=%27none%27 stroke=%27%2364748b%27 stroke-width=%272%27%3E%3Cpath d=%27M6 9l6 6 6-6%27%3E%3C/path%3E%3C/svg%3E'); background-position: right 8px center;">
+            <option>全部学科</option><option>数学</option><option>物理</option><option>化学</option></select>
+        </div>
+        <table class="w-full border-collapse">
+          <thead><tr>
+            <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500 font-mono bg-slate-50 border-b-2 border-slate-200">#</th>
+            <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500 font-mono bg-slate-50 border-b-2 border-slate-200">题目摘要</th>
+            <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500 font-mono bg-slate-50 border-b-2 border-slate-200">学科</th>
+            <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500 font-mono bg-slate-50 border-b-2 border-slate-200">难度</th>
+            <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500 font-mono bg-slate-50 border-b-2 border-slate-200">时间</th>
+            <th class="text-left px-5 py-3.5 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500 font-mono bg-slate-50 border-b-2 border-slate-200">状态</th>
+          </tr></thead>
+          <tbody>
+            <tr class="hover:bg-slate-50 transition-colors"><td class="px-5 py-3.5 text-sm text-slate-400">1</td><td class="px-5 py-3.5 text-sm text-slate-700">已知函数 f(x)=x²+2x+1，求在区间[-3,1]上的最值</td><td class="px-5 py-3.5"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700">数学</span></td><td class="px-5 py-3.5"><span class="text-amber-500 tracking-[2px] text-[13px]">⭐⭐⭐</span></td><td class="px-5 py-3.5 text-[13px] text-slate-400">10分钟前</td><td class="px-5 py-3.5"><span class="text-[13px] font-semibold text-emerald-600">✓ 已解答</span></td></tr>
+            <tr class="hover:bg-slate-50 transition-colors"><td class="px-5 py-3.5 text-sm text-slate-400">2</td><td class="px-5 py-3.5 text-sm text-slate-700">质量为m的物体在光滑斜面上下滑，求加速度</td><td class="px-5 py-3.5"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700">物理</span></td><td class="px-5 py-3.5"><span class="text-amber-500 tracking-[2px] text-[13px]">⭐⭐⭐⭐</span></td><td class="px-5 py-3.5 text-[13px] text-slate-400">25分钟前</td><td class="px-5 py-3.5"><span class="text-[13px] font-semibold text-amber-600">◉ 思考中</span></td></tr>
+            <tr class="hover:bg-slate-50 transition-colors"><td class="px-5 py-3.5 text-sm text-slate-400">3</td><td class="px-5 py-3.5 text-sm text-slate-700">配平化学方程式：Fe + H₂O → Fe₃O₄ + H₂</td><td class="px-5 py-3.5"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-700">化学</span></td><td class="px-5 py-3.5"><span class="text-amber-500 tracking-[2px] text-[13px]">⭐⭐</span></td><td class="px-5 py-3.5 text-[13px] text-slate-400">1小时前</td><td class="px-5 py-3.5"><span class="text-[13px] font-semibold text-emerald-600">✓ 已解答</span></td></tr>
+            <tr class="hover:bg-slate-50 transition-colors"><td class="px-5 py-3.5 text-sm text-slate-400">4</td><td class="px-5 py-3.5 text-sm text-slate-700">求 sin(x)+cos(x)的最大值及此时x的取值集合</td><td class="px-5 py-3.5"><span class="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold bg-blue-50 text-blue-700">数学</span></td><td class="px-5 py-3.5"><span class="text-amber-500 tracking-[2px] text-[13px]">⭐⭐⭐</span></td><td class="px-5 py-3.5 text-[13px] text-slate-400">2小时前</td><td class="px-5 py-3.5"><span class="text-[13px] font-semibold text-emerald-600">✓ 已解答</span></td></tr>
+          </tbody>
+        </table>
+        <div class="flex justify-between items-center px-5 py-3.5 bg-slate-50 border-t border-slate-200 text-[13px] text-slate-500">
+          <span>共 127 条</span>
+          <div class="flex gap-1.5">
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-slate-200 bg-white flex items-center justify-center text-[13px] font-medium text-slate-700 hover:border-emerald-500 hover:text-emerald-600 transition-all cursor-pointer">←</button>
+            <button class="min-w-[34px] h-[34px] rounded-lg bg-emerald-600 text-white flex items-center justify-center text-[13px] font-medium cursor-default">1</button>
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-slate-200 bg-white flex items-center justify-center text-[13px] font-medium text-slate-700 hover:border-emerald-500 hover:text-emerald-600 transition-all cursor-pointer">2</button>
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-slate-200 bg-white flex items-center justify-center text-[13px] font-medium text-slate-700 hover:border-emerald-500 hover:text-emerald-600 transition-all cursor-pointer">3</button>
+            <button class="min-w-[34px] h-[34px] rounded-lg border border-slate-200 bg-white flex items-center justify-center text-[13px] font-medium text-slate-700 hover:border-emerald-500 hover:text-emerald-600 transition-all cursor-pointer">→</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="fixed bottom-4 right-4 bg-slate-900 text-slate-200 px-3.5 py-2 rounded-lg text-[11px] font-mono opacity-85">
+  方案 B — Tailwind + Ant Design 双轨 (推荐) | 工作量 3-5天
+</div>
+</body>
+</html>

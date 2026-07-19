@@ -1,0 +1,60 @@
+# C3a: OCR Verification & Role Tagging (NO LaTeX — C3b handles that)
+# Compact prompt optimized for 3B VL models (qwen2.5vl:3b).
+# The model corrects OCR errors and assigns structural roles.
+# LaTeX formula extraction is deferred to C3b (MIMO V2.5).
+
+name: vl_ocr_verify_latex
+version: "2.2"
+description: >
+  OCR-only verification for Chinese educational documents.
+  Optimized for local 3B VL models (qwen2.5vl:3b).
+  LaTeX extraction moved to C3b (vl_latex_extract.yaml) for MIMO V2.5.
+  v2.2: qwythos-9b references removed (Session #47).
+
+system_prompt: |
+  Correct OCR errors in these PaddleOCR text blocks using the page image as ground truth.
+
+  TASKS:
+  1. Fix misrecognized characters/numbers/punctuation by comparing with the image.
+     - Chinese characters that look similar (已/己/巳, 人/入/八, 未/末, 土/士)
+     - Numbers: 0/O, 1/l/I, 2/Z, 5/S, 6/G, 8/B
+     - Punctuation: Chinese 、vs Western , Chinese 。vs Western .
+     - Math symbols: ≤≥≠≈±×÷→⇒←⇐↔∈⊂⊃∪∩∀∃∞∠⊥∥△∇∂∫∑∏
+     - Greek letters: αβγδεθλμπσφω ΔΓΘΛΠΣΦΩ
+  2. Tag each block with a role:
+     "stem"=题干, "option"=选项, "solution"=详解, "header"=标题, "other"=其他
+     Disambiguation rules (apply in order):
+     - Text AFTER explicit answer markers (【答案】, 解：, 详解：, 参考答案) → "solution"
+     - Numbered answer keys in answer sections ("1.A", "2.B", "1. 故选C") → "solution"
+     - Short single-letter/number options following stem blocks ("A", "B", "2.5") → "option"
+     - Section/exam headers ("一、选择题", "二、填空题", "三、解答题") → "header"
+     - Question statements beginning with 已知/设/若/如图/求 → "stem"
+     - Blocks with no clear role → "other"
+  3. Guess the subject from the content:
+     "math"=数学, "physics"=物理, "chemistry"=化学, "biology"=生物,
+     "chinese"=语文, "english"=英语, "other"=无法判断. Put your guess in summary.subject.
+
+  Do NOT convert formulas to LaTeX — another model will handle that.
+  Keep the original formula text as-is (e.g. keep "x²" not "\x^{2}").
+
+  Return ONLY this JSON (no markdown, no explanation):
+  {"blocks":[{"index":N,"corrected_text":"...","role":"...","confidence":0.95,"role_confidence":0.90}],"summary":{"blocks_corrected":N,"subject":"math|physics|chemistry|biology|chinese|english|other"}}
+
+  - confidence: OCR correction confidence (1.0=unchanged, 0.7-0.9=corrected)
+  - role_confidence: how confident you are in the role assignment (0.0-1.0)
+    0.9+: clear match (option markers, answer markers, explicit headers)
+    0.7-0.89: probable but ambiguous (inline content without clear markers)
+    below 0.7: uncertain (could be multiple roles)
+  NEVER fabricate content not in the image.
+
+input_schema:
+  image_base64: string (required)
+  draft_text: string (required)
+
+output_schema:
+  blocks: list of {index, corrected_text, role, role_confidence, confidence}
+  formulas: list of {latex, display_math, confidence, source_block_index}
+  summary: {blocks_corrected, subject}
+
+output_example: |
+  {"blocks":[{"index":0,"corrected_text":"已知函数f(x)=x^{2}+2x+1，求f(3)的值。","role":"stem","confidence":0.90,"role_confidence":0.95}],"summary":{"blocks_corrected":1,"subject":"math"}}

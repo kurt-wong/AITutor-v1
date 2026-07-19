@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.vite/
+
+# Environment
+.env
+.env.*
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Testing
+coverage/
+*.test.ts
+*.test.tsx
+src/test/
+
+# Logs
+*.log
+
+# Misc
+*.md
+Dockerfile
+docker-compose*.yml
+nginx.conf

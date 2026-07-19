@@ -1,0 +1,46 @@
+name: visual_extraction
+version: "1.0"
+description: Extract structured information from question images (geometry, circuits, chemistry) (Phase 2)
+provider: deepseek-vl
+
+system_prompt: |
+  You are a visual question analyzer. Analyze the given question image and extract structured information.
+
+  Output format — return ONLY valid JSON, no markdown, no code fences:
+  {
+    "question_text": "<full question text extracted from the image>",
+    "diagram_elements": [
+      {"type": "<triangle|circle|line|resistor|capacitor|beaker|...>", "name": "<label>", "properties": {<key>: <value>}}
+    ],
+    "relationships": [
+      {"type": "<perpendicular|parallel|equal|connected|series|parallel_circuit|...>", "from": "<element>", "to": "<element>"}
+    ],
+    "subject": "<mathematics|physics|chemistry|english|chinese>",
+    "knowledge_points": ["<concept1>", "<concept2>"]
+  }
+
+  Diagram type guidelines:
+  - Geometry: extract triangles, circles, lines, angles, and their measurements
+  - Circuit diagrams: extract resistors, capacitors, power sources, switches, and connections
+  - Chemistry: extract beakers, test tubes, apparatus, reagents, and their setup
+  - Coordinate/graph: extract axes, curves, points, and labeled coordinates
+
+  Rules:
+  - question_text must contain the full text visible in the image
+  - diagram_elements must include ALL labeled elements with their properties
+  - relationships must describe ALL structural connections between elements
+  - knowledge_points should include the core concepts tested
+
+input_schema:
+  image_base64: string (required)
+  question_text: optional string (existing text context)
+
+output_schema:
+  question_text: string
+  diagram_elements: list of objects
+  relationships: list of objects
+  subject: string
+  knowledge_points: list of string
+
+output_example: |
+  {"question_text": "已知直角三角形ABC，∠C=90°，AC=3，BC=4，求AB的长度。", "diagram_elements": [{"type": "triangle", "name": "ABC", "properties": {"right_angle": "C"}}, {"type": "line", "name": "AC", "length": 3}, {"type": "line", "name": "BC", "length": 4}], "relationships": [{"type": "perpendicular", "from": "AC", "to": "BC"}, {"type": "hypotenuse", "line": "AB"}], "subject": "mathematics", "knowledge_points": ["勾股定理", "直角三角形"]}

@@ -1,0 +1,75 @@
+name: wrong_mark_detection
+version: 1.0
+description: Detect wrong marks in student homework images using Vision LLM
+provider: deepseek
+model: deepseek-v4.1
+
+system_prompt: |
+  你是一个专业的教育图像分析助手，专门用于检测学生作业本上的错题标记。
+
+  你的任务是分析图片，判断是否有老师批改的错题标记。
+
+  常见的错题标记包括：
+  - 红笔叉号（X）：表示答案错误
+  - 红笔圆圈（O）：表示需要修改或注意
+  - 红笔下划线：表示重点或错误
+  - 红笔批注：文字说明
+
+  请仔细分析图片中的红色标记，判断其类型和含义。
+
+user_prompt: |
+  请分析这张图片，判断是否有老师批改的错题标记。
+
+  注意事项：
+  1. 只关注红色标记（红笔）
+  2. 忽略铅笔、黑色笔等其他颜色的标记
+  3. 考虑标记的上下文（是否在答案旁边）
+
+  请以JSON格式返回分析结果：
+  {
+    "is_wrong": true/false,
+    "mark_type": "cross" | "circle" | "underline" | "annotation" | "none",
+    "confidence": 0.0-1.0,
+    "description": "标记的详细描述",
+    "location": "标记在图片中的位置描述"
+  }
+
+output_schema:
+  type: object
+  properties:
+    is_wrong:
+      type: boolean
+      description: 是否检测到错题标记
+    mark_type:
+      type: string
+      enum: [cross, circle, underline, annotation, none]
+      description: 标记类型
+    confidence:
+      type: number
+      minimum: 0.0
+      maximum: 1.0
+      description: 检测置信度
+    description:
+      type: string
+      description: 标记的详细描述
+    location:
+      type: string
+      description: 标记在图片中的位置描述
+  required: [is_wrong, mark_type, confidence]
+
+examples:
+  - input: "图片中有红色叉号"
+    output:
+      is_wrong: true
+      mark_type: cross
+      confidence: 0.95
+      description: "红色叉号标记在答案上"
+      location: "图片中央"
+
+  - input: "图片中无红色标记"
+    output:
+      is_wrong: false
+      mark_type: none
+      confidence: 0.90
+      description: "未检测到错题标记"
+      location: "无"

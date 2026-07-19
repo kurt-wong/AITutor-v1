@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-tutor-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+norecursedirs = ["tests_archive"]
+python_files = "test_*.py"
+python_functions = "test_*"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "e2e: marks end-to-end tests requiring full stack",
+    "L1: parallel extraction — C1 PyMuPDF de-layouting (no external deps)",
+    "L2: parallel extraction — C2 PaddleOCR single-page (needs PaddleOCR)",
+    "L3: parallel extraction — C1→C2 integration (needs PaddleOCR)",
+    "L4: parallel extraction — full C1→C4 pipeline (needs VL model)",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    "app/db/*",
+    "alembic/*",
+    "tests/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 55
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]

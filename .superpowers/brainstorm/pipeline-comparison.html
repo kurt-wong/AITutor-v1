@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管线架构对比</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+  .subtitle { color: #94a3b8; margin-bottom: 2rem; font-size: 0.9rem; }
+  .pipelines { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .pipeline { background: #1e293b; border-radius: 12px; padding: 1.5rem; border: 1px solid #334155; }
+  .pipeline.proposed { border-color: #f59e0b; }
+  .pipeline h2 { font-size: 1.1rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+  .badge { font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 99px; font-weight: 600; }
+  .badge.current { background: #3b82f6; color: #fff; }
+  .badge.proposed { background: #f59e0b; color: #000; }
+  .stage { background: #0f172a; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; border-left: 3px solid #475569; font-size: 0.85rem; }
+  .stage.vl { border-left-color: #3b82f6; }
+  .stage.ocr { border-left-color: #10b981; }
+  .stage.struct { border-left-color: #8b5cf6; }
+  .stage.db { border-left-color: #f59e0b; }
+  .stage .name { font-weight: 600; }
+  .stage .detail { color: #94a3b8; font-size: 0.75rem; margin-top: 0.15rem; }
+  .arrow { text-align: center; color: #64748b; padding: 0.25rem 0; font-size: 0.8rem; }
+  .bugs { margin-top: 1.5rem; background: #1e293b; border-radius: 12px; padding: 1.5rem; border: 1px solid #334155; }
+  .bugs h3 { margin-bottom: 0.75rem; font-size: 0.95rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.8rem; }
+  th { text-align: left; color: #94a3b8; font-weight: 500; padding: 0.35rem 0.5rem; border-bottom: 1px solid #334155; }
+  td { padding: 0.4rem 0.5rem; border-bottom: 1px solid #1e293b; vertical-align: top; }
+  td.problem { color: #f87171; }
+  td.fix { color: #10b981; }
+</style>
+</head>
+<body>
+<h1>PDF 题目提取管线 — 架构对比</h1>
+<p class="subtitle">左：当前 Route A 主力管线 | 右：PaddleOCR-VL API 方案</p>
+
+<div class="pipelines">
+  <div class="pipeline">
+    <h2><span class="badge current">当前</span> Whole-PDF VL 管线 (6 Stage)</h2>
+
+    <div class="stage ocr">
+      <div class="name">C1-C4 并行提取</div>
+      <div class="detail">页面规格 + PaddleOCR文本 + VL公式 + VL图形检测</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="stage vl">
+      <div class="name">Whole-PDF VL 整页提取</div>
+      <div class="detail">MIMO V2.5 → 全部19页JPEG → JSON (64000 tokens)</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="stage struct">
+      <div class="name">QuestionStructurer 语义结构化</div>
+      <div class="detail">正则/Label Studio逻辑 → PageQuestion → StructuredQuestion</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="stage vl">
+      <div class="name">公式匹配 (async_document.py:674) ⚠️</div>
+      <div class="detail">按页面匹配 → 每道题得到全页所有公式 🔴</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="stage struct">
+      <div class="name">KnowledgeMapper → 入库</div>
+      <div class="detail">pgvector 知识点映射 → questions/solutions 表</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="stage db">
+      <div class="name">Explanation 3-Stage 生成</div>
+      <div class="detail">VibeThinker → MIMO验证 → DeepSeek审阅</div>
+    </div>
+  </div>
+
+  <div class="pipeline proposed">
+    <h2><span class="badge proposed">方案</span> PaddleOCR-VL API 管线 (2 Stage)</h2>
+
+    <div class="stage ocr">
+      <div class="name">① PaddleOCR-VL API 文档解析</div>
+      <div class="detail">POST /api/v2/ocr/jobs → 异步返回 20+ layout types</div>
+      <div class="detail">✅ display_formula / inline_formula 已在文档流中</div>
+      <div class="detail">✅ header/footer/seal 自动分类 → 天然去噪</div>
+      <div class="detail">✅ table→markdown、chart→识别、阅读顺序保证</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="stage vl">
+      <div class="name">② VL 语义审核 + 题目拆分</div>
+      <div class="detail">简化 prompt：OCR已输出结构化内容，VL只做"审阅"</div>
+      <div class="detail">任务从"全文提取"降级为"结构化审核 + 题目边界判定"</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="stage db">
+      <div class="name">入库 + Explanation（不变）</div>
+      <div class="detail">复用现有 KnowledgeMapper 和 Explanation 管线</div>
+    </div>
+  </div>
+</div>
+
+<div class="bugs">
+  <h3>🔍 已知问题 vs 预期修复</h3>
+  <table>
+    <tr><th>问题</th><th>当前根因</th><th>PaddleOCR-VL 如何修复</th></tr>
+    <tr>
+      <td class="problem">🔴 公式污染</td>
+      <td>async_document.py:674 按页面匹配<br>每道题获得整页所有公式</td>
+      <td class="fix">公式是 layout 流中的独立元素<br>bbox 精确定位，自然归属正确题目</td>
+    </tr>
+    <tr>
+      <td class="problem">🟡 噪声未过滤</td>
+      <td>VL 无法识别"（本题为对照题）"<br>等非题目内容</td>
+      <td class="fix">header/footer/seal 等 type<br>自动排除在内容区之外</td>
+    </tr>
+    <tr>
+      <td class="problem">🟡 公式占位符</td>
+      <td>VL prompt 要求 LaTeX<br>但模型能力有限 → [公式]</td>
+      <td class="fix">API 原生输出 LaTeX<br>display_formula 直接包含公式文本</td>
+    </tr>
+    <tr>
+      <td class="problem">🟡 题干截断</td>
+      <td>跨页合并逻辑不完善</td>
+      <td class="fix">阅读顺序(reading_order)保证<br>跨页连续性</td>
+    </tr>
+  </table>
+</div>
+</body>
+</html>

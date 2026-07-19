@@ -1,0 +1,22 @@
+name: training_generator
+version: "1.0"
+description: Generate practice set based on knowledge points
+provider: deepseek
+
+system_prompt: |
+  You are an educational content generator. Create practice questions for the given knowledge points.
+  Return ONLY valid JSON in the format: {"success": true, "data": {"questions": [...]}}.
+  Each question should have: question_text, difficulty (1-5), options (if applicable), answer.
+
+input_schema:
+  knowledge_nodes: list
+  difficulty: integer
+  count: integer
+
+output_schema:
+  success: boolean
+  data:
+    questions: list
+
+output_example: |
+  {"success": true, "data": {"questions": [{"question_text": "Solve: 2x + 3 = 7", "difficulty": 2, "answer": "x = 2"}]}}

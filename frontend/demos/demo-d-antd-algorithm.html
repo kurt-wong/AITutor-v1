@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方案 D: Ant Design Algorithm 主题</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&family=Fira+Code:wght@400;600&display=swap');
+
+/* ═══ 方案 D — Ant Design Algorithm 主题 ═══
+   ConfigProvider theme.algorithm + token
+   使用 Ant Design 5 内置算法快速切换风格
+   工作量: 0.5 天 (最快) ═══ */
+
+:root {
+  --ant-primary: #1677ff;
+  --ant-primary-hover: #4096ff;
+  --ant-primary-active: #0958d9;
+  --ant-success: #52c41a;
+  --ant-warning: #faad14;
+  --ant-error: #ff4d4f;
+  --ant-bg-layout: #f5f5f5;
+  --ant-bg-container: #ffffff;
+  --ant-border: #d9d9d9;
+  --ant-border-secondary: #f0f0f0;
+  --ant-sider-bg: #001529;
+  --ant-sider-item-selected: #1677ff;
+  --ant-sider-text: #ffffffa6;
+  --ant-font-family: 'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --ant-font-size: 14px;
+  --ant-font-size-lg: 16px;
+  --ant-font-size-sm: 12px;
+  --ant-radius: 6px;
+  --ant-radius-lg: 8px;
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--ant-font-family);font-size:var(--ant-font-size);background:var(--ant-bg-layout);color:rgba(0,0,0,0.88)}
+
+/* Layout */
+.ant-layout{display:flex;flex-direction:column;height:100vh}
+.ant-header{display:flex;align-items:center;justify-content:space-between;height:56px;padding:0 24px;background:var(--ant-bg-container);border-bottom:1px solid var(--ant-border-secondary);z-index:10;box-shadow:0 1px 4px rgba(0,0,0,0.04)}
+.ant-header-l{display:flex;align-items:center;gap:12px}
+.ant-logo{font-size:var(--ant-font-size-lg);font-weight:600;color:rgba(0,0,0,0.88);display:flex;align-items:center;gap:8px}
+.ant-logo-icon{width:32px;height:32px;background:var(--ant-primary);border-radius:var(--ant-radius);display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:700}
+.ant-header-r{display:flex;align-items:center;gap:16px;font-size:var(--ant-font-size);color:rgba(0,0,0,0.65)}
+
+.ant-body{display:flex;flex:1;overflow:hidden}
+
+/* Sider + Menu (dark) */
+.ant-sider{width:200px;background:var(--ant-sider-bg);overflow-y:auto;padding:12px 0}
+.ant-menu-group{font-size:var(--ant-font-size-sm);color:rgba(255,255,255,0.45);padding:16px 24px 6px;text-transform:uppercase;letter-spacing:0.06em;font-weight:600}
+.ant-menu-item{display:flex;align-items:center;gap:10px;padding:9px 24px;margin:0 8px;border-radius:var(--ant-radius-lg);cursor:pointer;transition:all 0.2s;font-size:var(--ant-font-size);color:var(--ant-sider-text);font-weight:400;border:none;background:none;width:calc(100% - 16px);text-align:left}
+.ant-menu-item:hover{color:#fff;background:rgba(255,255,255,0.06)}
+.ant-menu-item.active{color:#fff!important;background:var(--ant-sider-item-selected)!important;font-weight:500}
+.ant-menu-icon{font-size:16px;width:18px;text-align:center;flex-shrink:0}
+
+/* Content */
+.ant-content{flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:16px}
+.ant-page-title{font-size:20px;font-weight:600;color:rgba(0,0,0,0.88)}
+
+/* Statistic */
+.ant-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.ant-stat{background:var(--ant-bg-container);border:1px solid var(--ant-border-secondary);border-radius:var(--ant-radius-lg);padding:20px 24px;display:flex;align-items:center;gap:16px;transition:box-shadow 0.2s}
+.ant-stat:hover{box-shadow:0 3px 6px -4px rgba(0,0,0,0.12),0 6px 16px 0 rgba(0,0,0,0.08)}
+.ant-stat-icon{width:48px;height:48px;border-radius:var(--ant-radius);display:flex;align-items:center;justify-content:center;font-size:24px}
+.ant-stat-icon.blue{background:#e6f4ff;color:var(--ant-primary)}
+.ant-stat-icon.gold{background:#fffbe6;color:var(--ant-warning)}
+.ant-stat-icon.green{background:#f6ffed;color:var(--ant-success)}
+.ant-stat-value{font-size:30px;font-weight:600;color:rgba(0,0,0,0.88);line-height:1.2}
+.ant-stat-label{font-size:var(--ant-font-size);color:rgba(0,0,0,0.45);margin-top:4px}
+
+/* Card */
+.ant-card{background:var(--ant-bg-container);border:1px solid var(--ant-border-secondary);border-radius:var(--ant-radius-lg);padding:20px 24px}
+.ant-card:hover{box-shadow:0 3px 6px -4px rgba(0,0,0,0.12),0 6px 16px 0 rgba(0,0,0,0.08)}
+.ant-card-title{font-size:var(--ant-font-size-lg);font-weight:600;color:rgba(0,0,0,0.88);margin-bottom:16px}
+
+/* Input / Select / Button (Ant Design 5 style) */
+.ant-input{width:100%;min-height:100px;padding:8px 12px;border:1px solid var(--ant-border);border-radius:var(--ant-radius);font-size:var(--ant-font-size);font-family:var(--ant-font-family);resize:vertical;outline:none;transition:border-color 0.2s,box-shadow 0.2s}
+.ant-input:hover{border-color:var(--ant-primary-hover)}
+.ant-input:focus{border-color:var(--ant-primary);box-shadow:0 0 0 2px rgba(22,119,255,0.1)}
+.ant-select{padding:6px 28px 6px 11px;border:1px solid var(--ant-border);border-radius:var(--ant-radius);font-size:var(--ant-font-size);background:#fff;cursor:pointer;outline:none;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%2300000073' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'%3E%3C/path%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+.ant-select:hover{border-color:var(--ant-primary-hover)}
+.ant-select:focus{border-color:var(--ant-primary);box-shadow:0 0 0 2px rgba(22,119,255,0.1)}
+.ant-btn{padding:6px 15px;border-radius:var(--ant-radius);border:1px solid transparent;font-size:var(--ant-font-size);font-weight:400;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:6px;font-family:var(--ant-font-family);line-height:1.5715;height:32px}
+.ant-btn-primary{background:var(--ant-primary);color:#fff;border-color:var(--ant-primary);box-shadow:0 2px 0 rgba(22,119,255,0.06)}
+.ant-btn-primary:hover{background:var(--ant-primary-hover)}
+.ant-btn-default{background:#fff;color:rgba(0,0,0,0.88);border-color:var(--ant-border)}
+.ant-btn-default:hover{color:var(--ant-primary);border-color:var(--ant-primary)}
+.ant-btn-text{background:transparent;color:rgba(0,0,0,0.65);border-color:transparent}
+.ant-btn-text:hover{background:rgba(0,0,0,0.04)}
+.ant-form-row{display:flex;gap:8px;margin-top:12px;align-items:center}
+
+/* Table (Ant Design 5 style) */
+.ant-table-wrap{border:1px solid var(--ant-border-secondary);border-radius:var(--ant-radius-lg);overflow:hidden}
+.ant-table-bar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#fafafa;border-bottom:1px solid var(--ant-border-secondary)}
+.ant-table-bar-title{font-weight:600;font-size:var(--ant-font-size);color:rgba(0,0,0,0.88)}
+.ant-table{width:100%;border-collapse:collapse}
+.ant-table th{text-align:left;padding:12px 16px;font-size:var(--ant-font-size);font-weight:600;color:rgba(0,0,0,0.88);background:#fafafa;border-bottom:1px solid var(--ant-border-secondary)}
+.ant-table td{padding:12px 16px;font-size:var(--ant-font-size);border-bottom:1px solid #f0f0f0;color:rgba(0,0,0,0.65)}
+.ant-table tr:last-child td{border-bottom:none}
+.ant-table tr:hover td{background:#fafafa}
+.ant-tag{display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;font-size:var(--ant-font-size-sm);font-weight:400;border:1px solid}
+.ant-tag.blue{background:#e6f4ff;color:var(--ant-primary);border-color:#91caff}
+.ant-tag.gold{background:#fffbe6;color:#d48806;border-color:#ffe58f}
+.ant-tag.green{background:#f6ffed;color:var(--ant-success);border-color:#b7eb8f}
+.ant-pagination{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:12px 16px;border-top:1px solid var(--ant-border-secondary);background:#fafafa;font-size:var(--ant-font-size);color:rgba(0,0,0,0.65)}
+.ant-page-btn{min-width:32px;height:32px;border-radius:var(--ant-radius);border:1px solid var(--ant-border);background:#fff;cursor:pointer;font-size:var(--ant-font-size);display:inline-flex;align-items:center;justify-content:center;transition:all 0.2s;color:rgba(0,0,0,0.65)}
+.ant-page-btn:hover{color:var(--ant-primary);border-color:var(--ant-primary)}
+.ant-page-btn.active{color:#fff;background:var(--ant-primary);border-color:var(--ant-primary);font-weight:500}
+
+.ant-float-tag{position:fixed;bottom:16px;right:16px;background:#001529;color:rgba(255,255,255,0.85);padding:8px 14px;border-radius:var(--ant-radius);font-size:12px;opacity:0.85;font-family:monospace}
+</style>
+</head>
+<body>
+
+<div class="ant-layout">
+  <header class="ant-header">
+    <div class="ant-header-l">
+      <div class="ant-logo"><div class="ant-logo-icon">AI</div>AI Tutor</div>
+      <span style="font-size:11px;background:#e6f4ff;color:#1677ff;padding:1px 8px;border-radius:4px;font-weight:500;">方案 D</span>
+    </div>
+    <div style="display:flex;gap:4px;background:#f0f0f0;border-radius:6px;padding:2px;">
+      <button style="padding:4px 14px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:500;background:#fff;color:rgba(0,0,0,0.88);box-shadow:0 1px 2px rgba(0,0,0,0.06);">🎓 学生端</button>
+      <button style="padding:4px 14px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:400;background:transparent;color:rgba(0,0,0,0.45);">⚙️ 管理端</button>
+    </div>
+    <div class="ant-header-r"><span>张同学</span><div style="width:32px;height:32px;border-radius:50%;background:var(--ant-primary);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;">张</div></div>
+  </header>
+
+  <div class="ant-body">
+    <nav class="ant-sider">
+      <div class="ant-menu-group">学习空间</div>
+      <button class="ant-menu-item active"><span class="ant-menu-icon">📝</span>智能提问</button>
+      <button class="ant-menu-item"><span class="ant-menu-icon">📊</span>错题本</button>
+      <div class="ant-menu-group">知识管理</div>
+      <button class="ant-menu-item"><span class="ant-menu-icon">📚</span>题库浏览</button>
+      <button class="ant-menu-item"><span class="ant-menu-icon">🗂️</span>文档管理</button>
+      <div class="ant-menu-group">数据分析</div>
+      <button class="ant-menu-item"><span class="ant-menu-icon">📈</span>使用统计</button>
+    </nav>
+
+    <main class="ant-content">
+      <h1 class="ant-page-title">智能提问</h1>
+
+      <div class="ant-stats">
+        <div class="ant-stat"><div class="ant-stat-icon blue">📝</div><div><div class="ant-stat-value">1,523</div><div class="ant-stat-label">总题目数</div></div></div>
+        <div class="ant-stat"><div class="ant-stat-icon gold">⚠️</div><div><div class="ant-stat-value">89</div><div class="ant-stat-label">错题待复习</div></div></div>
+        <div class="ant-stat"><div class="ant-stat-icon green">🔥</div><div><div class="ant-stat-value">42</div><div class="ant-stat-label">今日练习</div></div></div>
+      </div>
+
+      <div class="ant-card">
+        <div class="ant-card-title">💬 提出你的问题</div>
+        <textarea class="ant-input" placeholder="输入数学题目，或上传题目图片...
+
+例如：已知函数 f(x) = x² + 2x + 1，求 f(x) 在区间 [-3, 1] 上的最大值和最小值。"></textarea>
+        <div class="ant-form-row">
+          <select class="ant-select"><option>📐 数学</option><option>⚡ 物理</option><option>🧪 化学</option><option>🧬 生物</option></select>
+          <button class="ant-btn ant-btn-default">📎 上传图片</button>
+          <div style="flex:1;"></div>
+          <button class="ant-btn ant-btn-text">💡 给我提示</button>
+          <button class="ant-btn ant-btn-primary">🚀 提交问题</button>
+        </div>
+      </div>
+
+      <div class="ant-table-wrap">
+        <div class="ant-table-bar">
+          <span class="ant-table-bar-title">📋 最近提问</span>
+          <select class="ant-select" style="font-size:12px;padding:4px 26px 4px 8px;"><option>全部学科</option><option>数学</option><option>物理</option><option>化学</option></select>
+        </div>
+        <table class="ant-table">
+          <thead><tr><th>#</th><th>题目摘要</th><th>学科</th><th>难度</th><th>时间</th><th>状态</th></tr></thead>
+          <tbody>
+            <tr><td style="color:rgba(0,0,0,0.25);">1</td><td>已知函数 f(x)=x²+2x+1，求在区间[-3,1]上的最值</td><td><span class="ant-tag blue">数学</span></td><td style="color:#faad14;">⭐⭐⭐</td><td style="color:rgba(0,0,0,0.45);">10分钟前</td><td><span class="ant-tag green">已解答</span></td></tr>
+            <tr><td style="color:rgba(0,0,0,0.25);">2</td><td>质量为m的物体在光滑斜面上下滑，求加速度</td><td><span class="ant-tag gold">物理</span></td><td style="color:#faad14;">⭐⭐⭐⭐</td><td style="color:rgba(0,0,0,0.45);">25分钟前</td><td><span class="ant-tag gold">思考中</span></td></tr>
+            <tr><td style="color:rgba(0,0,0,0.25);">3</td><td>配平化学方程式：Fe+H₂O→Fe₃O₄+H₂</td><td><span class="ant-tag green">化学</span></td><td style="color:#faad14;">⭐⭐</td><td style="color:rgba(0,0,0,0.45);">1小时前</td><td><span class="ant-tag green">已解答</span></td></tr>
+            <tr><td style="color:rgba(0,0,0,0.25);">4</td><td>求 sin(x)+cos(x)的最大值及此时x的取值集合</td><td><span class="ant-tag blue">数学</span></td><td style="color:#faad14;">⭐⭐⭐</td><td style="color:rgba(0,0,0,0.45);">2小时前</td><td><span class="ant-tag green">已解答</span></td></tr>
+          </tbody>
+        </table>
+        <div class="ant-pagination">
+          <span>共 127 条</span>
+          <button class="ant-page-btn">‹</button>
+          <button class="ant-page-btn active">1</button>
+          <button class="ant-page-btn">2</button>
+          <button class="ant-page-btn">3</button>
+          <button class="ant-page-btn">›</button>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="ant-float-tag">方案 D — Ant Design Algorithm 主题 (darkAlgorithm + token) | 工作量 0.5天</div>
+</body>
+</html>

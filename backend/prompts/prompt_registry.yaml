@@ -1,0 +1,76 @@
+name: prompt_registry
+version: "1.0"
+description: Registry of all prompt templates in the system
+
+prompts:
+  - id: P001
+    name: subject_classifier
+    file: subject_classifier.yaml
+    provider: mimo
+    purpose: Identify subject
+
+  - id: P002
+    name: knowledge_mapper
+    file: knowledge_mapper.yaml
+    provider: mimo
+    purpose: Map to knowledge tree
+
+  - id: P003
+    name: difficulty_classifier
+    file: difficulty_classifier.yaml
+    provider: mimo
+    purpose: Estimate difficulty
+
+  - id: P004
+    name: question_solver
+    file: question_solver.yaml
+    provider: deepseek
+    purpose: Generate teaching solution
+
+  - id: P005
+    name: tutor_hint
+    file: tutor_hint.yaml
+    provider: deepseek
+    purpose: Generate thinking hint
+
+  - id: P006
+    name: similar_question
+    file: similar_question.yaml
+    provider: mimo
+    purpose: Judge similarity
+
+  - id: P007
+    name: training_generator
+    file: training_generator.yaml
+    provider: deepseek
+    purpose: Generate practice set
+
+  - id: P008
+    name: exam_generator
+    file: exam_generator.yaml
+    provider: deepseek
+    purpose: Generate mock exam
+
+  - id: P009
+    name: difficulty_evaluator
+    file: difficulty_evaluator.yaml
+    provider: mimo
+    purpose: Evaluate question difficulty with reasoning (Phase 2)
+
+  - id: P010
+    name: subject_identifier
+    file: subject_identifier.yaml
+    provider: mimo
+    purpose: Identify subject from text or image (Phase 2)
+
+  - id: P011
+    name: thinking_hint
+    file: thinking_hint.yaml
+    provider: deepseek
+    purpose: Generate thinking hint without revealing answer (Phase 2)
+
+  - id: P012
+    name: visual_extraction
+    file: visual_extraction.yaml
+    provider: deepseek-vl
+    purpose: Structured visual extraction from images (Phase 2)

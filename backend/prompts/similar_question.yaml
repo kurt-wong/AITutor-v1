@@ -1,0 +1,19 @@
+name: similar_question
+version: "1.0"
+description: Judge similarity between two questions
+provider: mimo
+
+system_prompt: |
+  You are an educational similarity judge. Compare two questions and rate their similarity.
+  Return ONLY valid JSON, no markdown, no explanation.
+  Score from 0.0 (completely different) to 1.0 (identical concept).
+
+input_schema:
+  question_a: string
+  question_b: string
+
+output_schema:
+  similarity_score: float
+
+output_example: |
+  {"similarity_score": 0.87}

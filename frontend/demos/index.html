@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Tutor 前端方案对比 — DEMO 索引</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={theme:{extend:{fontFamily:{sans:['Inter','ui-sans-serif','system-ui','sans-serif'],display:['Space Grotesk','sans-serif'],mono:['Fira Code','JetBrains Mono','monospace']}}}}</script>
+<style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Fira+Code:wght@400;600;700&display=swap');</style>
+</head>
+<body class="bg-slate-950 min-h-screen font-sans text-slate-200">
+
+<div class="max-w-5xl mx-auto px-6 py-16">
+
+  <!-- Header -->
+  <div class="text-center mb-14">
+    <div class="inline-flex items-center gap-3 mb-4">
+      <div class="w-10 h-10 bg-gradient-to-br from-emerald-400 to-green-600 rounded-xl flex items-center justify-center text-white font-bold text-lg shadow-lg shadow-emerald-500/30">AI</div>
+      <span class="font-display text-2xl font-bold text-white tracking-tight">AI Tutor 前端方案对比</span>
+    </div>
+    <p class="text-slate-400 text-sm max-w-xl mx-auto leading-relaxed">
+      四个独立 DEMO 展示同一界面（学生端智能提问）用不同技术方案的实现效果<br/>
+      每个 DEMO 可独立在浏览器中打开，无需任何构建工具
+    </p>
+  </div>
+
+  <!-- Cards Grid -->
+  <div class="grid grid-cols-3 gap-5 mb-12">
+
+    <!-- Demo A -->
+    <a href="demo-a-antd-enhanced.html" target="_blank" class="group block bg-slate-900 border border-slate-800 rounded-2xl p-6 hover:border-blue-500/50 hover:bg-slate-900/80 transition-all duration-300 hover:-translate-y-1 hover:shadow-xl">
+      <div class="flex items-start justify-between mb-4">
+        <div class="flex items-center gap-3">
+          <span class="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center font-bold text-sm">A</span>
+          <div>
+            <h3 class="font-display font-bold text-base text-white group-hover:text-blue-400 transition-colors">Ant Design 主题增强</h3>
+            <p class="text-[11px] font-mono text-slate-500 mt-0.5">ConfigProvider token + CSS 变量</p>
+          </div>
+        </div>
+        <span class="text-[10px] font-mono font-bold px-2 py-1 rounded-md bg-slate-800 text-slate-400">0.5-1 天</span>
+      </div>
+      <p class="text-[13px] text-slate-400 leading-relaxed mb-4">不改架构，只配置 Ant Design 主题 token + CSS 变量。品牌色改为 emerald，深色侧栏，自定义字体。改动量最小，零风险。</p>
+      <div class="flex flex-wrap gap-1.5">
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">仅 CSS</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">零依赖新增</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">AntD 保留</span>
+      </div>
+    </a>
+
+    <!-- Demo B (Recommended) -->
+    <a href="demo-b-tailwind-antd-hybrid.html" target="_blank" class="group block bg-slate-900 border-2 border-emerald-500/40 rounded-2xl p-6 hover:border-emerald-400 hover:bg-slate-900/80 transition-all duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-emerald-500/10 relative overflow-hidden">
+      <div class="absolute top-3 right-3">
+        <span class="text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center gap-1">⭐ 推荐</span>
+      </div>
+      <div class="flex items-start justify-between mb-4">
+        <div class="flex items-center gap-3">
+          <span class="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold text-sm">B</span>
+          <div>
+            <h3 class="font-display font-bold text-base text-white group-hover:text-emerald-400 transition-colors">Tailwind + Ant Design 双轨</h3>
+            <p class="text-[11px] font-mono text-slate-500 mt-0.5">Tailwind 布局 + AntD 复杂组件</p>
+          </div>
+        </div>
+        <span class="text-[10px] font-mono font-bold px-2 py-1 rounded-md bg-emerald-500/10 text-emerald-400">3-5 天</span>
+      </div>
+      <p class="text-[13px] text-slate-400 leading-relaxed mb-4">引入 Tailwind CSS v4 做布局/间距/色彩/排版，保留 Ant Design 处理 Table/Tree/Form/Upload 等复杂组件。渐进式迁移，低风险。</p>
+      <div class="flex flex-wrap gap-1.5">
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400">最佳性价比</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">渐进式</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">低风险</span>
+      </div>
+    </a>
+
+    <!-- Demo C -->
+    <a href="demo-c-pure-tailwind.html" target="_blank" class="group block bg-slate-900 border border-slate-800 rounded-2xl p-6 hover:border-purple-500/50 hover:bg-slate-900/80 transition-all duration-300 hover:-translate-y-1 hover:shadow-xl">
+      <div class="flex items-start justify-between mb-4">
+        <div class="flex items-center gap-3">
+          <span class="w-8 h-8 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center font-bold text-sm">C</span>
+          <div>
+            <h3 class="font-display font-bold text-base text-white group-hover:text-purple-400 transition-colors">纯 Tailwind 重写</h3>
+            <p class="text-[11px] font-mono text-slate-500 mt-0.5">对标 V2 风格，手写全部组件</p>
+          </div>
+        </div>
+        <span class="text-[10px] font-mono font-bold px-2 py-1 rounded-md bg-slate-800 text-slate-400">7-10 天</span>
+      </div>
+      <p class="text-[13px] text-slate-400 leading-relaxed mb-4">完全移除 Ant Design，纯 Tailwind CSS + lucide-react + motion。自定义全部组件，像素级控制。bundle 减小约 500KB。</p>
+      <div class="flex flex-wrap gap-1.5">
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">最精致</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">Bundle -500KB</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">高工作量</span>
+      </div>
+    </a>
+
+    <!-- Demo D -->
+    <a href="demo-d-antd-algorithm.html" target="_blank" class="group block bg-slate-900 border border-slate-800 rounded-2xl p-6 hover:border-amber-500/50 hover:bg-slate-900/80 transition-all duration-300 hover:-translate-y-1 hover:shadow-xl">
+      <div class="flex items-start justify-between mb-4">
+        <div class="flex items-center gap-3">
+          <span class="w-8 h-8 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center font-bold text-sm">D</span>
+          <div>
+            <h3 class="font-display font-bold text-base text-white group-hover:text-amber-400 transition-colors">Ant Design Algorithm 主题</h3>
+            <p class="text-[11px] font-mono text-slate-500 mt-0.5">内置 darkAlgorithm + 算法切换</p>
+          </div>
+        </div>
+        <span class="text-[10px] font-mono font-bold px-2 py-1 rounded-md bg-amber-500/10 text-amber-400">0.5 天</span>
+      </div>
+      <p class="text-[13px] text-slate-400 leading-relaxed mb-4">使用 Ant Design 5 内置 theme.algorithm（darkAlgorithm/compactAlgorithm），最快实施，功能完整，最省力。</p>
+      <div class="flex flex-wrap gap-1.5">
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">最快实施</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">AntD 原生功能</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">零风险</span>
+      </div>
+    </a>
+
+    <!-- Demo A+D Fusion (NEW) -->
+    <a href="demo-ad-fusion.html" target="_blank" class="group block bg-slate-900 border-2 border-teal-500/40 rounded-2xl p-6 hover:border-teal-400 hover:bg-slate-900/80 transition-all duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-teal-500/10 relative overflow-hidden">
+      <div class="absolute top-3 right-3">
+        <span class="text-[10px] font-bold px-2.5 py-1 rounded-full bg-teal-500/20 text-teal-300 flex items-center gap-1">🆕 新增</span>
+      </div>
+      <div class="flex items-start justify-between mb-4">
+        <div class="flex items-center gap-3">
+          <span class="w-8 h-8 rounded-lg bg-teal-500/10 text-teal-400 flex items-center justify-center font-bold text-sm">A+D</span>
+          <div>
+            <h3 class="font-display font-bold text-base text-white group-hover:text-teal-400 transition-colors">A+D 融合方案</h3>
+            <p class="text-[11px] font-mono text-slate-500 mt-0.5">Seed Token + Algorithm + Component Token</p>
+          </div>
+        </div>
+        <span class="text-[10px] font-mono font-bold px-2 py-1 rounded-md bg-teal-500/10 text-teal-400">0.5 天</span>
+      </div>
+      <p class="text-[13px] text-slate-400 leading-relaxed mb-4">合并 A 的品牌定制与 D 的算法切换：colorPrimary seed token + darkAlgorithm + Menu/Card/Table component token。0.5 天覆盖品牌色·深侧栏·圆角·字体·组件微调。</p>
+      <div class="flex flex-wrap gap-1.5">
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-teal-500/10 text-teal-400">最推荐起点</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">零依赖</span>
+        <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500">色板+算法</span>
+      </div>
+    </a>
+  </div>
+
+  <!-- Comparison Table -->
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+    <div class="px-6 py-4 border-b border-slate-800">
+      <h3 class="font-display font-bold text-base text-white">📊 四方案对比矩阵</h3>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-slate-800">
+            <th class="text-left py-3.5 px-6 font-mono text-[11px] font-bold uppercase tracking-wider text-slate-500">维度</th>
+            <th class="text-center py-3.5 px-4 font-mono text-[11px] font-bold uppercase tracking-wider text-blue-400">A · 主题增强</th>
+            <th class="text-center py-3.5 px-4 font-mono text-[11px] font-bold uppercase tracking-wider text-emerald-400">B · 双轨 ⭐</th>
+            <th class="text-center py-3.5 px-4 font-mono text-[11px] font-bold uppercase tracking-wider text-purple-400">C · 纯 Tailwind</th>
+            <th class="text-center py-3.5 px-4 font-mono text-[11px] font-bold uppercase tracking-wider text-amber-400">D · Algorithm</th>
+            <th class="text-center py-3.5 px-4 font-mono text-[11px] font-bold uppercase tracking-wider text-teal-400">A+D · 融合</th>
+          </tr>
+        </thead>
+        <tbody class="text-[13px]">
+          <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+            <td class="py-3 px-6 font-medium text-slate-300">工作量</td>
+            <td class="py-3 px-4 text-center text-slate-400">0.5-1 天</td>
+            <td class="py-3 px-4 text-center text-emerald-400 font-semibold">3-5 天</td>
+            <td class="py-3 px-4 text-center text-slate-400">7-10 天</td>
+            <td class="py-3 px-4 text-center text-amber-400 font-semibold">0.5 天</td>
+            <td class="py-3 px-4 text-center text-teal-400 font-semibold">0.5 天</td>
+          </tr>
+          <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+            <td class="py-3 px-6 font-medium text-slate-300">视觉品质</td>
+            <td class="py-3 px-4 text-center text-slate-400">⭐⭐⭐</td>
+            <td class="py-3 px-4 text-center text-emerald-400 font-semibold">⭐⭐⭐⭐</td>
+            <td class="py-3 px-4 text-center text-purple-400 font-semibold">⭐⭐⭐⭐⭐</td>
+            <td class="py-3 px-4 text-center text-slate-400">⭐⭐</td>
+            <td class="py-3 px-4 text-center text-teal-400 font-semibold">⭐⭐⭐</td>
+          </tr>
+          <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+            <td class="py-3 px-6 font-medium text-slate-300">新增依赖</td>
+            <td class="py-3 px-4 text-center text-green-400">0 个</td>
+            <td class="py-3 px-4 text-center text-slate-400">1 个</td>
+            <td class="py-3 px-4 text-center text-slate-400">3 个</td>
+            <td class="py-3 px-4 text-center text-green-400">0 个</td>
+            <td class="py-3 px-4 text-center text-green-400">0 个</td>
+          </tr>
+          <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+            <td class="py-3 px-6 font-medium text-slate-300">破坏性风险</td>
+            <td class="py-3 px-4 text-center text-green-400">零</td>
+            <td class="py-3 px-4 text-center text-green-400">低</td>
+            <td class="py-3 px-4 text-center text-red-400">高</td>
+            <td class="py-3 px-4 text-center text-green-400">零</td>
+            <td class="py-3 px-4 text-center text-green-400">零</td>
+          </tr>
+          <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+            <td class="py-3 px-6 font-medium text-slate-300">复杂组件</td>
+            <td class="py-3 px-4 text-center text-green-400">AntD 完整</td>
+            <td class="py-3 px-4 text-center text-green-400">AntD 完整</td>
+            <td class="py-3 px-4 text-center text-red-400">需手写</td>
+            <td class="py-3 px-4 text-center text-green-400">AntD 完整</td>
+            <td class="py-3 px-4 text-center text-green-400">AntD 完整</td>
+          </tr>
+          <tr class="hover:bg-slate-800/30 transition-colors">
+            <td class="py-3 px-6 font-medium text-slate-300">像素级控制</td>
+            <td class="py-3 px-4 text-center text-slate-400">中</td>
+            <td class="py-3 px-4 text-center text-emerald-400 font-semibold">高</td>
+            <td class="py-3 px-4 text-center text-purple-400 font-semibold">最高</td>
+            <td class="py-3 px-4 text-center text-red-400">低</td>
+            <td class="py-3 px-4 text-center text-teal-400 font-semibold">中高</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Recommendation -->
+  <div class="mt-10 bg-gradient-to-r from-teal-500/10 to-emerald-500/5 border border-teal-500/30 rounded-2xl p-6">
+    <div class="flex items-start gap-4">
+      <span class="text-3xl">💡</span>
+      <div>
+        <h3 class="font-display font-bold text-lg text-white mb-3">推荐路线：先 A+D → 再 B</h3>
+        <div class="space-y-3 text-sm text-slate-300 leading-relaxed">
+          <p><strong class="text-teal-400">第 0.5 天 (A+D 融合)</strong> — 在现有 <code class="text-xs font-mono bg-slate-800 px-1.5 py-0.5 rounded">main.tsx</code> 的 <code class="text-xs font-mono bg-slate-800 px-1.5 py-0.5 rounded">ConfigProvider</code> 中配置 seed token（colorPrimary: '#16a34a'） + algorithm + component token（Menu/Card/Table/Button）。同时覆盖品牌色、深色侧栏、圆角、字体、组件微调五大维度。零风险，可随时回滚。</p>
+          <p><strong class="text-emerald-400">第 1-5 天 (方案 B)</strong> — 安装 Tailwind CSS v4，逐步为每个页面的布局/间距加上 Tailwind 类。保留 Ant Design 处理 Table/Tree/Form/Upload。AskPage 和 StatisticsPage 优先迁移。</p>
+          <p class="text-slate-400 mt-2">A+D 融合了方案 A 的品牌色能力和方案 D 的算法切换能力，0.5 天达到最高性价比的基线效果。之后渐进推进方案 B 提升到品质天花板。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="text-center text-[11px] font-mono text-slate-600 mt-10">所有 DEMO 为独立 HTML 文件 · 无构建工具依赖 · 可直接在浏览器中打开对比</p>
+</div>
+</body>
+</html>

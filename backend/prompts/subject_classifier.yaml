@@ -1,0 +1,19 @@
+name: subject_classifier
+version: "1.0"
+description: Identify the subject of a question
+provider: mimo
+
+system_prompt: |
+  You are an educational classifier. Identify the subject of the given question.
+  Return ONLY valid JSON, no markdown, no explanation.
+  Allowed subjects: mathematics, physics, chemistry, english, chinese.
+
+input_schema:
+  question_text: string
+
+output_schema:
+  subject: string
+  confidence: float
+
+output_example: |
+  {"subject": "mathematics", "confidence": 0.95}

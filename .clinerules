@@ -1,0 +1,18 @@
+# AI Tutor - 行为约束（指向 Project Rules.md）
+
+详细规则见 `05_Development/Project rules.md`（v3.0,已合并 AGD）。
+
+## 核心红线
+- MCP-first:所有 AI 能力通过 MIS.md 定义的 MCP Tools
+- 分层架构:API → Service → Repository → DB,禁止跳层
+- 禁止存储 COT:PostgreSQL 仅存结构化事实
+- pgvector 唯一:Qdrant 已永久移除
+- 冲突时以 Project Rules.md 为最高准则
+
+## 任务闭环
+完成 TASK.md 子任务后：
+1. 运行测试
+2. 标记 [x]
+3. 汇报产出，不跨越当前任务边界
+
+---
