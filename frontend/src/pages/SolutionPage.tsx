@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Card, Input, Button, Typography, Space, Spin, Empty, Steps } from "antd";
+import { Card, Input, Button, Typography, Space, Spin, Empty, Steps, Divider } from "antd";
 import { SearchOutlined, CheckCircleOutlined } from "@ant-design/icons";
 import { apiGet } from "../services/api";
 import type { SolutionData } from "../types";
+import MathRenderer from "../components/MathRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -73,18 +74,40 @@ export default function SolutionPage() {
         )}
         {solution ? (
           <Card>
+            {/* ── 答案区（仅最终答案）────────────────────────── */}
             <Title level={5}>
               <CheckCircleOutlined style={{ color: "var(--color-info)", marginRight: "var(--radius)" }} />
-              解答
+              答案
             </Title>
-            <Paragraph strong>答案: {solution.final_answer}</Paragraph>
-            <Steps
-              direction="vertical"
-              current={-1}
-              items={solution.solution_steps.map((s) => ({ title: `步骤 ${s.step}`, description: s.description }))}
-            />
+            <Paragraph strong>
+              <MathRenderer content={solution.final_answer || "(无)"} />
+            </Paragraph>
+
+            {/* ── 解题步骤（分析过程）────────────────────────── */}
+            {solution.solution_steps.length > 0 && (
+              <>
+                <Divider />
+                <Title level={5}>解题步骤</Title>
+                <Steps
+                  direction="vertical"
+                  current={-1}
+                  items={solution.solution_steps.map((s) => ({
+                    title: `步骤 ${s.step}`,
+                    description: <MathRenderer content={s.description} />,
+                  }))}
+                />
+              </>
+            )}
+
+            {/* ── 讲解区（详解分析）──────────────────────────── */}
             {solution.explanation && (
-              <Paragraph style={{ marginTop: 16 }}>{solution.explanation}</Paragraph>
+              <>
+                <Divider />
+                <Title level={5}>讲解</Title>
+                <Paragraph>
+                  <MathRenderer content={solution.explanation} />
+                </Paragraph>
+              </>
             )}
           </Card>
         ) : (

@@ -419,15 +419,6 @@ def test_flow6_embedding_model(r):
     assert_check("embedding_provider" in cols, "Missing embedding_provider", r)
     r.passed = True; r.doc_ref = "DSD §8, PRD §3.6"
 
-def test_flow6_similar_cache_model(r):
-    """F6: SimilarQuestionCache model exists."""
-    from app.models.embedding import SimilarQuestionCache
-    mapper = sa_inspect(SimilarQuestionCache)
-    cols = {c.key for c in mapper.columns}
-    assert_check("question_id" in cols, "Missing question_id", r)
-    assert_check("similar_question_id" in cols, "Missing similar_question_id", r)
-    assert_check("similarity_score" in cols, "Missing similarity_score", r)
-    r.passed = True; r.doc_ref = "DSD §8"
 
 def test_flow6_embedding_mcp(r):
     """F6: Embedding MCP Server exists."""

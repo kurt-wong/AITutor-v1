@@ -29,6 +29,8 @@ logger = get_logger(__name__)
 
 # Redis key prefixes
 QUEUE_KEY = "async:task_b_queue"         # Redis List for BPOP
+EXPLAIN_QUEUE_KEY = "async:explain_queue"  # Session #96: separate queue for explanation tasks
+ENRICH_QUEUE_KEY = "async:enrich_queue"    # Session #104: separate queue for enrichment (solve+difficulty+embed)
 STATUS_PREFIX = "async:task_b:status:"   # Hash for task status
 LOG_PREFIX = "async:task_b:log:"         # List for task event logs
 TASK_TTL = 3600 * 2  # 2 hours TTL for task status
@@ -48,29 +50,37 @@ _REQUEUE_BASE_DELAY = 30.0      # base delay seconds before re-processing
 TASK_TYPE_STUDENT = "student_question"
 TASK_TYPE_DOCUMENT = "document_process"
 TASK_TYPE_EXPLANATION = "explanation_generate"  # Session #47 Part B
+TASK_TYPE_ENRICHMENT = "enrichment_batch"       # Session #104: solve + difficulty + embed
 
 # ── Session #47 Part B: Explanation Generation Prompts ────────────────────
 
-_VIBETHINKER_EXPLAIN_PROMPT = """\
-你是一位专业的教师，需要为下面这道题编写详细的解题讲解。
+_STAGE1_EXPLAIN_PROMPT = """\
+你是一位经验丰富的全科教师，擅长为各学科题目编写清晰易懂的解题讲解。
 
+题目类型：{question_type}
 题目：
 {stem}
 
 {options_text}
 正确答案：{answer}
 
-请提供完整的解题讲解，包括：
-1. 分析题目考查的知识点
-2. 详细的解题步骤和推理过程
-3. 每个步骤的理由
-4. 答案的最终确认
+请根据题目类型调整讲解风格：
+- 数学/物理/化学：写出完整的公式推导和计算步骤
+- 英语/语文：解释语言点、语法规则、阅读理解逻辑
+- 生物/政治/历史/地理：阐述概念、分析因果关系
 
-要求：讲解要详细、准确、适合学生自学使用。用中文回答。"""
+讲解结构：
+1. 考查知识点 — 这道题考什么
+2. 解题思路 — 从何入手、为什么这样想
+3. 详细步骤 — 每一步的操作和理由
+4. 答案确认 — 最终答案及验证
+
+要求：语言通俗、逻辑清晰，让学生能独立理解。用中文回答。"""
 
 _MIMO_VALIDATE_PROMPT = """\
-你是一位严格的数学/理科审题人。请验证下面这道题的解答是否正确。
+你是一位严格的审题人。请验证下面这道题的解答是否正确。
 
+题目类型：{question_type}
 题目：{stem}
 正确答案：{answer}
 
@@ -87,6 +97,7 @@ _MIMO_VALIDATE_PROMPT = """\
 _DEEPSEEK_REVIEW_PROMPT = """\
 你是一位资深教师，请审阅并润色下面的题目讲解。
 
+题目类型：{question_type}
 题目：{stem}
 正确答案：{answer}
 
@@ -100,6 +111,38 @@ _DEEPSEEK_REVIEW_PROMPT = """\
 4. 保持中文表达
 
 输出改进后的完整讲解。如果讲解已经很好，直接输出原文。"""
+
+
+def _sanitize_solution_steps(steps: Any) -> list[str] | None:
+    """Session #98 P2-E: Sanitize solution_steps for DB storage.
+
+    MIMO raw output may contain Python Ellipsis (``...``) or non-string
+    values that cause PostgreSQL INSERT failures.  This helper converts
+    every step to a safe string, replacing ``...`` / ``Ellipsis`` with
+    ``"(content omitted)"``.
+    """
+    if not steps:
+        return None
+    if not isinstance(steps, list):
+        return [str(steps)]
+
+    safe: list[str] = []
+    for s in steps:
+        if s is ... or str(s).strip() == "..." or str(s).strip() == "Ellipsis":
+            safe.append("(content omitted)")
+        elif isinstance(s, (int, float)):
+            safe.append(str(s))
+        elif isinstance(s, str):
+            safe.append(s)
+        elif s is None:
+            safe.append("")
+        elif isinstance(s, dict):
+            # Flatten dict steps to JSON string
+            import json
+            safe.append(json.dumps(s, ensure_ascii=False, default=str))
+        else:
+            safe.append(str(s))
+    return safe if safe else None
 
 
 from app.domains.document.async_document import _DocumentProcessing
@@ -119,6 +162,10 @@ class AsyncPipeline(_DocumentProcessing):
     def __init__(self):
         self._worker_tasks: list[asyncio.Task] = []
         self._running = False
+        # Session #97 P2-A: pause explain workers during embedding to avoid GPU contention.
+        # When set → explain workers can run; when cleared → they wait.
+        self._explain_pause: asyncio.Event = asyncio.Event()
+        self._explain_pause.set()  # start unpaused
 
     # ── Public API ───────────────────────────────────────────
 
@@ -246,7 +293,7 @@ class AsyncPipeline(_DocumentProcessing):
             })
 
             payload = json.dumps(task_data, default=str)
-            await lpush(QUEUE_KEY, payload)
+            await lpush(EXPLAIN_QUEUE_KEY, payload)  # Session #96: separate explain queue
             count += 1
 
         if count > 0:
@@ -254,6 +301,66 @@ class AsyncPipeline(_DocumentProcessing):
                 "Enqueued %d explanation generation tasks", count,
             )
         return count
+
+    # ── Session #104: Enrichment Queue ─────────────────────────
+
+    async def enqueue_enrichment(
+        self, saved_questions: list[dict[str, Any]],
+        document_key: str = "",
+    ) -> str | None:
+        """Enqueue a batch enrichment task for a completed document.
+
+        After questions are saved and document is marked "completed",
+        the enrichment steps (solve → difficulty → embed → enqueue
+        explanations) move to a separate queue so the document worker
+        can pick up the next upload immediately.
+
+        Args:
+            saved_questions: list of saved question dicts with keys:
+                id, content, answer, explanation, question_type, options
+            document_key: MinIO object key of the source document
+
+        Returns:
+            task_id if enqueued, None if no questions to enrich
+        """
+        if not saved_questions:
+            return None
+
+        task_id = uuid.uuid4().hex
+        task_data = {
+            "task_id": task_id,
+            "type": TASK_TYPE_ENRICHMENT,
+            "document_key": document_key,
+            "questions": [
+                {
+                    "id": sq["id"],
+                    "content": sq.get("content", sq.get("question_text", "")),
+                    "answer": sq.get("answer", ""),
+                    "explanation": sq.get("explanation", ""),
+                    "question_type": sq.get("question_type", ""),
+                    "options": sq.get("options", []),
+                }
+                for sq in saved_questions
+            ],
+        }
+
+        await self._set_status(task_id, {
+            "state": TASK_STATE_PENDING,
+            "type": TASK_TYPE_ENRICHMENT,
+            "document_key": document_key,
+            "question_count": len(saved_questions),
+            "created_at": str(asyncio.get_running_loop().time()),
+            "steps_completed": [],
+            "error": None,
+        })
+
+        payload = json.dumps(task_data, default=str)
+        await lpush(ENRICH_QUEUE_KEY, payload)
+        logger.info(
+            "Enqueued enrichment batch %s (%d questions) for %s",
+            task_id, len(saved_questions), document_key,
+        )
+        return task_id
 
     async def get_status(self, task_id: str) -> dict[str, Any] | None:
         """Get the current status of a background task."""
@@ -282,12 +389,39 @@ class AsyncPipeline(_DocumentProcessing):
             return
 
         self._running = True
-        num_workers = getattr(settings, "PIPELINE_WORKERS", 3)
-        self._worker_tasks = [
-            asyncio.create_task(self._worker_loop(i))
-            for i in range(num_workers)
-        ]
-        logger.info(f"AsyncPipeline {num_workers} workers started")
+        num_workers = getattr(settings, "PIPELINE_WORKERS", 4)
+        # Session #104: 3-queue allocation (doc + enrich + explain).
+        # Reserve 2 enrich + 2 explain workers; remaining handle docs.
+        # With PIPELINE_WORKERS=8 → 4 doc + 2 enrich + 2 explain.
+        # Minimum 1 doc, 1 enrich, 1 explain worker guaranteed.
+        self._worker_tasks = []
+        enrich_workers = 2
+        explain_workers = 2
+        doc_workers = max(1, num_workers - enrich_workers - explain_workers)
+        if num_workers < 5:
+            # Small fleet: 1 doc, 1 enrich, rest explain
+            enrich_workers = 1
+            explain_workers = max(1, num_workers - 2)
+            doc_workers = max(1, num_workers - enrich_workers - explain_workers)
+        total_allocated = doc_workers + enrich_workers + explain_workers
+        for i in range(total_allocated):
+            if i < doc_workers:
+                queue_key = QUEUE_KEY
+            elif i < doc_workers + enrich_workers:
+                queue_key = ENRICH_QUEUE_KEY
+            else:
+                queue_key = EXPLAIN_QUEUE_KEY
+            self._worker_tasks.append(
+                asyncio.create_task(self._worker_loop(i, queue_key=queue_key))
+            )
+        logger.info(
+            "AsyncPipeline %d workers started (%d doc + %d enrich + %d explain)",
+            total_allocated, doc_workers, enrich_workers, explain_workers,
+        )
+
+        # Session #97 P2-A: Preload embedding model into Ollama VRAM at startup
+        # to avoid cold-start latency during document processing.
+        asyncio.create_task(self._warmup_embedding_model())
 
     async def stop_worker(self) -> None:
         """Stop background workers gracefully.
@@ -302,18 +436,83 @@ class AsyncPipeline(_DocumentProcessing):
             self._worker_tasks = []
         logger.info("AsyncPipeline workers stopped")
 
+    # ── Session #97 P2-A: GPU Contention Control ────────────────
+
+    async def pause_explain_workers(self) -> None:
+        """Pause all explain workers (e.g. during embedding batch).
+
+        Explain workers will block on ``_explain_pause.wait()`` until
+        ``resume_explain_workers()`` is called.  This prevents Ollama
+        GPU contention between the embedding model and the explain model
+        (qwen3.5:4b), both of which cannot fit in 8GB VRAM simultaneously.
+        """
+        self._explain_pause.clear()
+        logger.info("Explain workers paused (embedding in progress)")
+
+    async def resume_explain_workers(self) -> None:
+        """Resume explain workers after embedding batch completes."""
+        self._explain_pause.set()
+        logger.info("Explain workers resumed")
+
+    async def _warmup_embedding_model(self) -> None:
+        """Preload the embedding model into Ollama VRAM at startup.
+
+        Without this warmup, the first embedding call triggers a
+        cold-start model load which takes 30-120 s and causes timeouts.
+        The call is fire-and-forget — failures are logged but never fatal.
+        """
+        import httpx
+
+        model = settings.EMBEDDING_MODEL
+        ollama_url = settings.OLLAMA_BASE_URL
+        logger.info("Warming up embedding model: %s ...", model)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+                response = await client.post(
+                    f"{ollama_url}/api/embeddings",
+                    json={"model": model, "prompt": "warmup"},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    dim = len(data.get("embedding", []))
+                    logger.info(
+                        "Embedding model %s preloaded (dim=%d, %.1fs)",
+                        model, dim, response.elapsed.total_seconds(),
+                    )
+                else:
+                    logger.warning(
+                        "Embedding warmup returned %d: %s",
+                        response.status_code, response.text[:200],
+                    )
+        except Exception as e:
+            logger.warning("Embedding warmup failed (non-fatal): %s", e)
+
     # ── Worker Loop ──────────────────────────────────────────
 
-    async def _worker_loop(self, worker_id: int = 0) -> None:
+    async def _worker_loop(self, worker_id: int = 0, *, queue_key: str = QUEUE_KEY) -> None:
         """Main worker loop: BRPOP from Redis list and process.
 
         Uses blocking BRPOP (0 timeout = block indefinitely) to avoid polling.
         Multiple workers can run concurrently.
+
+        Session #96: queue_key parameter allows per-worker queue assignment.
+        Worker 0 → QUEUE_KEY (documents), workers 1+ → EXPLAIN_QUEUE_KEY.
         """
-        logger.info(f"AsyncPipeline worker-{worker_id} loop started")
+        qlabel = (
+            "doc" if queue_key == QUEUE_KEY
+            else "enrich" if queue_key == ENRICH_QUEUE_KEY
+            else "explain"
+        )
+        is_explain_worker = queue_key == EXPLAIN_QUEUE_KEY
+        logger.info(f"AsyncPipeline worker-{worker_id} ({qlabel}) loop started")
         while self._running:
             try:
-                result = await brpop(QUEUE_KEY, timeout=1)
+                # Session #97 P2-A: explain workers wait during embedding
+                # to prevent GPU contention (embedding model vs explain model).
+                if is_explain_worker:
+                    await self._explain_pause.wait()
+
+                result = await brpop(queue_key, timeout=1)
                 if result is None:
                     continue  # timeout with no data, loop again
 
@@ -411,6 +610,8 @@ class AsyncPipeline(_DocumentProcessing):
             await self._process_document_task(task_data)
         elif task_type == TASK_TYPE_EXPLANATION:
             await self._process_explanation_task(task_data)
+        elif task_type == TASK_TYPE_ENRICHMENT:
+            await self._process_enrichment_task(task_data)
         else:
             await self._process_student_task(task_data)
 
@@ -504,7 +705,7 @@ class AsyncPipeline(_DocumentProcessing):
     async def _process_explanation_task(self, task_data: dict[str, Any]) -> None:
         """Process an explanation generation task through 3-stage pipeline.
 
-        Stage 1: VibeThinker (local Ollama) generates detailed explanation
+        Stage 1: Qwen3.5 4B (local Ollama) generates detailed explanation
         Stage 2: MIMO v2.5 (cloud) validates correctness
         Stage 3: DeepSeek v4 Pro (cloud) reviews and polishes
 
@@ -577,7 +778,7 @@ class AsyncPipeline(_DocumentProcessing):
     ) -> dict[str, Any]:
         """3-stage explanation generation pipeline.
 
-        Stage 1: VibeThinker (local, free) — generates draft explanation
+        Stage 1: Qwen3.5 4B (local, free) — generates draft explanation
         Stage 2: MIMO v2.5 (cloud, cheap) — validates correctness
         Stage 3: DeepSeek v4 Pro (cloud, accurate) — final review & polish
 
@@ -603,17 +804,18 @@ class AsyncPipeline(_DocumentProcessing):
                 f"{chr(65+i)}. {opt}" for i, opt in enumerate(options)
             )
 
-        # ── Stage 1: VibeThinker generates explanation ────────────
-        stage1_prompt = _VIBETHINKER_EXPLAIN_PROMPT.format(
+        # ── Stage 1: Qwen3.5 4B generates explanation ────────────
+        stage1_prompt = _STAGE1_EXPLAIN_PROMPT.format(
             stem=stem, options_text=options_text, answer=answer,
+            question_type=question_type or "未知",
         )
 
         await self._log_step(
             task_id, step="explain_stage1",
-            message=f"Stage 1: VibeThinker generating for Q{question_id}",
+            message=f"Stage 1: Qwen3.5 4B generating for Q{question_id}",
         )
         logger.info(
-            "Stage 1/3: VibeThinker explaining Q%d (%d chars stem)",
+            "Stage 1/3: Qwen3.5 4B explaining Q%d (%d chars stem)",
             question_id, len(stem),
         )
 
@@ -622,108 +824,157 @@ class AsyncPipeline(_DocumentProcessing):
         # 本地模型调用（非 cloud API），架构迁移优先级低。
         vibe_result = await llm_gateway.generate_vibethinker(stage1_prompt)
         if vibe_result.get("error") or not vibe_result.get("response", "").strip():
-            error_msg = vibe_result.get("error", "Empty VibeThinker response")
-            logger.warning(f"Stage 1 failed for Q{question_id}: {error_msg}")
-            return {"status": "error", "error": f"VibeThinker: {error_msg}", "stages": stages_completed}
-
-        draft_explanation = vibe_result["response"]
-        stages_completed.append("vibethinker")
-        logger.info(
-            "Stage 1/3 done: VibeThinker → %d chars for Q%d",
-            len(draft_explanation), question_id,
-        )
-
-        # ── Stage 2: MIMO v2.5 validates ─────────────────────────
-        stage2_prompt = _MIMO_VALIDATE_PROMPT.format(
-            stem=stem, answer=answer, explanation=draft_explanation,
-        )
-
-        await self._log_step(
-            task_id, step="explain_stage2",
-            message=f"Stage 2: MIMO v2.5 validating for Q{question_id}",
-        )
-        logger.info("Stage 2/3: MIMO v2.5 validating Q%d", question_id)
-
-        mimo_raw = await mcp_client.call_tool("llm_gateway.generate", {
-            "mode": "fast", "prompt": stage2_prompt,
-        })
-        mimo_result = mimo_raw.get("data", {}) if mimo_raw.get("success") else {
-            "error": mimo_raw.get("error", "MCP调用失败"), "response": "",
-        }
-        mimo_response = mimo_result.get("response", "")
-        mimo_passed = "通过" in mimo_response and "不通过" not in mimo_response
-        stages_completed.append("mimo_validate")
-
-        if mimo_passed:
-            logger.info(
-                "Stage 2/3: MIMO passed for Q%d — proceeding to review",
-                question_id,
-            )
-
-            # ── Stage 3: DeepSeek v4 Pro reviews ─────────────────
-            stage3_prompt = _DEEPSEEK_REVIEW_PROMPT.format(
-                stem=stem, answer=answer, explanation=draft_explanation,
-            )
-
-            await self._log_step(
-                task_id, step="explain_stage3",
-                message=f"Stage 3: DeepSeek v4 Pro reviewing for Q{question_id}",
-            )
-            logger.info("Stage 3/3: DeepSeek v4 Pro reviewing Q%d", question_id)
-
-            deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
-                "mode": "tutor", "prompt": stage3_prompt,
-            })
-            deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
-                "error": deepseek_raw.get("error", "MCP调用失败"), "response": "",
-            }
-            final_explanation = deepseek_result.get("response", draft_explanation)
-            model_source = "vibethinker+mimo+deepseek"
-            stages_completed.append("deepseek_review")
-
-            if not final_explanation.strip():
-                final_explanation = draft_explanation
-                model_source = "vibethinker+mimo"
-
-            logger.info(
-                "Stage 3/3 done: DeepSeek review → %d chars for Q%d",
-                len(final_explanation), question_id,
-            )
-        else:
-            # ── MIMO rejected → re-generate with DeepSeek directly ──
+            error_msg = vibe_result.get("error", "Empty Qwen3.5 4B response")
             logger.warning(
-                "Stage 2/3: MIMO rejected Q%d explanation: %s",
-                question_id, mimo_response[:200],
+                "Stage 1 failed for Q%d: %s — falling back to DeepSeek direct",
+                question_id, error_msg,
             )
-
             await self._log_step(
-                task_id, step="explain_stage3_fallback",
-                message=f"Stage 3 fallback: DeepSeek v4 Pro re-generating for Q{question_id}",
+                task_id, step="explain_stage1_fallback",
+                message=f"Qwen3.5 4B failed ({error_msg}), falling back to DeepSeek direct",
             )
 
+            # Session #98 P1: When local Qwen3.5 fails (GPU contention,
+            # timeout, empty response), fallback to cloud DeepSeek to
+            # generate the explanation directly.  This avoids the 63%
+            # failure rate observed in the 8-doc batch test.
             deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
                 "mode": "tutor",
-                "prompt": _VIBETHINKER_EXPLAIN_PROMPT.format(
+                "prompt": _STAGE1_EXPLAIN_PROMPT.format(
                     stem=stem, options_text=options_text, answer=answer,
+                    question_type=question_type or "未知",
                 ),
             })
             deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
                 "error": deepseek_raw.get("error", "MCP调用失败"), "response": "",
             }
             final_explanation = deepseek_result.get("response", "")
-            model_source = "deepseek_direct"
-            stages_completed.append("deepseek_direct")
+            model_source = "deepseek_direct_fallback"
+            stages_completed.append("deepseek_direct_fallback")
 
             if not final_explanation.strip():
-                # Both MIMO and DeepSeek failed — use VibeThinker draft as-is
-                logger.warning(
-                    "Stage 3 fallback also failed for Q%d — using VibeThinker draft",
+                logger.error(
+                    "DeepSeek fallback also failed for Q%d — no explanation",
                     question_id,
                 )
-                final_explanation = draft_explanation
-                model_source = "vibethinker_only"
+                return {
+                    "status": "error",
+                    "error": f"Qwen3.5 4B: {error_msg} | DeepSeek fallback: {deepseek_result.get('error', 'empty response')}",
+                    "stages": stages_completed,
+                }
 
-        # ── Save to database ──────────────────────────────────────
+            logger.info(
+                "Stage 1 fallback: DeepSeek → %d chars for Q%d",
+                len(final_explanation), question_id,
+            )
+            # Skip Stage 2+3 — fallback result goes straight to save
+            # (jump to the save block at the end of this method)
+
+        else:
+            draft_explanation = vibe_result["response"]
+            stages_completed.append("qwen_stage1")
+            logger.info(
+                "Stage 1/3 done: Qwen3.5 4B → %d chars for Q%d",
+                len(draft_explanation), question_id,
+            )
+
+            # ── Stage 2: MIMO v2.5 validates ─────────────────────────
+            stage2_prompt = _MIMO_VALIDATE_PROMPT.format(
+                stem=stem, answer=answer, explanation=draft_explanation,
+                question_type=question_type or "未知",
+            )
+
+            await self._log_step(
+                task_id, step="explain_stage2",
+                message=f"Stage 2: MIMO v2.5 validating for Q{question_id}",
+            )
+            logger.info("Stage 2/3: MIMO v2.5 validating Q%d", question_id)
+
+            mimo_raw = await mcp_client.call_tool("llm_gateway.generate", {
+                "mode": "fast", "prompt": stage2_prompt,
+            })
+            mimo_result = mimo_raw.get("data", {}) if mimo_raw.get("success") else {
+                "error": mimo_raw.get("error", "MCP调用失败"), "response": "",
+            }
+            mimo_response = mimo_result.get("response", "")
+            mimo_passed = "通过" in mimo_response and "不通过" not in mimo_response
+            stages_completed.append("mimo_validate")
+
+            if mimo_passed:
+                logger.info(
+                    "Stage 2/3: MIMO passed for Q%d — proceeding to review",
+                    question_id,
+                )
+
+                # ── Stage 3: DeepSeek v4 Pro reviews ─────────────────
+                stage3_prompt = _DEEPSEEK_REVIEW_PROMPT.format(
+                    stem=stem, answer=answer, explanation=draft_explanation,
+                    question_type=question_type or "未知",
+                )
+
+                await self._log_step(
+                    task_id, step="explain_stage3",
+                    message=f"Stage 3: DeepSeek v4 Pro reviewing for Q{question_id}",
+                )
+                logger.info("Stage 3/3: DeepSeek v4 Pro reviewing Q%d", question_id)
+
+                deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
+                    "mode": "tutor", "prompt": stage3_prompt,
+                })
+                deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
+                    "error": deepseek_raw.get("error", "MCP调用失败"), "response": "",
+                }
+                final_explanation = deepseek_result.get("response", draft_explanation)
+                model_source = "qwen+mimo+deepseek"
+                stages_completed.append("deepseek_review")
+
+                if not final_explanation.strip():
+                    final_explanation = draft_explanation
+                    model_source = "qwen+mimo"
+
+                logger.info(
+                    "Stage 3/3 done: DeepSeek review → %d chars for Q%d",
+                    len(final_explanation), question_id,
+                )
+            else:
+                # ── MIMO rejected → re-generate with DeepSeek directly ──
+                logger.warning(
+                    "Stage 2/3: MIMO rejected Q%d explanation: %s",
+                    question_id, mimo_response[:200],
+                )
+
+                await self._log_step(
+                    task_id, step="explain_stage3_fallback",
+                    message=f"Stage 3 fallback: DeepSeek v4 Pro re-generating for Q{question_id}",
+                )
+
+                deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
+                    "mode": "tutor",
+                    "prompt": _STAGE1_EXPLAIN_PROMPT.format(
+                        stem=stem, options_text=options_text, answer=answer,
+                        question_type=question_type or "未知",
+                    ),
+                })
+                deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
+                    "error": deepseek_raw.get("error", "MCP调用失败"), "response": "",
+                }
+                final_explanation = deepseek_result.get("response", "")
+                model_source = "deepseek_direct"
+                stages_completed.append("deepseek_direct")
+
+                if not final_explanation.strip():
+                    # Both MIMO and DeepSeek failed — use Qwen3.5 4B draft as-is
+                    logger.warning(
+                        "Stage 3 fallback also failed for Q%d — using Qwen3.5 4B draft",
+                        question_id,
+                    )
+                    final_explanation = draft_explanation
+                    model_source = "qwen_only"
+
+        # ── Save to database (shared by all paths) ──────────────────
+        # Session #98 P1: Save block is placed outside the if/else so
+        # both the normal 3-stage path and the Stage-1-failure fallback
+        # path converge here.
         try:
             async with async_session_factory() as session:
                 sol_repo = SolutionRepository(session)
@@ -767,6 +1018,253 @@ class AsyncPipeline(_DocumentProcessing):
                 "error": f"Save failed: {e}",
                 "stages": stages_completed,
             }
+
+    # ── Session #104: Enrichment Task Processing ─────────────────
+
+    async def _process_enrichment_task(self, task_data: dict[str, Any]) -> None:
+        """Process a batch enrichment task: solve → difficulty → embed.
+
+        Runs after document questions are saved, on a separate enrich worker.
+        This keeps document workers free for the next upload.
+
+        On failure, individual question failures are logged but the batch
+        continues processing remaining questions.
+        """
+        task_id = task_data["task_id"]
+        questions: list[dict] = task_data.get("questions", [])
+        document_key = task_data.get("document_key", "")
+
+        if not questions:
+            logger.warning("Enrichment task %s: no questions to process", task_id)
+            await self._set_status(task_id, {
+                "state": TASK_STATE_COMPLETED,
+                "steps_completed": [],
+                "detail": "No questions to enrich",
+            })
+            return
+
+        logger.info(
+            "Enrichment task %s: processing %d questions for %s",
+            task_id, len(questions), document_key,
+        )
+        await self._set_status(task_id, {"state": TASK_STATE_PROCESSING})
+        await self._log_step(task_id, "start", f"Enriching {len(questions)} questions")
+
+        steps_completed: list[str] = []
+
+        try:
+            # ── Step 0: Knowledge Point Mapping (no LLM, keyword only) ──
+            # Session #106: Added KP mapping to enrichment phase because
+            # the extraction-phase mapper results are lost during the
+            # Route A LLM annotation merge.  Running KP mapping here
+            # ensures all questions get knowledge points regardless of
+            # extraction path.  Uses keyword + type heuristic, no LLM.
+            try:
+                from app.domains.knowledge.mapper import KnowledgeMapper
+                from app.domains.knowledge.tree_seed.types import SUBJECT_CODES
+                from app.domains.knowledge.repository import KnowledgeRepository
+                from app.db.session import async_session_factory as _asf
+
+                _first_qid = questions[0]["id"] if questions else None
+                _detected_subject: str | None = None
+                if _first_qid:
+                    async with _asf() as _s:
+                        from sqlalchemy import text as _txt
+                        _r = await _s.execute(_txt(
+                            "SELECT s.name FROM questions q "
+                            "JOIN subjects s ON q.subject_id = s.id "
+                            "WHERE q.id = :qid"
+                        ), {"qid": _first_qid})
+                        _row = _r.fetchone()
+                        if _row:
+                            _name_to_code = {v: k for k, v in SUBJECT_CODES.items()}
+                            _detected_subject = _name_to_code.get(_row[0])
+
+                _mapper = KnowledgeMapper()
+                _kp_count = 0
+
+                async with _asf() as _kp_session:
+                    _kp_repo = KnowledgeRepository(_kp_session)
+                    for sq in questions:
+                        try:
+                            qid = sq["id"]
+                            content = sq.get("content", "")
+                            if not content:
+                                continue
+                            _codes: set[str] = set()
+                            for kw, cds in _mapper.keyword_index.items():
+                                if kw in content.lower():
+                                    for c in cds:
+                                        if (_detected_subject
+                                                and c.startswith(_detected_subject)):
+                                            _codes.add(c)
+                                        elif not _detected_subject:
+                                            _codes.add(c)
+                            if not _codes:
+                                continue
+                            _kps = [{
+                                "node_code": c, "node_name": "",
+                                "confidence": 0.7, "method": "keyword",
+                                "matched_keyword": "",
+                            } for c in _codes]
+                            saved = await _kp_repo.save_question_knowledge(qid, _kps)
+                            _kp_count += saved
+                        except Exception:
+                            pass
+                    if _kp_count > 0:
+                        await _kp_session.commit()
+                        await self._log_step(
+                            task_id, "knowledge_map",
+                            f"知识点映射完成: {_kp_count} 条",
+                        )
+                        steps_completed.append("knowledge_map")
+            except Exception as e:
+                logger.warning(
+                    "KP mapping in enrichment failed (non-fatal): %s", e,
+                )
+
+            # ── Step 1: Solution generation (concurrent, semaphore=4) ──
+            _solve_sem = asyncio.Semaphore(4)
+
+            async def _solve_one(sq: dict) -> tuple[bool, bool]:
+                async with _solve_sem:
+                    try:
+                        existing_answer = sq.get("answer", "").strip()
+                        existing_explanation = sq.get("explanation", "").strip()
+                        if existing_answer:
+                            sol_result = await self._save_extracted_solution(
+                                sq["id"], existing_answer, existing_explanation,
+                            )
+                            return (sol_result.get("status") == "ok", False)
+                        else:
+                            sol_result = await self._step_solve_question(
+                                sq["id"], sq["content"]
+                            )
+                            return (sol_result.get("status") == "ok", True)
+                    except Exception as e:
+                        logger.warning(
+                            "Enrich solve failed for Q%d: %s", sq["id"], e,
+                        )
+                        return (False, False)
+
+            solve_results = await asyncio.gather(
+                *[_solve_one(sq) for sq in questions],
+            )
+            solved_count = sum(1 for ok, _ in solve_results if ok)
+            llm_called = sum(1 for _, was_llm in solve_results if was_llm)
+            await self._log_step(
+                task_id, "solve",
+                f"解答完成: {solved_count}/{len(questions)} (LLM {llm_called} 次)",
+            )
+            steps_completed.append("solve")
+
+            # ── Step 2: Difficulty evaluation (concurrent, semaphore=4) ──
+            _diff_sem = asyncio.Semaphore(4)
+
+            async def _eval_one(sq: dict) -> bool:
+                async with _diff_sem:
+                    try:
+                        diff_result = await self._step_evaluate_difficulty(
+                            sq["id"], sq["content"],
+                        )
+                        return diff_result.get("status") == "ok"
+                    except Exception as e:
+                        logger.warning(
+                            "Enrich difficulty failed for Q%d: %s", sq["id"], e,
+                        )
+                        return False
+
+            diff_results = await asyncio.gather(
+                *[_eval_one(sq) for sq in questions],
+            )
+            diff_count = sum(1 for ok in diff_results if ok)
+            await self._log_step(
+                task_id, "difficulty",
+                f"难度评估完成: {diff_count}/{len(questions)}",
+            )
+            steps_completed.append("difficulty")
+
+            # ── Step 3: Embedding (concurrent, pause explain workers) ──
+            await self.pause_explain_workers()
+            try:
+                _embed_sem = asyncio.Semaphore(4)
+
+                async def _embed_one(sq: dict) -> bool:
+                    async with _embed_sem:
+                        try:
+                            embed_result = await self._step_embed(
+                                sq["id"], sq["content"],
+                            )
+                            return embed_result.get("status") != "error"
+                        except Exception as e:
+                            logger.warning(
+                                "Enrich embed failed for Q%d: %s", sq["id"], e,
+                            )
+                            return False
+
+                embed_results = await asyncio.gather(
+                    *[_embed_one(sq) for sq in questions],
+                )
+                embed_count = sum(1 for ok in embed_results if ok)
+                await self._log_step(
+                    task_id, "embed",
+                    f"向量嵌入完成: {embed_count}/{len(questions)}",
+                )
+                steps_completed.append("embed")
+            finally:
+                await self.resume_explain_workers()
+
+            # ── Step 4: Enqueue explanation generation ──
+            needs_explanation = [
+                {
+                    "question_id": sq["id"],
+                    "stem": sq.get("content", sq.get("question_text", "")),
+                    "answer": sq.get("answer", ""),
+                    "explanation": sq.get("explanation", ""),
+                    "question_type": sq.get("question_type", ""),
+                    "options": sq.get("options", []),
+                }
+                for sq in questions
+                if sq.get("answer", "").strip()
+                and not sq.get("explanation", "").strip()
+                and len(sq.get("answer", "").strip()) <= 500
+            ]
+            if needs_explanation:
+                enqueued = await self.enqueue_explanations(needs_explanation)
+                await self._log_step(
+                    task_id, "explain_enqueue",
+                    f"详解生成已入队: {enqueued} 道",
+                )
+                steps_completed.append("explain_enqueue")
+
+            await self._set_status(task_id, {
+                "state": TASK_STATE_COMPLETED,
+                "steps_completed": steps_completed,
+                "detail": (
+                    f"富化完成: {solved_count} 解答, {diff_count} 难度, "
+                    f"{embed_count} 嵌入"
+                ),
+                "question_count": len(questions),
+            })
+            await self._log_step(task_id, "done", "Enrichment batch completed")
+            logger.info(
+                "Enrichment task %s completed: %d solve, %d diff, %d embed",
+                task_id, solved_count, diff_count, embed_count,
+            )
+
+        except Exception as e:
+            logger.error(
+                "Enrichment task %s failed: %s", task_id, e, exc_info=True,
+            )
+            await self._set_status(task_id, {
+                "state": TASK_STATE_FAILED,
+                "steps_completed": steps_completed,
+                "error": str(e),
+            })
+            await self._log_step(
+                task_id, "error",
+                f"Enrichment failed at {steps_completed[-1] if steps_completed else 'start'}: {e}",
+            )
 
     # ── Pipeline Steps (stub implementations) ─────────────────
 
@@ -1001,12 +1499,18 @@ class AsyncPipeline(_DocumentProcessing):
             from app.db.session import async_session_factory
             from app.domains.question.solution_repository import SolutionRepository
 
+            # Session #98 P2-E: Sanitize solution_steps to prevent DB insert
+            # failures from Python Ellipsis (...) or non-serializable values
+            # that leak from MIMO's raw LLM output.
+            raw_steps = sol_data.get("solution_steps")
+            safe_steps = _sanitize_solution_steps(raw_steps)
+
             async with async_session_factory() as session:
                 sol_repo = SolutionRepository(session)
                 await sol_repo.create(
                     question_id=question_id,
                     final_answer=final_answer,
-                    solution_steps=sol_data.get("solution_steps"),
+                    solution_steps=safe_steps,
                     explanation=sol_data.get("explanation"),
                     model_source=sol_data.get("model_used"),
                     mode="auto_solve",

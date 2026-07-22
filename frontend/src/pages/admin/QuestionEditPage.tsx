@@ -6,6 +6,7 @@ import {
 import { EditOutlined, SaveOutlined, DeleteOutlined, PictureOutlined } from "@ant-design/icons";
 import { apiGet, apiPutForm, apiDelete } from "../../services/api";
 import { DIFFICULTY_LABELS } from "../../types";
+import MathRenderer from "../../components/MathRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -144,7 +145,7 @@ export default function QuestionEditPage() {
         {question ? (
           <Card>
             <Tag color="blue">#{question.id}</Tag>
-            <Paragraph style={{ marginTop: 8 }}>{question.content}</Paragraph>
+            <Paragraph style={{ marginTop: 8 }}><MathRenderer content={question.content || ""} /></Paragraph>
             {question.subject_name && <Tag>{question.subject_name}</Tag>}
             {question.images && question.images.length > 0 && (
               <>

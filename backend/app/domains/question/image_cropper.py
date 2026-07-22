@@ -73,6 +73,17 @@ class QuestionImageCropper:
             {"image_key": str, "image_type": "cropped"} or None if failed
         """
         try:
+            # Session #98 P2-B: Verify file exists before attempting to read.
+            # Temp files may have been cleaned up or the path may be a MinIO
+            # object key misrouted as a local path.
+            import os as _os
+            if not _os.path.isfile(image_path):
+                logger.warning(
+                    "Image file not found (may be MinIO key misrouted as local path): %s",
+                    image_path[:120],
+                )
+                return None
+
             # Load image (use np.fromfile + cv2.imdecode to support Chinese paths on Windows)
             img_data = np.fromfile(image_path, dtype=np.uint8)
             img = cv2.imdecode(img_data, cv2.IMREAD_COLOR)

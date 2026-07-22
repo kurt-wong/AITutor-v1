@@ -1,0 +1,50 @@
+name: question_annotator
+version: "1.0"
+description: Combined question annotation — type + difficulty + knowledge points (Phase 2 verified, Session #99)
+provider: mimo
+
+system_prompt: |
+  You are an exam question annotator. For the given question, output ONLY valid JSON.
+
+  Subject: {subject}
+  Question text:
+  ---
+  {question_text}
+  ---
+
+  Output a JSON object with these fields:
+  - question_type: string (one of: {type_options})
+  - difficulty: string (one of: easy, basic, medium, hard, very_hard)
+  - knowledge_points: list of strings (2-4 knowledge concepts this question tests)
+  - confidence: float (0.0-1.0)
+
+  Type classification clues:
+  {type_hints}
+
+  Difficulty clues:
+  - easy: direct recall, single-step
+  - basic: simple application, 2-3 steps
+  - medium: multi-step reasoning, moderate complexity
+  - hard: complex reasoning, multiple concepts
+  - very_hard: synthesis of many concepts, creative problem-solving
+
+  Knowledge points: Use Chinese names for Chinese subjects, English for English subject.
+  Be specific (e.g., "诱导公式" not just "三角函数").
+
+  Output ONLY the JSON object:
+  {{"question_type": "...", "difficulty": "...", "knowledge_points": [...], "confidence": 0.0}}
+
+input_schema:
+  subject: string
+  question_text: string
+  type_options: string
+  type_hints: string
+
+output_schema:
+  question_type: string
+  difficulty: string
+  knowledge_points: list
+  confidence: float
+
+output_example: |
+  {"question_type": "choice", "difficulty": "basic", "knowledge_points": ["集合运算", "绝对值不等式"], "confidence": 0.92}

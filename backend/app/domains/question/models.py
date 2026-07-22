@@ -33,7 +33,8 @@ class Question(Base, IDMixin, TimestampMixin):
         String(20), nullable=False, default="uploaded"
     )
     # Session #79: Question type from structurer (choice/fill/essay/proof/calculation)
-    question_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Session #102: widened to 30 for Gaokao taxonomy (max "environmental_protection" = 25 chars)
+    question_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     # Phase 2: text description, enhanced image, difficulty level
     text_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_enhanced_key: Mapped[str | None] = mapped_column(String(500), nullable=True)

@@ -102,6 +102,13 @@ class OllamaProvider(EmbeddingProvider):
                     )
 
                 data = response.json()
+                if not data or not isinstance(data, dict):
+                    return EmbeddingResult(
+                        success=False,
+                        error_message=f"Ollama API returned non-dict response: {data}",
+                        provider=self.name,
+                        model=self._model,
+                    )
                 vector = data.get("embedding", [])
 
                 if not vector:

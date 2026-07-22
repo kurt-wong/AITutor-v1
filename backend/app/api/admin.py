@@ -30,6 +30,8 @@ from app.domains.document.service import DocumentService
 from app.domains.question.service import QuestionService
 from app.domains.question.solution_service import SolutionService
 from app.domains.system.config_service import SystemConfigService
+from sqlalchemy import select
+from app.domains.question.models import QuestionKnowledge
 from app.gateway.router import llm_gateway
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -352,6 +354,22 @@ async def analyze_document(
             dist[d] = dist.get(d, 0) + 1
         return dist
 
+    # Session #101 P1: batch-fetch knowledge points for E2E verification
+    q_ids = [q.id for q in questions]
+    kp_map: dict[int, list[dict]] = {qid: [] for qid in q_ids}
+    if q_ids:
+        kp_rows = await session.execute(
+            select(QuestionKnowledge).where(
+                QuestionKnowledge.question_id.in_(q_ids)
+            )
+        )
+        for kp in kp_rows.scalars().all():
+            kp_map[kp.question_id].append({
+                "node_code": kp.node_code,
+                "node_name": kp.node_name,
+                "confidence": kp.confidence,
+            })
+
     result: dict = {
         "document": document,
         "questions": [
@@ -361,6 +379,8 @@ async def analyze_document(
                 "difficulty": q.difficulty,
                 "question_number": q.question_number,
                 "source_type": q.source_type,
+                "question_type": q.question_type,  # Session #100: expose for E2E verification
+                "knowledge_points": kp_map.get(q.id, []),  # Session #101 P1: expose for E2E
             }
             for q in questions
         ],

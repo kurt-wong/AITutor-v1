@@ -128,6 +128,14 @@ class LLMGatewayMCPServer(MCPServerBase):
             return error_response("VALIDATION_ERROR", "question_text is required")
         try:
             system_prompt = get_system_prompt("question_solver")
+            # Session #101: detect English subject → answer in English
+            subj_lower = (subject or "").lower()
+            is_english = subj_lower in ("english", "英语")
+            if is_english:
+                system_prompt = system_prompt.replace(
+                    "必须使用中文回答。",
+                    "You MUST answer in English. Use English for all output.",
+                )
             full_prompt = f"{system_prompt}\n\nSubject: {subject}\nQuestion: {question_text}"
 
             # Fallback chain: MIMO (fast) → DeepSeek (reasoning) → Ollama (local)
@@ -136,6 +144,14 @@ class LLMGatewayMCPServer(MCPServerBase):
                 try:
                     result = await llm_gateway.generate(mode=mode, prompt=full_prompt)
                     raw_text = result.get("response", "").strip()
+                    # Session #98 P2-E: Strip <think>...</think> CoT tags
+                    # that MIMO sometimes leaks into the final response.
+                    import re as _re_cot
+                    raw_text = _re_cot.sub(
+                        r"<think>.*?</think>", "", raw_text,
+                        flags=_re_cot.DOTALL | _re_cot.IGNORECASE,
+                    ).strip()
+                    result["response"] = raw_text
                     if raw_text and len(raw_text) > 10:
                         break  # Got meaningful content, stop
                     logger.warning(f"solve_question mode={mode} empty/short response, trying next")
@@ -192,10 +208,12 @@ class LLMGatewayMCPServer(MCPServerBase):
                 solution_steps = parsed.get("solution_steps", []) if parsed else []
                 explanation = parsed.get("explanation", "") if parsed else ""
 
-                # ── CoT / reasoning-chain leak guard ──
+                # ── CoT / reasoning-chain leak guard (Session #99 improved) ──
                 # If the raw response looks like a reasoning chain rather
                 # than an answer (e.g. "首先，用户要求我作为教育辅导老师…"),
-                # reject it instead of persisting CoT into the database.
+                # try to extract the real answer after common CoT→answer
+                # transition markers.  Only fall back to [解析失败] when
+                # extraction yields nothing useful.
                 import re  # 修复: 此前未导入导致 NameError → LLM_FAILURE
                 _COT_INDICATORS = re.compile(
                     r"(?:首先[，,].*(?:要求|需要|让我)|"
@@ -204,18 +222,84 @@ class LLMGatewayMCPServer(MCPServerBase):
                     r"让我(?:分析|思考|想想)|"
                     r"我需要(?:先|首先)|"
                     r"Let me (?:think|analyze|consider)|"
-                    r"I need to (?:first|understand))",
+                    r"I need to (?:first|understand)|"
+                    # Session #101 Q4154: detect prompt echo /
+                    # instruction leakage (LLM repeats system prompt
+                    # instead of answering)
+                    r"请以一位.*?(?:辅导|老师|的身份)|"
+                    r"只输出有效JSON|"
+                    r"请严格遵守格式约束|"
+                    r"不要暴露思考过程|"
+                    r"只返回教学步骤)",
                     re.IGNORECASE,
                 )
                 if _COT_INDICATORS.search(raw_response[:500]):
                     logger.warning(
-                        "CoT leak detected in solve_question response "
-                        "(question_id=%s). Replacing with placeholder.",
+                        "CoT indicators detected in solve_question "
+                        "(question_id=%s). Attempting answer extraction.",
                         question_id,
                     )
-                    final_answer = "[解析失败]"
-                    solution_steps = []
-                    explanation = ""
+                    # Session #99: Try to extract the answer portion after
+                    # common CoT→answer transition markers (e.g. "最终答案：",
+                    # "所以答案是") instead of blindly replacing with
+                    # [解析失败].
+                    _ANSWER_TRANSITIONS = [
+                        r'最终答案\s*[：:]\s*',
+                        r'故答案为?\s*[：:]\s*',
+                        r'答案为?\s*[：:]\s*',
+                        r'正确答案为?\s*[：:]\s*',
+                        r'所以\s*(?:正确\s*)?答案\s*(?:是|为|：|:)\s*',
+                        r'因此\s*[,，]?\s*(?:正确\s*)?答案\s*(?:是|为|：|:)\s*',
+                        r'(?:final\s+)?answer\s*[：:]\s*',
+                        r'正确选项\s*(?:是|为|：|:)\s*',
+                        r'综上所述\s*[,，]?\s*(?:答案|选项)\s*(?:是|为|：|:)\s*',
+                        r'故选(?:择)?\s*[：:]?\s*',
+                        r'故[，,]?\s*(?:答案为?|选择?)?\s*(?:[：:]|是|为)?\s*',
+                        r'即\s*[,，]?\s*(?:答案|结果)?\s*(?:为|是|：|:)?\s*',
+                        r'所求(?:结果|答案)?\s*(?:为|是|：|:)\s*',
+                    ]
+                    extracted = raw_response
+                    for pattern in _ANSWER_TRANSITIONS:
+                        m = re.search(pattern, extracted, re.IGNORECASE)
+                        if m:
+                            after = extracted[m.end():].strip()
+                            if after and len(after) > 2:
+                                extracted = after
+                                logger.info(
+                                    "CoT guard: extracted answer after "
+                                    "'%s' → '%s'",
+                                    m.group()[:40], extracted[:80],
+                                )
+                                break
+
+                    if extracted != raw_response and len(extracted) > 2:
+                        final_answer = extracted
+                    else:
+                        # Session #101: last-resort — try the last short
+                        # non-empty line (often holds the answer in Chinese
+                        # math solutions)
+                        lines = raw_response.strip().split('\n')
+                        last_line = None
+                        for line in reversed(lines):
+                            stripped = line.strip()
+                            if stripped and len(stripped) > 1:
+                                last_line = stripped
+                                break
+                        if last_line and last_line != raw_response.strip()[:len(last_line)]:
+                            if len(last_line) <= 200:
+                                final_answer = last_line
+                                logger.info(
+                                    "CoT guard: last-line fallback → '%s'",
+                                    final_answer[:80],
+                                )
+                            else:
+                                final_answer = "[解析失败]"
+                                solution_steps = []
+                                explanation = ""
+                        else:
+                            final_answer = "[解析失败]"
+                            solution_steps = []
+                            explanation = ""
 
                 elif raw_response.strip().startswith("{"):
                     # Raw response looks like JSON — try regex salvage

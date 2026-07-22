@@ -477,9 +477,8 @@ def test_p3_embedding_mcp_exists(r: TestResult):
 
 def test_p3_embedding_model_exists(r: TestResult):
     """P3: QuestionEmbedding model exists with pgvector Vector column."""
-    from app.models.embedding import QuestionEmbedding, SimilarQuestionCache
+    from app.domains.embedding.models import QuestionEmbedding
     assert_check(QuestionEmbedding.__tablename__ == "question_embeddings", "QuestionEmbedding tablename wrong", r)
-    assert_check(SimilarQuestionCache.__tablename__ == "similar_question_cache", "SimilarQuestionCache tablename wrong", r)
     r.passed = True
 
 def test_p3_embedding_repository_exists(r: TestResult):

@@ -4,6 +4,7 @@ import { FileTextOutlined } from "@ant-design/icons";
 import { apiGetParams } from "../services/api";
 import type { Question } from "../types";
 import { DIFFICULTY_COLORS } from "../types";
+import MathRenderer from "../components/MathRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -63,7 +64,7 @@ export default function QuestionPage() {
                     <Tag color="blue">#{q.id}</Tag>
                     {q.difficulty && <Tag color={DIFFICULTY_COLORS[q.difficulty]}>{q.difficulty}</Tag>}
                   </Space>
-                  <Paragraph style={{ marginTop: 8 }}>{q.content}</Paragraph>
+                  <Paragraph style={{ marginTop: 8 }}><MathRenderer content={q.content || ""} /></Paragraph>
                   <Text type="secondary">{q.source_type}</Text>
                 </Card>
               </List.Item>

@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     # Parallel Extraction Pipeline (Phase 3 — 4-component architecture)
     PARALLEL_EXTRACTION_ENABLED: bool = True  # Enable parallel pipeline (C1-C4)
     PARALLEL_EXTRACTION_WORKERS: int = 4       # C2 ThreadPoolExecutor max_workers
-    PIPELINE_WORKERS: int = 3                  # Number of async pipeline workers
+    PIPELINE_WORKERS: int = 8                  # Number of async pipeline workers (4 doc + 2 enrich + 2 explain, #104)
     LLM_VERIFY_CONFIDENCE_THRESHOLD: float = 0.85  # Below this -> [NEED_LLM_VERIFY]
     PARALLEL_EXTRACTION_DPI: int = 200          # Render DPI for page images
     PARALLEL_EXTRACTION_SCAN_THRESHOLD: int = 50  # chars/page below which = scanned
@@ -108,10 +108,10 @@ class Settings(BaseSettings):
     # Ollama Configuration
     OLLAMA_BASE_URL: str = "http://localhost:11434"
 
-    # VibeThinker — local STEM reasoning model (Session #47 Part B)
-    # vibethinker-3b:q8_0: 3.1B params, Q8_0 quant (~3.3GB VRAM)
-    # Used for generating detailed explanations for questions without them
-    VIBETHINKER_MODEL: str = "vibethinker-3b:q8_0"
+    # Qwen3.5 4B — local general-purpose model (Session #95)
+    # Replaces vibethinker-3b (STEM-only) for broader subject coverage.
+    # qwen3.5:4b: 4B params, Q4_K_M quant (~2.5GB VRAM)
+    VIBETHINKER_MODEL: str = "qwen3.5:4b"
     VIBETHINKER_TIMEOUT: int = 300  # seconds — explanations take longer
 
     # CORS — comma-separated origins. Matches Vite dev server + common local URLs.
@@ -127,6 +127,12 @@ class Settings(BaseSettings):
 
     # LLM Annotation — 一次性标注完整试卷 Markdown（替代逐题正则拆分）
     LLM_ANNOTATION_ENABLED: bool = False  # 启用 LLM 标注管线（metadata + questions JSON）
+
+    # 题目结构化模式 (Phase 3+ / Session #99):
+    #   regex  — 现有 structurer.py regex 解析（默认，稳定）
+    #   hybrid — regex 切分 + LLM 组合标注（Phase 3 目标，最优组合）
+    #   llm    — 全 LLM 管线（预留，暂不实现）
+    PADDLEOCR_ANNOTATION_MODE: str = "regex"
 
     # Admin
     ADMIN_API_KEY: str = ""

@@ -48,6 +48,8 @@ class StructuredQuestion:
     source_page: int = 1                     # 起始页码
     question_type: str = "calculation"       # "choice" | "multi_choice" | "fill" | "essay" | "proof" | "calculation"
     stem_confidence: float = 1.0             # 1.0=clean, <0.5=likely contaminated (Phase C P0)
+    difficulty: str | None = None            # Session #100: LLM annotation ("easy"|"basic"|"medium"|"hard"|"very_hard")
+    knowledge_points: list[str] = field(default_factory=list)  # Session #100: LLM concept names
     _pairing_method: str | None = field(default=None, repr=False)  # P2: "explicit" | "sequential" | None
     _cross_page: bool = field(default=False, repr=False)  # True when merged across pages
     _qno_raw: str = field(default="", repr=False)  # original QNO text from candidate
@@ -63,6 +65,8 @@ class StructuredQuestion:
             "source_page": self.source_page,
             "question_type": self.question_type,
             "stem_confidence": self.stem_confidence,
+            "difficulty": self.difficulty,
+            "knowledge_points": self.knowledge_points,
         }
 
 
@@ -324,7 +328,10 @@ _PAREN_OPTION = re.compile(r"[（(][A-Fa-f][）)]")
 # Fill-in-the-blank signals
 # Session #79: ①②③④ only match when followed by blank indicators (_, （, (）
 # to avoid false positives in political stems where they're statement markers.
-_FILL_MARKER = re.compile(r"[_]{2,}|[（(]\s*[）)]|[①②③④]\s*[_（(]")
+# Session #96: Added [（(][a-zA-Z]{2,}[）)] to catch English grammar fill
+# questions like "I promised that I (attend) the meeting..."
+# Requires ≥2 letters to avoid false positives on single-letter option markers.
+_FILL_MARKER = re.compile(r"[_]{2,}|[（(]\s*[）)]|[（(][a-zA-Z]{2,}[）)]|[①②③④]\s*[_（(]")
 
 # Sentence-ending punctuation (for cross-page detection)
 _SENTENCE_END = re.compile(r"[。？！）\)]$")
@@ -375,11 +382,23 @@ _NOISE_EXAM_FOOTER = re.compile(r"(?:答题卡|交回|准考证|条形码|贴条
 
 # Session #84: Mock-mode classification keywords — centralised here for
 # _mock_classify_type().  Live mode uses MIMO LLM instead.
+# Session #96: Added English essay keywords (reading, cloze, writing, etc.)
 _MOCK_ESSAY = re.compile(
     r"阅读|作文|写作|书面表达|完形填空|阅读理解|任务型阅读"
     r"|短文改错|语法填空|翻译|造句|连词成句|默写|背诵|写出"
     r"|简述|简答|说明|分析|阐述|评析|谈谈|结合材料|阅读材料"
     r"|运用知识|归纳|概括|回答问题|指出|论述|论证|评述|理解|认识"
+    # English essay patterns
+    r"|Read(?:ing)?\s+(?:the\s+)?(?:passage|text|article|story)"
+    r"|Cloze\s+Test|Grammar\s+Fill|Writing\s+(?:Task|Section)"
+    r"|Task[- ]based\s+Reading|Summary\s+Writing"
+    r"|Answer\s+the\s+questions|Short\s+Answer"
+    r"|Explain|Discuss|Describe|Summarize|Analyse|Analyze"
+    # Chinese-English mixed grammar patterns (Session #96)
+    r"|所给词的适当形式填空|用适当的词填空|用括号内"
+    r"|适当形式|用所给动词|用所给单词"
+    r"|词形变换|动词填空|单词拼写|根据句意"
+    r"|用方框中所给|根据汉语提示|根据首字母"
 )
 _MOCK_PROOF = re.compile(r"证明|求证|判断正误|判断对错|辨析")
 _MOCK_CALC = re.compile(
@@ -615,12 +634,17 @@ class QuestionStructurer:
 
     async def _classify_unknown_types(
         self, questions: list["StructuredQuestion"],
+        subject: str | None = None,
     ) -> list[str]:
         """Batch-classify questions with unknown types via LLM Gateway.
 
         Returns a list of type strings in the same order as input questions.
         Uses MIMO fast mode for low cost. Falls back to simple heuristic
         in mock mode or on error.
+
+        Args:
+            questions: Questions with unknown type (question_type is None).
+            subject: Subject code hint (e.g. "math", "english", "chemistry").
         """
         from app.core.config import settings
 
@@ -641,11 +665,34 @@ class QuestionStructurer:
                 parts.append(f"[{i}] {q.stem[:200]}")
             batch_text = "\n".join(parts)
 
+            # Subject-aware type guidance (Session #95)
+            _SUBJECT_HINT: dict[str, str] = {
+                "math": "数学题：选择/填空/解答/证明，解答题归 essay",
+                "physics": "物理题：选择/填空/实验/计算，实验题和解答题归 essay",
+                "chemistry": "化学题：选择/填空/实验/计算，实验题和解答题归 essay",
+                "english": "英语题：阅读/完形/语法填空/写作归 essay，单选归 choice",
+                "chinese": "语文题：阅读/作文/默写/翻译归 essay，选择题归 choice",
+                "biology": "生物题：选择/填空/实验归 essay，无 calculation",
+                "politics": "政治题：选择/简答/论述归 essay，无 calculation",
+                "history": "历史题：选择/简答/论述归 essay，无 calculation",
+                "geography": "地理题：选择/填空/简答归 essay，计算类才归 calculation",
+            }
+            subj_hint = _SUBJECT_HINT.get(subject or "", "")
+
             prompt = (
                 "Classify each question below into one type: "
                 "choice, multi_choice, fill, essay, proof, calculation.\n"
-                "Return ONLY valid JSON array, same order:\n"
-                '[{"question_type":"calculation","confidence":0.9}, ...]\n\n'
+                + (f"Subject context: {subj_hint}\n" if subj_hint else "")
+                + "Type rules:\n"
+                "- choice: has A/B/C/D options (single answer)\n"
+                "- multi_choice: has multiple correct options\n"
+                "- fill: has blanks (___ / （  ）) to fill in\n"
+                "- proof: asks to prove/verify something\n"
+                "- essay: reading comprehension, writing, short answer, "
+                "explain, cloze, grammar, experiment design\n"
+                "- calculation: compute, solve, simplify, evaluate\n"
+                "Return ONLY valid JSON object:\n"
+                '{"types": [{"question_type":"essay","confidence":0.9}, ...]}\n\n'
                 f"{batch_text}"
             )
 
@@ -653,16 +700,51 @@ class QuestionStructurer:
                 mode="fast", prompt=prompt,
                 response_format={"type": "json_object"},
             )
-            response = result.get("response", "[]")
+            response = result.get("response", "{}")
 
-            # Parse JSON array
+            # Parse JSON (response_format guarantees valid JSON object)
             import json
             parsed = json.loads(response) if isinstance(response, str) else response
-            if isinstance(parsed, list):
-                return [
-                    item.get("question_type", "calculation")
-                    for item in parsed[:len(questions)]
-                ]
+            types_list = parsed.get("types", []) if isinstance(parsed, dict) else []
+            # Session #96: Tolerant key matching — LLM may return
+            # {"type":"essay"} instead of {"question_type":"essay"}.
+            # Also try alternative array keys ("results", "data").
+            if not types_list and isinstance(parsed, dict):
+                for alt_key in ("results", "data", "classifications"):
+                    alt = parsed.get(alt_key)
+                    if isinstance(alt, list) and alt:
+                        types_list = alt
+                        logger.info(
+                            "LLM classification used alt key '%s' (expected 'types')",
+                            alt_key,
+                        )
+                        break
+            if isinstance(types_list, list) and types_list:
+                result_types = []
+                for item in types_list[:len(questions)]:
+                    if isinstance(item, dict):
+                        # Tolerant: try "question_type" first, then "type", then "category"
+                        qt = item.get("question_type") or item.get("type") or item.get("category")
+                        result_types.append(qt if qt and qt in _VALID_VL_TYPES else "calculation")
+                    elif isinstance(item, str):
+                        result_types.append(item if item in _VALID_VL_TYPES else "calculation")
+                    else:
+                        result_types.append("calculation")
+                # If all results are "calculation" and we have a subject hint,
+                # it's likely a JSON parsing issue — log a warning
+                if result_types and all(t == "calculation" for t in result_types):
+                    logger.warning(
+                        "LLM classification returned all 'calculation' — "
+                        "possible JSON key mismatch. Raw types_list sample: %s",
+                        str(types_list[:3])[:200],
+                    )
+                return result_types
+            else:
+                logger.warning(
+                    "LLM classification: types_list empty or missing. "
+                    "Raw response keys: %s",
+                    list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__,
+                )
         except Exception as e:
             logger.warning(f"LLM classification failed: {e}")
 
@@ -671,20 +753,54 @@ class QuestionStructurer:
 
     async def classify_pending_types(
         self, questions: list["StructuredQuestion"],
+        subject: str | None = None,
     ) -> None:
-        """Classify questions with None question_type in-place (async).
+        """Classify questions with unknown or default types in-place.
 
         Call this from async callers after structure() when running
-        inside an event loop.  structure() itself cannot await in
-        async context, so Tier-4 unknowns stay None until this method
-        is called.
+        inside an event loop.
+
+        Handles two cases:
+        - question_type is None (Tier-4 unknown from sync structure())
+        - question_type is "calculation" (default) — reclassify unless
+          subject is math/physics where calculation is legitimate
+
+        Args:
+            questions: Questions to classify in-place.
+            subject: Subject code hint for better classification accuracy.
         """
-        unclassified = [q for q in questions if q.question_type is None]
+        # Include both None types AND default "calculation" types
+        # (Session #95: default "calculation" was preventing LLM
+        #  reclassification for non-STEM subjects like English)
+        _CALC_SUBJECTS = frozenset({"math", "physics"})
+        unclassified = [
+            q for q in questions
+            if q.question_type is None
+            or (q.question_type == "calculation"
+                and subject not in _CALC_SUBJECTS)
+        ]
         if not unclassified:
+            # Session #96: Even when no unclassified questions exist, ensure
+            # non-STEM subjects never have "calculation" type (safety net).
+            if subject and subject not in _CALC_SUBJECTS:
+                for q in questions:
+                    if q.question_type == "calculation":
+                        q.question_type = "essay"
             return
-        classified = await self._classify_unknown_types(unclassified)
+        classified = await self._classify_unknown_types(
+            unclassified, subject=subject,
+        )
         for q, new_type in zip(unclassified, classified):
             q.question_type = new_type
+        # Session #96: Post-classification safety net — for non-STEM subjects
+        # (English, Chinese, biology, politics, history, geography), there is
+        # no legitimate "calculation" question type.  Any remaining
+        # "calculation" after LLM classification is a classification error.
+        # Convert to "essay" as the safest fallback.
+        if subject and subject not in _CALC_SUBJECTS:
+            for q in questions:
+                if q.question_type == "calculation":
+                    q.question_type = "essay"
 
     def structure(
         self,
@@ -3900,7 +4016,7 @@ def _pair_answers(
     # would cause systematic misalignment (e.g. teacher-edition explanation
     # text leaking into Phase C as fake answer items).  Skip the fallback
     # entirely to avoid polluting answers.
-    _MISMATCH_THRESHOLD = 3
+    _MISMATCH_THRESHOLD = 10  # Session #98: increased from 3 for teacher-edition PDFs
     if abs(len(unmatched_items) - len(unanswered)) > _MISMATCH_THRESHOLD:
         logger.warning(
             "Sequential zip skipped: %d unmatched answer items vs %d unanswered "

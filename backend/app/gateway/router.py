@@ -551,7 +551,7 @@ class LLMGateway:
         """
         import httpx
         ollama_url = self._configs.get("llm.ollama.base_url") or settings.OLLAMA_BASE_URL
-        model = self._configs.get("llm.ollama.text_model") or getattr(settings, "OLLAMA_TEXT_MODEL", "qwen2.5:7b")
+        model = self._configs.get("llm.ollama.text_model") or getattr(settings, "OLLAMA_TEXT_MODEL", "qwen3.5:4b")
         try:
             async with httpx.AsyncClient(
                 timeout=120.0,

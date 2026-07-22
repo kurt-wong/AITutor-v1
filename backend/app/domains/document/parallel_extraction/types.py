@@ -191,10 +191,17 @@ class PaddleOCRResult:
     provider: str = "paddleocr_vl_api"
     success: bool = True
     error_message: Optional[str] = None
+    paddleocr_markdown: str = ""  # Session #101 P2: markdown with MinIO image URLs
 
     @property
     def full_markdown(self) -> str:
-        """Reconstructed full-document markdown from all pages."""
+        """Reconstructed full-document markdown.
+
+        Session #101 P2: if paddleocr_markdown was explicitly set (e.g.
+        after image URL rewriting), return that instead of raw pages.
+        """
+        if self.paddleocr_markdown:
+            return self.paddleocr_markdown
         parts: list[str] = []
         for page in sorted(self.pages, key=lambda p: p.page_num):
             if page.markdown_text:

@@ -7,6 +7,7 @@ Per DSD §17.6: create, get_by_id, list_by_subject, update, delete
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.domains.question.models import Question
 
@@ -44,9 +45,11 @@ class QuestionRepository:
         return question
 
     async def get_by_id(self, question_id: int) -> Question | None:
-        """Get question by ID."""
+        """Get question by ID (eager-load subject for service layer)."""
         result = await self.session.execute(
-            select(Question).where(Question.id == question_id)
+            select(Question)
+            .where(Question.id == question_id)
+            .options(selectinload(Question.subject))
         )
         return result.scalar_one_or_none()
 

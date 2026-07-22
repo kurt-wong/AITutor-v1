@@ -180,10 +180,10 @@ class PaddleParallelExtractor:
         """
         from paddleocr import PaddleOCR
 
+        # Session #103: PaddleOCR 3.7.0 removed legacy constructor args
+        # (show_log, use_gpu).  GPU inference is auto-detected by the library.
         with self.__class__._ocr_init_lock:
             return PaddleOCR(
                 use_angle_cls=True,
                 lang=self._lang,
-                use_gpu=self._use_gpu,
-                show_log=False,
             )

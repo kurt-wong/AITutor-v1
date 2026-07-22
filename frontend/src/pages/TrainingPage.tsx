@@ -9,6 +9,7 @@ import {
 } from "@ant-design/icons";
 import { apiGet, apiPost } from "../services/api";
 import type { TrainingSet, TrainingQuestion, SubmitResult } from "../types";
+import MathRenderer from "../components/MathRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -243,7 +244,7 @@ export default function TrainingPage() {
 
         <Card>
           <Paragraph style={{ fontSize: 16, whiteSpace: "pre-wrap", marginBottom: 24 }}>
-            <b>{currentIndex + 1}.</b> {current.content}
+            <b>{currentIndex + 1}.</b> <MathRenderer content={current.content || ""} />
           </Paragraph>
           <Divider />
           <div style={{ marginBottom: 16 }}>
