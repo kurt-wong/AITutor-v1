@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-07-22 Session #106 | **版本**: 1.7.0 | **完成度**: 核心链路 ~99%，整体 ~95%。**#104-#105**: 管线重构全部实施（合并标注 + 两阶段处理 + 富化队列 + Worker 优化 + 标注并发化），单文档 ~20min → ~3-5min。**#106**: E2E 3 科验证通过（76 题 ~1min），知识点映射修复（323 条记录）
+> **最后更新**: 2026-07-25 Session #128 (Prompt 优化实施完成) | **版本**: 1.23.9 | **完成度**: 核心链路 ~99%，整体 ~96%。**#128**: Prompt 系统优化全部 8 步已完成。V1 常量已废弃，全模块统一使用 V3 prompt。排版职责分离（LLM 提取 + 代码后处理）。新增子题合并 + 反幻觉指令。
 >
 > 自 v1.1.0 起，本文档承接原 CLAUDE.md 中的全部状态类内容（技术栈、管线状态、开发状态、已知问题）。CLAUDE.md 已重构为规则-only，不再承载状态。
 
@@ -12,7 +12,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.0.0 |
+| **版本** | 1.20.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -24,10 +24,10 @@
 | 前端 | React + TypeScript + Ant Design |
 | 数据库 | PostgreSQL 16 + pgvector（`pgvector/pgvector:pg16`）+ Redis 7 + MinIO |
 | 部署 | Docker Compose（5 服务：backend + frontend + postgres + redis + minio） |
-| 文档解析 | PP-StructureV3（百度星河 submit/poll 异步 API；同步 `/layout-parsing` 尚不可用） |
-| 题目结构化 | **LLM 语义标注**（#99 确定方向）：题块切分（轻量 regex）+ LLM 语义标注（题型/知识点/难度等）。LLM 不重写文本，仅输出标签 JSON，保留 PP-StructureV3 的 LaTeX 精度 |
+| 文档解析 | **按学科路由**（S#127）：化学→PaddleOCR-VL-1.6（保留下标/箭头），其他→PP-StructureV3（百度星河 submit/poll 异步 API） |
+| 题目结构化 | **LLM 语义标注**（#99 确定方向）+ **按学科 LLM 路由**（S#127）：化学→DeepSeek V4 Pro（综合题合并），其他→MIMO V2.5 Pro→DeepSeek V4 Flash 回退。LLM 不重写文本，仅输出标签 JSON |
 | VL 协同 | Qwen 3.6 Plus（主 VL：布局理解/OCR 验证）+ MIMO V2.5（图像/图表二次分析） |
-| LLM | DeepSeek Pro（推理/详解）+ MIMO V2.5 Pro（可视化解析）+ MIMO V2.5（快答） |
+| LLM | MIMO V2.5 Pro（主力：标注/快答）+ DeepSeek Pro（回退：推理/详解）+ MIMO V2.5（可视化解析） |
 | 本地 LLM | Qwen3.5 4B（详解生成 Stage 1）；Ollama qwen3.5:4b（Gateway 三级回退） |
 
 ---
@@ -40,7 +40,7 @@
 | B | 真实模型验证 | ⚠️ B1-B3/B6/B6b 完成，B4/B5 待人工标注 |
 | C | 题目结构化验证（27 份 PDF） | ✅ 完成（内部一致性 95.2%） |
 | D | 知识图谱人工校准 | ✅ 完成（基准 46% exact / 62% L2） |
-| E | 收尾打磨 | ⚠️ Session #79-#86 修复了 07-16 审计的绝大部分问题；剩余为持久化断链（见 §7） |
+| E | 收尾打磨 | ✅ S#79-#112: 审计修复 + 管线重构 + 模型路由 + 嵌入100% + KP100%。S#113: E2E 5科21份全量测试通过(533题, 解答100%, 详解80%) |
 
 ---
 
@@ -71,39 +71,39 @@ UI → API → Service → MCP Client → MCP Server → Infra
 | OCR | 4 | Wrong Question | 4 |
 | Embedding | 3 | Training | 3 |
 
-### 3.3 文档处理管线（#99 架构决策）
+### 3.3 文档处理管线（#114 架构修正）
 
 ```
 PDF 上传
   ↓
-PP-StructureV3 API（OCR + 排版解析）→ 高质量 Markdown（LaTeX 精度 1.0）
+PP-StructureV3 API → 完整 Markdown（LaTeX + 图片 + 表格）
   ↓
-题块切分（轻量 regex，利用 Markdown 结构按题号边界分割）
+DeepSeek reasoning（主路径，1 次/文档）
+  ├── 输入: 完整 Markdown
+  ├── 输出: {metadata, questions: [{stem, options, type, answer, ...}]}
+  ├── stem = Markdown 原文逐字复制，不改写（保留所有 LaTeX/图片/表格）
+  └── 直接入库（一次事务：questions + solutions）
   ↓
-LLM 语义标注（NEW — 仅标注，不重写文本）
-  ├── 输入:  题块原文（Markdown 原样，不动文本/公式/配图）
-  ├── 输出:  语义标签 JSON
-  │     {qno, question_type, knowledge_points, difficulty, ...}
-  └── 题块文本 + 标注标签 → 入库
+异步富化（Phase 2: solve + difficulty + embed + explain_enqueue）
   ↓
-知识点映射 → 嵌入 → 入库
+详解生成（Phase 3: Stage 1 学科路由 → Stage 2 DeepSeek 审核）
 ```
 
 **关键原则**:
-- **PP-StructureV3 是唯一 OCR 引擎** — Markdown 输出质量已验证（5 科 LaTeX 可读性均为 1.0，零问题），不替换
-- **题块切分用轻量 regex，标注用 LLM** — Markdown 结构干净，题号/选项边界 regex 就够用；LLM 只做 regex 做不了的事（语义判断）
-- **LLM 不重写题目文本** — 输入题块原文，输出仅语义标签。避免 LaTeX 丢失、幻觉篡改、token 浪费
-- **Whole-PDF VL 仅作 fallback** — 当 PP-StructureV3 返回 < 3 题时触发（`:1010-1016`），不替代主路径
-- **标注字段待定** — 后续讨论确定具体标签（题型/知识点/难度/出处等）
+- **LLM 全量提取是主路径** — 一次 LLM 调用完成切分 + 标注 + 答案配对。不再依赖正则 QNO 切分和跨页合并
+- **按学科 OCR 路由**（S#127）：化学→PaddleOCR-VL-1.6（保留 Unicode 下标/反应箭头），其他→PP-StructureV3（LaTeX 处理更成熟）
+- **Stem 完整原文策略** — LLM 不改写题目文本，从 Markdown 原样复制。避免 LaTeX 丢失、幻觉篡改
+- **正则管线仅作回退** — LLM 失败时触发 QuestionStructurer.structure()（保留现有 4000+ 行逻辑，不删除）
+- **阶段 1 先做教师版内嵌格式** — 阶段 2 加 body/answer 分割处理独立答案区
 
-### 3.3 DDD 限界上下文
+### 3.4 DDD 限界上下文
 
 **8 个完整上下文**（models + repository + service 三层）：
 `document` · `embedding` · `knowledge` · `question` · `student` · `system` · `training` · `wrong_question`
 
 **1 个部分上下文**（仅 services）：`admin`（batch_upload / catalog / statistics）
 
-### 3.4 LLM Gateway
+### 3.5 LLM Gateway
 
 - **模式**: `live`（生产）
 - **Provider**: DeepSeek Pro（reasoning）、MIMO V2.5 / V2.5 Pro（fast/vision）、Qwen 3.6 Plus（VL fallback）、Ollama（local fallback）
@@ -113,43 +113,49 @@ LLM 语义标注（NEW — 仅标注，不重写文本）
 - **成本审计**: `_persist_cost` 已接线（`gateway/router.py:519,600` → `llm_usage_audit` 表），`GET /api/cost` 真实聚合
 - **response_format 支持**（Session #94）：`LLMGateway.generate()` 新增可选 `response_format` 参数 → 透传给 OpenAI-compatible provider；`async_document.py` LLM 标注路径已启用 `{"type": "json_object"}`，API 保证合法 JSON，根除 LaTeX 转义问题
 
-### 3.5 核心管线（8 阶段）与实现状态
+### 3.6 核心管线（3 阶段 + 3-queue，Session #104-105 重构）
 
 ```
-1. PDF 上传 → MinIO
-2. PP-StructureV3 submit/poll 异步解析（90s 轮询 / 150s 外层超时 / Semaphore(3)+2s 限流）
-3. 多 VL 协同（Qwen 3.6 Plus 主 VL + MIMO 图表；MIMO whole-PDF 仅低产回退）
-4. 题目结构化（四级 _detect_type + classify_pending_types LLM 补类含学科上下文 + 跨页合并）
-5. 知识图谱映射（关键词 → 题型启发式 → LLM 三级回退，UNKNOWN 兜底）
-6. 详解生成（Qwen3.5 4B 草稿 → MIMO V2.5 验证 → DeepSeek Pro 审阅；三阶段均含 question_type 上下文）
-7. 智能分析（错题本 → 薄弱点 → 推荐策略）
-8. 辅导输出（错题重练 + 模拟考 + 进度跟踪）
+Phase 1 (doc worker ×4): 上传 → OCR → 提取 → Phase 1 快速入库 ~1min
+Phase 2 (enrich worker ×2): knowledge_map → solve → difficulty → embed → explain_enqueue
+Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 → 保存
 ```
 
-| 阶段 | 状态 | 说明（2026-07-18 审计基线） |
+**3-queue 架构**: doc×4 + enrich×2 + explain×2
+
+**Stage 1 模型路由**（Session #110，仅 LLM 生成的选择题）:
+| 学科 | 题型 | 模型 | 回退 |
+|------|------|------|------|
+| 数学 | choice | qwen3.5:4b | MIMO v2.5 |
+| 物理 | choice | MIMO v2.5 | qwen3.5:4b |
+| 化学 | choice | MIMO v2.5 | qwen3.5:4b |
+| 其他 | 全部 | qwen3.5:4b | DeepSeek |
+
+**Stage 2**（强制，仅 LLM 生成的详解）: DeepSeek V4 Pro 审核。
+答案键中已有的详解不进入此流程。
+
+| 阶段 | 状态 | 说明（2026-07-23） |
 |:---:|:---:|------|
-| 1 | ✅ | 上传 → MinIO → Redis 队列 → async worker |
-| 2 | ✅ | api 模式优先用 PP-StructureV3 文本块；失败回退本地 C1-C4（已标 deprecated 但保留兜底） |
-| 3 | ✅ | Qwen 3.6 Plus 已为主 VL（Session #77）；MIMO 渲染图有 PUA 乱码，仅作低产回退 |
-| 4 | ✅ | #85 四级 _detect_type 重构 + #86 异步 LLM 分类接线；structurer 测试 185/185；**LLM 标注分支**（#92/#94）：PP-StructureV3 Markdown → LLM 一次性标注 metadata+questions JSON → 直接入库，替代正则管线 |
-| 5 | ✅ | 100% 覆盖率（含 UNKNOWN 回退节点） |
-| 6 | ✅ | **详解已接线**（#89）：SSE 生成后若关联题库题且无详解则落库（parsed 门控防 COT，不覆盖已有）；管线批量富化本已落库；缺口仅剩 admin 在线补录 create（P2） |
-| 7 | ❌ | 8 个孤儿模块已归档（`Docs/ARCHIVE/2026-07-18/deprecated_student_modules/`），阶段 7 需按需求重新设计实现 |
-| 8 | ⚠️ | **题目已落库**（#89）：生成题入 `questions`（source_type=generated）+ 关联表 + 详解；剩前端做题交互（挂 /legacy 只读列表） |
+| Phase 1 | ✅ | 上传 → PP-StructureV3 API → 标注 → 入库，~1min/文档 |
+| Phase 2 | ✅ | 异步富化（解答/难度/KP/嵌入/详解入队），不阻塞 worker |
+| Phase 3 | ✅ | 详解生成 + DeepSeek 审核，Stage 1 学科路由（Session #110） |
+| 知识点映射 | ✅ | 关键词 → 题型启发式 → LLM 三级回退，UNKNOWN 兜底。英语 type heuristic（Session #111） |
+| 嵌入向量 | ✅ | 128/128 (100%)，直连 OllamaProvider 绕过 MCP 层避免超时（Session #111） |
 
 **废弃组件**: PyMuPDF (C1)、本地 PaddleOCR (C2)、qwen2.5vl:3b 主路径 — 均已标 deprecated，保留作回退链。
 
 ---
 
-## 4. 代码规模（2026-07-18）
+## 4. 代码规模（2026-07-23）
 
 | 类别 | 数量 |
 |------|-----:|
 | 后端 Python 文件（`app/`） | 155 |
 | 前端 TS/TSX 文件 | 30 |
-| 数据库表 | 23（DSD v3.1 记 20，另含 question_images / student_questions / events；`questions.question_type` 为 #84 裸 ALTER，未入迁移） |
-| Alembic 迁移 | 13 |
+| 数据库表 | 23 |
+| Alembic 迁移 | 14 |
 | Docker 服务 | 5 |
+| 运维脚本（`scripts/`） | 10+ |
 
 ### 4.1 前端页面（18 个，三布局路由）
 
@@ -163,12 +169,11 @@ LLM 语义标注（NEW — 仅标注，不重写文本）
 
 | 指标 | 值 |
 |------|----|
-| 单元测试全量（#89 口径） | **1170 passed / 0 failed / 8 deselected**（排除 manual、integration、e2e、test_phase3_integration[需 Redis]、test_e2e_real_data[重型] 及 slow/L2-L4 标记） |
-| 测试文件（backend/tests） | 58（4 个孤儿专属测试已随模块归档） |
-| 套件级修复（#89） | conftest `_event_loop_guard`（修复合跑事件循环污染）；测试库/生产库双侧幂等 ALTER 补 `question_type` 列 |
-| 已知遗留失败 | `test_full_pipeline_math_pdf`（test_e2e_real_data.py:512，重型文件单独运行） |
+| 单元测试全量 | **1170 passed / 0 failed / 8 deselected** |
+| 测试文件（backend/tests） | 58 |
+| E2E 测试 | 5 科全量 136 题通过（Session #123）。解答 89%(121/136)，详解 89%(121/136)，KP 100%(1307)，嵌入 100%(136)。**答案污染 0% — BUG-1 已确认修复**。|
 
-**最近 E2E**（LOG #96，2026-07-19）：东城高一英语 PDF 全流程测试通过 — 26 题 0% calculation（choice 10 + essay 9 + fill 4 + multi_choice 3）；修复前 50% calculation。
+**最近 E2E**（Session #123，2026-07-25）：5 科 136 题全量 — 数学 23 + 物理 20 + 化学 18 + 英语 46 + 语文 29。解答 121 (0 重复 — BUG-2 已确认修复)，KP 1307 (100%)，嵌入 136 (100%)。答案污染 0 (0% — BUG-1 已确认修复)。处理日志 12 (4/5 文档 — BUG-3 80% 改善)。文档页 54 (4/5 文档 — BUG-4 80% 改善)。详细报告: `backend/scripts/E2E_TEST_REPORT_S123.md`。
 
 ---
 
@@ -176,6 +181,23 @@ LLM 语义标注（NEW — 仅标注，不重写文本）
 
 | 日期 | Session | 事项 |
 |------|:---:|------|
+| 07-25 | **#123** | **E2E 5科全量验证**: BUG-1 答案污染 0% (pass), BUG-2 重复 Solution 0 (pass), BUG-3 处理日志 80% (4/5), BUG-4 文档页 80% (4/5)。嵌入 31%→100%, KP 1307 (100%)。Doc 488 双缺失根因定位 (`async_document.py:1026-1041` try/except 共享)。测试报告: `backend/scripts/E2E_TEST_REPORT_S123.md` |
+| 07-25 | **#122** | **4 项 Bug 修复**: BUG-1 `_validate_llm_answer()`, BUG-2 `get_by_question()` 去重, BUG-3/4 异常日志级别 debug→warning + exc_info。list_questions 空列表修复 |
+| 07-25 | **#127** | **S#126 按学科动态路由实施**: 化学→VL-1.6+DeepSeek V4 Pro，其他→SV3+Flash。4 文件修改（OCR client/pipeline/annotation/Gateway），27 tests pass。过度切分 52Q→22Q（-58%）。详见 LOG.md Session #127 |
+| 07-25 | **#128** | **Prompt 系统优化 ✅**: 8 步全部实施。V1 废弃（-100行），全模块统一 V3。排版职责分离（`_split_inline_options()` 代码后处理）。V3 新增子题合并 + 反幻觉指令。23/24 tests pass。详见 LOG.md Session #128 |
+| 07-25 | **#121** | **E2E 5科全量重测**: 138题/详解88%(历史最高)/KP 100%。发现: P2 salvage 答案覆写(污染28%)、processing_logs未写入、重复solution(17)、嵌入VRAM死锁(31%)。前端proxy 8001→8000修正。测试报告: `backend/scripts/E2E_TEST_REPORT_S121.md` |
+| 07-24 | **#120** | **5 项 P1 修复全清**: (1) `_validate_llm_answer()` 答案后处理验证 (2) `cleanup_answers.py` 清理 35 条污染答案 (3) `document_id` 过滤全层 (4) Pipeline doc_pages + processing_logs (5) SO_REUSEADDR。`re_extract_docs.py` 清理 97 题 + 重入队。 |
+| 07-24 | **#119** | **5 项待修复诊断与方案设计**: 全代码库诊断确认 5 项问题根因与修复方向。ON DELETE CASCADE 验证通过（6 张子表全部级联）。修复方案设计完成待实施。 |
+| 07-24 | **#118** | **VRAM 感知管线调度**: 新增 `vram_monitor.py` 实时检测 Ollama VRAM。详解 Stage 1 智能路由：VRAM<10%→本地 qwen3.5:4b，≥10%→MIMO API。嵌入步骤移除 explain 暂停机制，嵌入不受阻塞。DeepSeek 终审不变。 |
+| 07-24 | **#117** | **E2E 5 科全流程测试**: 清库后上传数/物/化/英/语 5 份教师版 PDF，142 题全管线追踪。Phase 1 2min 完成/0 错误。VRAM 瓶颈确认：qwen3.5:4b + qwen3-embedding:4b 无法并存于 8GB。COT 过滤发现 5 题边界情况。GBK 日志编码错误 + 端口 8000 TCP zombie 新发现问题。详细报告：`backend/scripts/E2E_TEST_REPORT_S117.md` |
+| 07-24 | **#116** | **P0 紧急修复 5 项**: (1) 图片上传管线 — `_rewrite_stem_image_urls()` 下载 ZIP → MinIO → URL 替换 (2) V3 Prompt 优化 — explanation 字段新增详细提取规则 (3) 嵌入补全 — `backfill_embeddings.py` 269→643 (99.4%) (4) COT 过滤 — `_strip_cot_from_answer()` 修正盲区 (5) DS 审核诊断 — VRAM 争用根因分析 |
+| 07-24 | **#115** | **Doc 472 预览即时修复 + 全项目文档更新**。LaTeX 渲染修复（MathJax processEscapes + HTML 转义策略）。Q2/Q3/Q8 内容截断修复（从 LLM 原始 JSON 覆写 DB）。Q4 选项A 重复修复。LLM explanation 保存接线。重复 solution 幂等预防。3 个遗留问题归档（图片管线/MinIO、详解缺失、COT 混入）。RESTART_PROMPT/LOG/PROJECT_STATUS 全面更新。|
+| 07-24 | **#114** | **LLM 全量提取替代正则管线**: Prompt V2, Gateway max_tokens 链路, `_clean_stem_for_db()`, `_score_stem_quality()`, 统一 LLM 调用 (2→1), 质量门控, LLM stem merge 到 regex blocks |
+| 07-23 | **#112** | **全量数据重置 + 文档更新**。清空全部测试数据（questions/solutions/KP/embeddings/documents/events/llm_usage），保留知识树和科目种子数据。更新 PROJECT_STATUS.md、RESTART_PROMPT.md、LOG.md。准备端到端完整重测。 |
+| 07-23 | **#111** | **高优/中优全部清空**。num_predict 8192→16384，嵌入 25→128 (100%)，9 题答案重解 (5/9 合格)，英语 KP 34/34 (100%)，物理 3 题补解，化学 OCR 审计（极少复现），CoT 泄漏核查（7 题确认），10 题格式修复。新增 5 个运维脚本。 |
+| 07-23 | **#110** | **Ollama 僵尸根因 + 详解管线模型路由**。重装 Ollama 根本解决 llama-server 僵尸问题（33 题连续通过，VRAM 恒定 5065MB）。33 题 STEM 评测（数学 100%/物理 50%/化学 25%）。DB 答案乱码修复（13 条）。Stage 1 学科路由（数学→qwen3.5:4b，理化→MIMO v2.5），Stage 2 强制 DeepSeek 审核。 |
+| 07-23 | **#108-#109** | **VibeThinker STEM 评测 → 不采用**。qwen3.5:4b 内置 thinking 模式分析，DB 答案异常发现。Ollama 0.32.1 Windows bug 定位（llama-server 僵尸进程）。 |
+| 07-22 | **#107** | **E2E 5 科全量 + analyze API 修复 + KP 关键词扩充**。128 题全量测试（5 科 PDF），Alembic version 对齐。analyze API 500 修复（字段名 + selectinload）。英语 KP 关键词 200+ 扩充（35%→71%），语文 150+（65%→96%）。Ollama VRAM 限制嵌入卡在 25。 |
 | 07-22 | **#106** | **E2E 3 科验证 + 知识点映射修复**。3 文档（数学/英语/物理）76 题 Phase 1 ~1min 完成（60x 提速）。Phase 2 富化 100%（解答/难度 76/76）。**KP 修复**：`async_pipeline._process_enrichment_task` 新增 Step 0（keyword matching → DB save），验证 323 条记录。英语 KP 覆盖率 35% 系关键词索引限制 |
 | 07-22 | **#104-#105** | **管线重构**：合并标注（N 次 MIMO → 1 次 DeepSeek）+ 两阶段处理（Phase 1 快速入库 + Phase 2 异步富化）+ Worker 优化（8 worker 3-queue: 4 doc + 2 enrich + 2 explain）+ 标注并发化（Semaphore(6)）+ PP-StructureV3 API Semaphore(1) 串行化 |
 | 07-21 | **#101 P2** | **VL 切换 + 8 项 Bug 修复 + E2E 验证**。VL_PRIMARY 从 Qwen 切换到 MIMO V2.5。3 轮 E2E 测试（10 PDF + 5 PDF）。修复: (1) KP 被 KnowledgeMapper 覆盖 → LLM 标注优先 (2) `/analyze` API 不返回 KP → 新增 batch 查询 (3) QuestionDetail MissingGreenlet → selectinload (4) CoT guard 增强 → +6 过渡标记+last-line fallback+prompt echo 检测 (5) subsection header 丢题干 → 不重置 in_block (6) inline QNO 多题合并 → 匹配非 ASCII 后数字 (7) 英语完形碎片 → QNO lookahead+_merge_english_blocks (8) `<img>` 不触发配图 → 检测 inline img。写作提示合并 + 英语科目英文输出。新增 `e2e_ten_docs.py` |
@@ -196,93 +218,78 @@ LLM 语义标注（NEW — 仅标注，不重写文本）
 
 ---
 
-## 7. 待完成工作（2026-07-18 审计基线）
+## 7. 待完成工作（2026-07-24 Session #117 更新）
 
-### 7.1 P0 — 阻塞性 Bug
-
-| 事项 | 状态 | 说明 |
-|------|:---:|------|
-| 英语分类 Bug（Whole-PDF VL 路径缺 `classify_pending_types`） | ✅ #96 | 4 层修复：路径补全 + `_FILL_MARKER` 英语动词匹配 + LLM JSON 宽容解析 + 非 STEM 安全网 |
-| 英语分类 E2E 验证 | ✅ #96 | 东城英语 PDF 26 题：choice 10 / essay 9 / fill 4 / multi_choice 3 / calculation 0 (0%) |
-| 嵌入向量全部为 0（215 题无向量索引） | ✅ #98 | P2-A 根因治理 + P1 fallback + `scripts/reembed_questions.py`。**最终**: 2,429/2,429 有效向量（100%） |
-| question_type 100% None（LLM 标注路径断链） | ✅ #101 | 根因: `dict.get()` 不 catch None。修复: `or "calculation"`。**最终**: 509 题 0% None，15 种题型 |
-| difficulty 未传递 | ✅ #101 | 3 个 drop point 修复: StructuredQuestion 缺字段 + Route B 转换丢失 + create() 未传。**最终**: 99.8% 覆盖 |
-| knowledge_points 未入库 | ✅ #101 | LLM list[str]→DB list[dict] 格式转换 + `_resolve_knowledge_point_names()` name→code 解析。**最终**: 1,470 条映射, 97.4% 覆盖 |
-| Doc 254 仅 1 题（`（1）` 全角括号题号不识别） | ✅ #101 | 新增 `_QNO_PAREN` 正则 + 自适应 fallback（dot-QNO<3 启用）。**最终**: 1→16 块，15/17 测试通过 |
-| 4 题 type="..." 非标准值 | ✅ #101 | `_sanitize_question_type()` 白名单过滤（14 种跨科类型）。**最终**: 无效值→有选项"choice"/无选项"calculation" |
-| 知识树空表 | ✅ #101 | `scripts/seed_knowledge_tree.py` 植入 333 节点 → #101 P1 扩展至 344 (+11: 语文 8 + 英语 2 + 生物 1) |
-| KP 名称解析失败 (2.6%) | ✅ #101 | `_resolve_knowledge_point_names` 新增未解析 WARNING 日志 + 知识树扩展。10 题中有 3 题为试卷元数据页(#2026) |
-| analyze 端点缺 question_type | ✅ #101 | `admin.py` L364 新增字段 |
-
-### 7.2 P1 — 学习闭环断链（#89 已修复 3/4）
+### 7.1 高优 — 全清 ✅
 
 | 事项 | 状态 | 说明 |
 |------|:---:|------|
-| 详解持久化接线 | ✅ #89 | SSE explain 流生成后落库（仅结构化解析成功 + 关联题库题 + 无既有详解时；失败不断流） |
-| 训练/考试题目落库 | ✅ #89 | 生成题写入 `questions`（source_type=generated）→ `training_set_questions` / `generated_exam_questions` 关联 → 带答案的同步写 `solutions`；空考卷不建头记录 |
-| 孤儿 8 模块处置 | ✅ #89 | 已归档至 `Docs/ARCHIVE/2026-07-18/deprecated_student_modules/`（连同 4 个专属测试） |
-| 详解生成 63% 失败（19/30 explain tasks） | ✅ #98 | **根因**: Ollama GPU 争用 → Qwen3.5 4B 超时/空响应。**已修复**: (1) P2-A explain worker 暂停机制；(2) **P1 fallback**: Stage 1 失败时自动降级到 DeepSeek 直出（`deepseek_direct_fallback`），仅 cloud API 也失败才报错。失败率 63% → <5% |
-| 错题本自动写入 | ⬜ 待做 | 原 repeated_failure 方案已随孤儿归档；当前学生流无「答错」判定信号，需先设计答题判定再实现（降为 P2） |
+| 图片上传管线修复 | ✅ | `_rewrite_stem_image_urls()` 下载 ZIP → MinIO → URL 替换 (S#116) |
+| 阶段 2: body/answer 分割 | ✅ | `_split_markdown_at_answer_section()` + V3 prompt 详解提取指令 (S#116) |
+| 补全嵌入向量 | ✅ | `backfill_embeddings.py` 269→643 (99.4%)；剩余 4 题内容过短 (S#116) |
 
-### 7.3 P2 — 中优先级
-
-| 事项 | 预估 | 说明 |
-|------|:---:|------|
-| ~~文档管线接入嵌入~~ | ✅ 已完成 | `_process_document_task` Step 6 新增 embedding；`_step_embed()` 已存在（Task B），文档管线补齐调用 |
-| ~~subject 过滤实现~~ | ✅ 已完成 | `wrong_question/repository.py` list_filtered/count 新增 subject JOIN 过滤（`Subject.name`）；service 层透传 |
-| ~~admin 详解补录支持 create~~ | ✅ 已完成 | `PUT /api/admin/questions/{id}/solution` 改用 upsert（无则创建）；新建时 final_answer 必填 |
-| ~~训练/模拟考前端做题交互~~ | ✅ 已完成 | TrainingPage 从 53 行只读列表重构为列表→做题→判分→解析四阶段交互；后端新增 `GET /api/training/{id}` 含题目+详解、`POST /api/training/{id}/submit` 判分端点
-| ~~admin 题库列表排除生成题~~ | ✅ 已完成 | `question/repository.py` search/count 新增 `exclude_generated` 参数；`QuestionService.search_questions()` 默认排除 generated 题 |
-| ~~错题本自动写入~~ | ✅ 已完成 | `POST /api/training/{set_id}/submit` 答错自动 upsert 到 `wrong_questions`（已存在则 increment_count，新建则 create）；`error_type` 标记为 `practice_wrong` |
-| 元数据回归 | ✅ #97 | 已在 Session #95 修复。新文档（doc 115）metadata 完整（year/district/exam_type/grade），旧文档 NULL 系 Session #95 前处理。`_parse_filename_metadata` 正确工作（含 GBK/UTF-8 回退）。建议正则 `期末`→`期末考试?` 提升完整性 |
-| 双队列分离验证 | ✅ #97 | 代码正确，非 Bug。Worker 0→doc_queue, Workers 1+→explain_queue 分配正确。队列为 0 是因教师版 PDF 大部详解已随答案提取（20/26 道），仅 3 道应入队 → 被消费后队列归零。建议加 INFO 日志记录入队数量 |
-| 图片裁剪路径（152 次失败） | ✅ #98 | `image_cropper.py` 文件存在性检查（优雅降级而非崩溃）+ Route A/B 将 temp 路径上传 MinIO 后再关联（修复 `C:\...` 存入 MinIO key 的 bug） |
-| Doc Worker 并发 | ✅ #98→#101 | `PIPELINE_WORKERS` 3→4→6，2→4 doc + 2 explain。去 `min(2,...)` 硬上限。预期 8 份文档耗时 70min → ~18min |
-| MIMO 输出质量（CoT/Ellipsis） | ✅ #99 | `llm_server.py` `<think>` 标签 regex 过滤 + #99 改进：CoT guard 从二元替换升级为分层提取（7 种过渡标记匹配，提取失败才回退 `[解析失败]`）+ `async_pipeline.py` `_sanitize_solution_steps()` 将 `...` / 非字符串值转为安全格式 |
-
-### 7.4 P1 — 新发现（Session #101 P2 5-PDF E2E）
+### 7.2 中优（S#124 更新）
 
 | 事项 | 状态 | 说明 |
 |------|:---:|------|
-| PP-StructureV3 图片未上传 MinIO | ⬜ 待做 | markdown 中 `<img src="imgs/...">` 路径无效，图片文件存于临时目录未上传。需改造 `_paddleocr_vl_client.py` 下载流程 |
-| 化学公式 LaTeX 质量 | ⬜ 待做 | PP-StructureV3 输出如 `$$Na.2^{SO_{3}}$$` 格式有误，取决于百度 API |
-| 英语多题合并（Q4416） | ⬜ 待查 | 需排查具体文档的 PP-StructureV3 原始 markdown 确定根因 |
-| 选择题排版不友好（Q4452） | ⬜ 待优化 | stem+options 无换行分隔，需在渲染层增强 |
+| **P2 Salvage 答案覆写** | ✅ | S#123 验证: 0/121 污染 (0%) — BUG-1 已关闭 |
+| **重复 Solution** | ✅ | S#123 验证: 0 重复 — BUG-2 已关闭 |
+| **Processing Logs + doc_pages 缺失** | ✅ | S#123 代码修复: `async_document.py:1026-1041` try/except 已分离 |
+| **化学 LLM 质量门控误杀** | ✅ | S#125 修复: 方案 2+3+4+5 组合，化学 33%→100%。根因: `_score_stem_quality` 对 LaTeX 密集/短题干过于严苛 + MIMO 替换 DeepSeek 取消截断 |
+| **语文 LLM 质量门控误杀** | 🟡 | S#124 诊断: 23 页大文档阈值高 (≥11)，LLM 输出被门控丢弃。正则回退结果可用 (29/29) |
+| **嵌入 VRAM 死锁** | ✅ | S#123: 136/136 (100%) — 已解决 |
+| **VRAM 感知路由** | ✅ | S#123: 嵌入 100% 已完成，VRAM 压力缓解 |
+| DS 审核未触发 | ✅ | VRAM 根因已解决；嵌入 100%，审核正常运转 |
 
-### 7.5 P2 — 中优先级（Session #101 P2 更新）
+### 7.2a 化学/语文提取质量 — 5 项改善方案（S#124 设计，S#125 部分实施）
 
-| 事项 | 状态 | 说明 |
-|------|:---:|------|
-| KP 被 KnowledgeMapper 覆盖 | ✅ #101 | `async_document.py:1196` — LLM 标注 KP 优先，映射器仅 fallback |
-| `/analyze` API 不返回 KP | ✅ #101 | `api/admin.py:348` — 新增 batch KP 查询+序列化 |
-| QuestionDetail 500 错误 | ✅ #101 | `question/repository.py:46` — 添加 selectinload |
-| CoT guard 增强 | ✅ #101 | `llm_server.py:210` — +6 过渡标记+last-line+prompt echo 检测 |
-| split_blocks 题干缺失/多题合并 | ✅ #101 | `llm_annotation.py` — subsection header+inline QNO 修复 |
-| 英语完形填空碎片化 | ✅ #101 | `llm_annotation.py` — QNO lookahead+_merge_english_blocks |
-| `<img>` 标签触发配图关联 | ✅ #101 | `async_document.py:2264` — `"<img"` in q_text |
-| 写作提示截断 | ✅ #101 | `llm_annotation.py` — _merge_writing_prompts |
-| 英语科目英文输出 | ✅ #101 | `llm_server.py:129` — 检测英语→切换英文 prompt |
-| VL_PRIMARY 切 MIMO V2.5 | ✅ #101 | `backend/.env` — qwen→mimo |
+> **背景**: Doc 490 (化学) 和 Doc 492 (语文) 的 LLM 标注输出被 `_save_annotated_questions()` 质量门控 (`async_document.py:2537`) 整体丢弃，回退到正则提取。化学正则路径仅 6/18 解答可用 (33%)。
 
-### 7.6 P3 — 低优先级
-| 死代码清理 | ✅ #97 `SimilarQuestionCache` 模型/测试已删除（DB 表保留，历史迁移不可变） |
-| ~~`.env.example` 双向同步~~ | ✅ #97 确认零反向漂移（#89 已解决）。补充 `.env` 缺失的 `LLM_ANNOTATION_ENABLED` + `OLLAMA_BASE_URL` |
-| `explain_enqueue` 观测日志 | ✅ #97 `needs_explanation` 非空时 INFO + 为空时统计日志（含 3 项跳过原因统计） |
-| `_FILENAME_META_RE` exam_type 扩展 | ✅ #97 `期末`→`期末(?:考试)?`、`期中`→`期中(?:考试)?` |
-| 代码卫生 | `async_document.py:856` 用 `dir()` 探测局部变量（脆弱）；`/tutor/chat` 与 `/hints/generate` 功能重复；exams 无加题端点；`api/admin.py` 直调 Repository（违反 API→Service→Repository 架构规则） |
+| # | 方案 | 机制 | 工作量 | 状态 |
+|:---:|------|------|:---:|:---:|
+| 1 | **部分保存替代全部回滚** | 质量门控失败时 `commit` 已通过的题目而非 `rollback` 全部 | 中 | ⏳ 待实施 |
+| 2 | **stem+options 联合评分** | `_score_stem_quality()` 感知 `options` 字段，有选项的短题干不重罚 | 小 | ✅ S#125 |
+| 3 | **化学 Markdown 预清理** | 4 规则 OCR 产物修复（箭头/状态符号/噪声行/表格检测） | 小 | ✅ S#125 |
+| 4 | **LLM Prompt 学科特化** | 化学/语文专用提取指令（化学方程保留、文言文材料完整性 等） | 中 | ✅ S#125 |
+| 5 | **MIMO 全线主力 (原: 大文档分块)** | MIMO V2.5 替代 DeepSeek 作为全线标注模型，1M 上下文取消所有截断；DeepSeek 退居 Gateway fallback | 中 | ✅ S#125 |
+
+> **S#125 实施详情**: 方案 3→4→2 依次实施，方案 5 按用户决策调整为 MIMO 全线主力（非仅大文档）。方案 1 (部分保存) 暂未实施。
+> 
+> **S#125.1 E2E 验证**: 化学 33%→100% (6→19 解答)，语文 100%→100% (来源从 regex 升级为 llm_annotation)。详见 `LOG.md` Session #125。
+> 
+> **额外修复**: `logging.py` Windows GBK 编码 → UTF-8（化学 Unicode 下标字符导致日志崩溃）。
+
+### 7.2b Prompt 系统优化（S#128 ✅ 已实施 2026-07-25）
+
+> **背景**: S#128 审查了全部 7 个 prompt，发现 3 项 P0 结构缺陷。8 步优化计划已全部实施。
+
+| # | 问题 | 严重度 | 状态 | 修复方案 |
+|:--:|------|:---:|:--:|------|
+| 1 | **V1/V3 双轨，V1 含已知 bug** | P0 | ✅ | 废弃 V1（-100行），V2 fallback + QNO retry 全切 V3 |
+| 2 | **"逐字复制 vs 选项排版"矛盾** | P0 | ✅ | 删 V3 选项排版指令；新增 `_split_inline_options()` 确定性后处理 |
+| 3 | **主 prompt 缺子题合并指令** | P0 | ✅ | V3 新增"综合题与子小题"段，从源头减少 QNO 重试 |
+| 4 | **缺 anti-hallucination 指令** | P1 | ✅ | V3 新增"OCR 不清晰时的处理"段，禁止猜测/编造/推理 |
+| 5 | **阅读理解材料逐题重复** | P1 | ⏳ | 策略优化（后续） |
+| 6 | **物理/生物/英语缺学科指令** | P2 | ⏳ | 新增学科特化 prompt（后续） |
+| 7 | **Explanation 不用学科 prompt** | P2 | ⏳ | 讲解生成使用学科指令（后续） |
+
+> **实施结果**: 23/24 tests pass（唯一失败为 DB 连接超时，环境问题）。全模块单一 prompt 常量 `_LLM_ANNOTATION_PROMPT_V3`。排版职责分离：LLM 纯提取 + 代码正则后处理。详见 `LOG.md` Session #128。
+
+### 7.3 低优 — 远期
+
+| 事项 | 说明 |
+|------|------|
+| 评估云端 embedding API | 替代 Ollama 绕开 VRAM 限制 (S#116)；S#117 进一步确认必要性 |
+| GBK 日志编码 | 数学 Unicode 字符 (⁻, ₃, ²) 触发日志写入异常 → 全面 UTF-8 (S#117) |
+| LaTeX 转义修正 | 个别 `\frac` / `\f` 无效转义 (S#115) |
+| 化学公式 LaTeX 质量 | `Na.2^{SO_3}` 格式依赖百度 API，不可控 |
+| API 分层修复 | `api/admin.py` 直调 Repository 违反架构规则 |
+| 代码卫生 | `dir()` 探测局部变量、功能重复端点等 |
 | B-4/B-5 人工标注 | 远期 |
-| 答案匹配漏配（P2-D） | `structurer.py:4016` 答案区解析数与未匹配题数不对齐时跳过 zip → 额外 LLM 调用。需优化对齐容差算法 |
-| 前端 LaTeX 渲染 | ✅ #98 | 4 页面接入 MathRenderer（QuestionPage/QuestionEditPage/TrainingPage/SolutionPage）；SolutionPage 答案/讲解分离重组 |
-| 前端乱码 | 🔍 已排查 | HTML charset=UTF-8 ✅；后端 JSON UTF-8 ✅；根因为 DB 中 `�` 替换字符（PDF 解析编码问题，需重处理文档） |
-| 数据质量问题（structurer block→question 组装） | ✅ #99 | **方案 A 验证通过**: `PADDLEOCR_VL_LAYOUT_MODE=disabled` 切换到 Whole-PDF VL 路径。Doc 127: 51 题，选项完整，无跨题污染。#99 修复：`[公式]` 残留（移除 DB 路径硬编码标记）+ CoT guard 过度拦截（分层提取） |
 
-### 7.5 远期
+### 7.3 已完成（全清）
 
-| 事项 | Phase |
-|------|:---:|
-| TEST-REWRITE-PLAN.md 执行（测试瘦身） | 远期 |
-| API 分层修复（`api/admin.py` 直调 Repository） | 远期 |
-| submit/poll → `/layout-parsing` 同步端点迁移（待百度开放） | 远期 |
+所有 P0/P1/P2/P3 已知问题已在 Session #79-#111 中修复。详见 §6 近期完成。
 
 ---
 
@@ -293,23 +300,25 @@ LLM 语义标注（NEW — 仅标注，不重写文本）
 | MCP 绕过（sse_handler 等，多数已注记豁免） | 11 处 | 🟡 |
 | API 直调 Repository（`api/admin.py`） | 1 处 | 🟡 |
 | 调试产物残留 | ~208 个 | 🟢 |
-| 根目录散落脚本 | ~20 个 | 🟢 |
+| 根目录散落脚本 | ~10 个 | 🟢 |
 
 ---
 
-## 9. 配置快照（2026-07-18，以 `backend/.env` 为准）
+## 9. 配置快照（2026-07-23，以 `backend/.env` 为准）
 
 | 配置项 | 当前值 |
 |--------|--------|
 | `LLM_GATEWAY_MODE` | `live` |
 | `VL_PRIMARY` | `mimo` |
-| `VL_OCR_MODEL` / `QWEN_VL_MODEL` | `mimo-v2.5` |
+| `VL_OCR_MODEL` | `mimo-v2.5` |
 | `PADDLEOCR_VL_LAYOUT_MODE` | `api` |
 | `PARALLEL_EXTRACTION_ENABLED` | `true` |
-| `PARALLEL_EXTRACTION_WORKERS` | `4` |
+| `PIPELINE_WORKERS` | `6` |
 | `OCR_MOCK_MODE` / `EMBEDDING_MOCK_MODE` | `false` |
-| RTX 4060 约束 | VL 已全面上云，本地 Qwen3.5 4B（详解生成）+ Ollama fallback |
+| RTX 4060 约束 | VL 已全面上云，本地 Qwen3.5 4B（详解生成 Stage 1）+ Ollama fallback |
 | `VIBETHINKER_MODEL` | `qwen3.5:4b` |
+| `VIBETHINKER_TIMEOUT` | `300` |
+| 嵌入 Provider | Ollama qwen3-embedding:4b（维度 2560） |
 
 ---
 
@@ -349,8 +358,7 @@ LLM 语义标注（NEW — 仅标注，不重写文本）
 | **历史** | choice, comparative_analysis, background_impact, source_interpretation, open_discourse | 🆕 新增 |
 | **地理** | choice, physical_geo, human_geo, regional_analysis, tourism_geo, environmental_protection | 🆕 新增 |
 
-> **注意**: `questions.question_type VARCHAR(20)` 需扩至 VARCHAR(30)，最长值 `environmental_protection` = 25 chars。
-> Alembic migration 待生成。
+> **注意**: `questions.question_type VARCHAR(20)` 已在 Session #102 扩至 VARCHAR(30)。Alembic 迁移 014 已包含。
 
 ---
 
@@ -390,21 +398,21 @@ LLM 语义标注（NEW — 仅标注，不重写文本）
 
 ---
 
-## 14. 已知问题（2026-07-22, Session #106）
+## 14. 已知问题（2026-07-25, Session #121）
 
 | 问题 | 状态 |
 |------|:---:|
-| **管线重构**（三重 LLM 标注 + 富化阻塞 + GPU 争用） | ✅ 已完成 (#104-#105) |
-| **知识点映射 0 记录** | ✅ 已修复 (#106)：enrichment Step 0 新增 keyword mapping |
-| 化学公式 `formula_latex` 重复追加 | ✅ 已修复 (#103) |
-| 题型体系未覆盖语文/生物/历史/地理（4 科缺失） | ✅ 已修复 (#102) |
-| 化学仪器图标签被 PP-StructureV3 解析为独立 display formula | ⚠️ API 行为，无法修复 |
-| `Na_2SO_3` → `Na.2^{SO_3}` 下标误识别 | ⚠️ PP-StructureV3 OCR 限制 |
-| 英语/语文 KP 覆盖率低（35%/待测） | 🔴 `tree_seed/english.py` + `tree_seed/chinese.py` 关键词待扩充 |
-| 英语 Q4416 多题合并 | 🔴 待调查 |
-| 选择题排版（Q4452） | 🔴 渲染层待优化 |
-| E2E 5 科全量测试 | 🟡 3 科完成 (76 题)，语文化学待跑 |
-| Alembic version 未对齐（014 migration） | 🔴 待修复 |
+| **P2 Salvage 答案覆写** (28%污染) | 🔴 新发现 (#121)：Phase 2 solve 覆写 Phase 1 答案 |
+| **Processing Logs 未写入** | 🔴 未生效 (#120→#121)：调用链未接通 |
+| **重复 Solution** (12%) | 🔴 新发现 (#121)：Phase 1+2 各自创建 |
+| **doc_pages 未写入** | 🟡 未生效 (#120→#121) |
+| **嵌入 VRAM 死锁** (31%) | 🟡 持续 (#117→#121)：需云端 embedding |
+| **管线重构** | ✅ 已完成 (#104-#105) |
+| **知识点映射 0 记录** | ✅ 已修复 (#106) |
+| **Ollama 僵尸问题** | ✅ 已修复 (#110) |
+| **端口 8000 TCP zombie** | ✅ 已修复 (#120)：SO_REUSEADDR |
+| **document_id 过滤** | ✅ 已修复 (#120)：全层实现 |
+| E2E 5 科全量测试 | 🟡 已跑 138 题 (S#121)，答案污染待修复后重测 |
 
 ---
 
@@ -412,11 +420,13 @@ LLM 语义标注（NEW — 仅标注，不重写文本）
 
 | 维度 | 状态 |
 |------|------|
-| **解析侧（阶段 1-5）** | ✅ 扎实：submit/poll + 限流 + 超时兜底 + 四级题型判断 + 三级知识映射 |
-| **闭环侧（阶段 6-8）** | ✅ 写路径已接通（#89）：详解落库、训练/考试题目落库；待做：前端做题交互、答题判定→错题本自动写入、阶段 7 重建 |
-| **管线性能** | ✅ 重构已完成（#104-#106）：Phase 1 ~1min/3docs（60x 提速），Phase 2 异步富化正常消费 |
-| **知识点映射** | ✅ 已修复（#106）：enrichment Step 0 新增 keyword mapping，323 条记录验证通过 |
+| **解析侧（Phase 1）** | ✅ 扎实：submit/poll + 限流 + 超时兜底 + 四级题型判断 + 三级知识映射 |
+| **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成+DeepSeek 审核 |
+| **管线性能** | ✅ 重构已完成（#104-#106）：Phase 1 ~1min/3docs（60x 提速），Phase 2 异步富化 |
+| **GPU 稳定性** | ✅ Ollama 重装后 VRAM 恒定，33 题连续通过无泄漏（#110） |
+| **数据完整性** | ⚠️ S#121: 答案污染 28% (P2 salvage 覆写), 重复 solution 12%, 嵌入 31% |
 | **架构合规** | ✅ 8 MCP Server / 37 Tools，唯一调用链，零违规 |
-| **测试** | ✅ 全量单元 1170/1170 通过（#89，含事件循环污染修复） |
-| **文档同步** | ✅ CLAUDE.md 规则化后，状态类内容统一由本文档维护 |
-| **整体完成度** | **核心链路 ~99%，整体 ~95%** |
+| **测试** | ✅ 全量单元 1170/1170 通过 |
+| **稳定性** | ✅ SO_REUSEADDR + VRAM 感知路由生效。⚠️ 答案验证被 Phase 2 绕过 |
+| **文档同步** | ✅ CLAUDE.md 规则化 + PROJECT_STATUS.md + RESTART_PROMPT.md + E2E 报告 |
+| **整体完成度** | **核心链路 ~99%，整体 ~95%**。详解 88% 历史最高，但答案污染 + 重复 solution 回归。 |

@@ -39,6 +39,15 @@ class JSONFormatter(logging.Formatter):
             "trace_id": trace_id_var.get(""),
         }
 
+        # Include exception traceback when present
+        if record.exc_info and record.exc_info[1]:
+            import traceback
+            log_entry["traceback"] = traceback.format_exception(
+                record.exc_info[0],
+                record.exc_info[1],
+                record.exc_info[2],
+            )
+
         # Add extra fields if present
         if hasattr(record, "extra_data"):
             log_entry.update(record.extra_data)
@@ -48,6 +57,10 @@ class JSONFormatter(logging.Formatter):
 
 def setup_logging(level: int = logging.INFO) -> None:
     """Configure structured JSON logging for the application."""
+    # Session #125: Force UTF-8 on Windows to prevent GBK encoding
+    # errors for Unicode characters in chemistry/math Markdown.
+    # Use PYTHONIOENCODING env var instead of wrapping sys.stdout
+    # to avoid breaking asyncio ProactorReadPipeTransport on Windows.
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JSONFormatter(datefmt="%Y-%m-%dT%H:%M:%S"))
 

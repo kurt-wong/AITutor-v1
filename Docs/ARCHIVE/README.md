@@ -6,7 +6,8 @@
 
 | 日期 | 原因 | 包含文件 |
 |------|------|---------|
-| 2026-07-12 | 文档-代码一致性审计修正（P0/P1） | PRD v2.0, SAD v3.0, MIS v1.5, ACS v1.1, DSD v3.0, TASK v5.0, DEVELOPMENT_ROADMAP |
+| 2026-07-18 | 项目规则合并（CLAUDE.md 重构为规则-only） | CLAUDE_PROJECT_CONTEXT, DOCUMENT_GOVERNANCE, Project rules, DEVELOPMENT_ROADMAP, E2E_TEST_REMEDIATION_PLAN, SYSTEM_AUDIT, 废弃代码模块 |
+| 2026-07-25 | 文档/测试清理（过时内容归档） | prompt.md（旧 Prompt Freeze V1.0，已被 backend/app/prompts/ 取代） |
 
 ## 恢复方法
 

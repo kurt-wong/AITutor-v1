@@ -109,9 +109,10 @@ export default function TrainingPage() {
     const value = answers[q.question_id] || "";
 
     if (q.question_type === "choice") {
-      // Extract options from content (e.g., "A. ... B. ... C. ... D. ...")
-      const optionMatch = q.content.match(/[A-D][.、]\s*\S+/g);
-      if (optionMatch) {
+      // Extract options from content by splitting on newlines and matching option-prefixed lines.
+      // The old regex `[A-D][.、]\s*\S+` truncated at spaces; line-based matching handles multi-word options.
+      const optionLines = q.content.split("\n").filter((line) => /^[A-D][.、]/.test(line.trim()));
+      if (optionLines.length > 0) {
         return (
           <Radio.Group
             value={value}
@@ -119,9 +120,10 @@ export default function TrainingPage() {
             style={{ width: "100%" }}
           >
             <Space direction="vertical">
-              {optionMatch.map((opt) => {
-                const letter = opt.charAt(0);
-                const text = opt.slice(2).trim();
+              {optionLines.map((optLine) => {
+                const trimmed = optLine.trim();
+                const letter = trimmed.charAt(0);
+                const text = trimmed.slice(2).trim();
                 return (
                   <Radio key={letter} value={letter}>
                     <b>{letter}.</b> {text}

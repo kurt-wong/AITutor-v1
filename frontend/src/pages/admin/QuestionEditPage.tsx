@@ -145,7 +145,7 @@ export default function QuestionEditPage() {
         {question ? (
           <Card>
             <Tag color="blue">#{question.id}</Tag>
-            <Paragraph style={{ marginTop: 8 }}><MathRenderer content={question.content || ""} /></Paragraph>
+            <Paragraph style={{ marginTop: 8, whiteSpace: "pre-wrap" }}><MathRenderer content={question.content || ""} /></Paragraph>
             {question.subject_name && <Tag>{question.subject_name}</Tag>}
             {question.images && question.images.length > 0 && (
               <>

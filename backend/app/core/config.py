@@ -75,8 +75,7 @@ class Settings(BaseSettings):
     #   C3a (OCR verify): Qwen 3.6 Plus → MIMO V2.5 → Ollama qwen2.5vl:3b
     #   C3b (LaTeX): MIMO V2.5 唯一方案
     VL_C4_PRIMARY: str = "mimo"        # C4 figure detection backend ("mimo" | "ollama")
-    VL_C3_MODEL: str = ""              # C3b model (deprecated — MIMO V2.5 is the only working backend)
-    VL_C3B_PRIMARY: str = "mimo"       # "mimo" — C3b LaTeX extraction; Ollama path removed (qwythos VL broken)
+    VL_C3B_PRIMARY: str = "mimo"       # "mimo" — C3b LaTeX extraction; Ollama path retained for future VL models
 
     # Extraction Quality Gate Thresholds (Route B2)
     EXTRACTION_MIN_COVERAGE: float = 0.30
@@ -126,7 +125,7 @@ class Settings(BaseSettings):
     PADDLEOCR_VL_MAX_RETRIES: int = 2
 
     # LLM Annotation — 一次性标注完整试卷 Markdown（替代逐题正则拆分）
-    LLM_ANNOTATION_ENABLED: bool = False  # 启用 LLM 标注管线（metadata + questions JSON）
+    LLM_ANNOTATION_ENABLED: bool = True  # Session #114: LLM 全量提取主路径（v3.0 默认启用）
 
     # 题目结构化模式 (Phase 3+ / Session #99):
     #   regex  — 现有 structurer.py regex 解析（默认，稳定）

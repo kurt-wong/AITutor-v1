@@ -74,10 +74,8 @@ class VLVerifier(VLClient):
             timeout=timeout,
             vl_semaphore=vl_semaphore,
         )
-        # C3b model: MIMO V2.5 (Session #47 — qwythos Ollama path removed)
-        self._latex_model = latex_model or getattr(
-            settings, "VL_C3_MODEL", ""
-        )
+        # C3b model: MIMO V2.5 (S#128 — VL_C3_MODEL config removed)
+        self._latex_model = latex_model or ""
         # C3b primary backend: "mimo" (default) — Ollama path reserved for future
         self._c3b_primary = c3b_primary or getattr(
             settings, "VL_C3B_PRIMARY", "mimo"
@@ -220,7 +218,7 @@ class VLVerifier(VLClient):
             # qwythos-9b VL is 100% broken on RTX 4060 8GB.
             # This code path is retained for future local VL models that
             # may become viable. Not reachable with default config
-            # (c3b_primary="mimo", VL_C3_MODEL="").
+            # (c3b_primary="mimo").
             logger.warning(
                 f"C3b: Ollama path is DEPRECATED (Session #47). "
                 f"qwythos-9b VL fails 100% on RTX 4060 8GB. "

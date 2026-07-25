@@ -1,9 +1,10 @@
 # AI Tutor — 文档解析管线规范
 
-> **版本**: 2.2 | **日期**: 2026-07-19 | **状态**: 架构对齐版 + LLM 标注 + response_format 透传 (Session #94)
+> **版本**: 3.0 | **日期**: 2026-07-24 | **状态**: LLM 全量提取主路径 (Session #114)
 >
 > 本文档是 PDF 处理管线的**唯一权威参考**。
 >
+> **v3.0 重大变更**: **LLM 全量提取替代正则管线成为主路径。** PP-StructureV3 Markdown → DeepSeek reasoning 一次性提取每道题的完整 stem + 标注 JSON → 直接入库。正则管线（QuestionStructurer + 跨页合并 + P2 答案配对）降级为回退路径。
 > **v2.2 变更**: LLM 标注分支接入 `response_format: {"type": "json_object"}` — API 保证合法 JSON，根除 LaTeX 转义崩溃；Gateway 层透传支持。
 > **v2.1 变更**: 新增 LLM 标注分支 — 一次性 LLM 调用标注完整 Markdown → JSON → 直接入库，绕过正则管线。
 > **v2.0 重大变更**: 统一为 PP-StructureV3 单引擎架构。PyMuPDF + 本地 PaddleOCR 标记废弃。
@@ -26,25 +27,39 @@
 
 ### 核心原则
 
-**PP-StructureV3 是唯一的文档解析引擎。** 不再使用 PyMuPDF + 本地 PaddleOCR 的多组件管线。
+**PP-StructureV3 是唯一的文档解析引擎。LLM 全量提取是主路径。**
 
 ```
 用户上传 PDF
   → MinIO 存储
   → PP-StructureV3 /layout-parsing（同步，Markdown + 图片输出）
-  → 多 VL 协同增强（MIMO V2.5 + Qwen 3.6 Plus）
-  → 题目结构化 + 知识图谱映射
-  → 详解生成 + 智能分析 + 辅导输出
+  → DeepSeek reasoning 一次性提取（完整 stem + type + answer + KP + difficulty）
+  → 直接入库（一次事务）
+  → 异步富化（solve + difficulty + embed + explain）
+```
+
+### 主路径 vs 回退路径
+
+```
+主路径（v3.0）:
+  PP-StructureV3 Markdown → DeepSeek 全量提取 → JSON → 入库
+  细则: LLM 输出每道题的完整 stem（从 Markdown 原文逐字复制，不改写）
+        + type + answer + explanation + difficulty + knowledge_points
+        → _save_annotated_questions() 一次事务入库
+
+回退路径（触发条件: LLM 失败 / JSON 解析失败 / questions < 动态阈值 / stem_quality 过低）:
+  PP-StructureV3 TaggedTextBlock[] → QuestionStructurer.structure()
+  → 正则 QNO 切分 → 跨页合并 → P2 答案配对 → 入库
 ```
 
 ### 当前状态
 
 ```
 PP-StructureV3 API:      旧 submit/poll 模式（待迁移到 /layout-parsing）
-PyMuPDF (C1):           已废弃，代码保留作本地 fallback
-本地 PaddleOCR (C2):     已废弃，代码保留
-MIMO V2.5:              已集成（图像分析 + Whole-PDF VL）
-Qwen 3.6 Plus:          待替换 qwen2.5vl:3b
+LLM 提取 (主):           DeepSeek reasoning + response_format={"type":"json_object"}
+正则管线 (回退):          QuestionStructurer (保留，仅 LLM 失败时运行)
+MIMO V2.5:               图像分析 + Whole-PDF VL（回退路径中的 low-yield fallback）
+qwen2.5vl:3b:            本地 per-page VL fallback（回退链末端）
 ```
 
 ---
@@ -136,7 +151,7 @@ PADDLEOCR_VL_LAYOUT_MODE=vl (legacy):
 
 ---
 
-## 3. 8 阶段处理管线
+## 3. 处理管线（v3.0 精简）
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -148,84 +163,90 @@ PADDLEOCR_VL_LAYOUT_MODE=vl (legacy):
 │ 2. PP-StructureV3 文档解析（submit/poll 异步）                  │
 │    - POST /api/v2/ocr/jobs → 返回 job_id                        │
 │    - GET /api/v2/ocr/jobs/{job_id} → 90s 轮询 / 150s 超时      │
-│    - 参数: PP-StructureV3, optionalPayload 配置                 │
-│    - 输出: 每页 Markdown (含 LaTeX 公式 + 表格 + 图片引用)     │
-│    - 注: /layout-parsing 同步端点尚不可用                       │
+│    - 输出: 完整 Markdown（含 LaTeX + 图片引用 + 表格）          │
 ├──────────────────────────────────────────────────────────────┤
-│ 3. 多 VL 协同增强                                             │
-│    - MIMO V2.5: 图像块二次分析（复杂图表细节、配图 OCR）       │
-│    - Qwen 3.6 Plus: 复杂图文混排理解、题目边界优化             │
-│    - 结合 PP-StructureV3 输出 + VL 分析结果                    │
+│ 3. LLM 全量提取（主路径）                                      │
+│    - DeepSeek reasoning: 完整 Markdown → JSON                   │
+│    - 输出: {metadata, questions: [{stem, options, type,        │
+│      answer, explanation, difficulty, knowledge_points}]}     │
+│    - stem = Markdown 原文逐字复制，不改写                       │
+│    - 一次 LLM 调用完成切分 + 标注 + 答案配对                     │
+│    - 失败时回退到正则管线（Step 4）                              │
 ├──────────────────────────────────────────────────────────────┤
-│ 4. 题目结构化                                                 │
-│    - QuestionStructurer: 题目边界识别 + 题型分类              │
-│    - 跨页合并: trailing_text/leading_text                     │
-│    - 格式标准化 → StructuredQuestion                          │
+│ 4. 正则管线（回退，仅 LLM 失败时触发）                           │
+│    - QuestionStructurer: QNO 切分 + 跨页合并 + P2 答案配对      │
+│    - Whole-PDF VL 仅作低产回退（< 3 题时触发）                 │
 ├──────────────────────────────────────────────────────────────┤
 │ 5. 知识图谱映射                                               │
-│    - KnowledgeMapper 三级回退:                                │
-│      Step 1: 关键词匹配 (9 科知识树, ~1000 关键词)           │
+│    - KnowledgeMapper 三级回退:                                 │
+│      Step 1: 关键词匹配 (9 科知识树)                           │
 │      Step 2: 题型启发式                                       │
-│      Step 3: LLM 回退 (DeepSeek 分类)                         │
-│    - 输出: KnowledgeMapping[] → question_knowledge 关联表     │
+│      Step 3: LLM 回退 (DeepSeek 分类)                          │
 ├──────────────────────────────────────────────────────────────┤
-│ 6. 详解生成                                                   │
-│    - 仅针对缺失详解的题目                                      │
-│    - DeepSeek Pro: 详细解题步骤和思路                          │
-│    - MIMO V2.5 Pro: 含图表题目的可视化解析                     │
-│    - ⚠️ 当前生成后不入库（SSE 流式返回即丢弃）                 │
+│ 6. 异步富化（Phase 2, enrich worker）                          │
+│    - solve + difficulty + embed + explain_enqueue              │
+│    - 不阻塞文档 worker                                        │
 ├──────────────────────────────────────────────────────────────┤
-│ 7. 智能分析                                                   │
-│    - 错题本: ✅ 已实现                                         │
-│    - 薄弱点识别: ⬜ 待开发                                     │
-│    - 推荐策略: ⬜ 待开发                                       │
+│ 7. 详解生成（Phase 3, explain worker）                         │
+│    - Stage 1: 学科路由（qwen3.5:4b / MIMO v2.5）               │
+│    - Stage 2: DeepSeek V4 Pro 审核                            │
 ├──────────────────────────────────────────────────────────────┤
 │ 8. 辅导输出                                                   │
-│    - 错题重练: ⚠️ MCP 工具存在，不持久化                       │
-│    - 知识点讲解: ⬜ 待开发                                     │
-│    - 进度跟踪: ⬜ 待开发                                       │
+│    - 错题本 ✅ · 薄弱点识别 ⬜ · 推荐策略 ⬜                    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3.5 LLM 标注分支（Session #91 — 可选，`LLM_ANNOTATION_ENABLED`）
+## 3.5 LLM 全量提取（v3.0 主路径，替代正则管线）
 
-当 `LLM_ANNOTATION_ENABLED=true` 时，管线在 PP-StructureV3 提取后走 LLM 标注分支，完全绕过正则切分管线：
+当 `LLM_ANNOTATION_ENABLED=true`（默认）时，管线走 LLM 全量提取路径，完全绕过正则切分管线：
 
 ```
 PP-StructureV3 → 完整 Markdown（full_markdown）
   → _step_llm_annotate(): DeepSeek reasoning mode + response_format={"type":"json_object"}
-    → 输出: {metadata: {year, district, school, subject, exam_type, grade},
-             questions: [{qno, type, section, answer, explanation, score}]}
+    → 输出: {
+        metadata: {year, district, school, subject, exam_type, grade},
+        questions: [{qno, stem, options, type, answer, explanation, difficulty, knowledge_points}]
+      }
   → _save_annotated_questions(): 解析 JSON → questions + solutions 表（一次事务）
 ```
 
 ### 与正则管线对比
 
-| 维度 | 正则管线 | LLM 标注 |
+| 维度 | 正则管线 (回退) | LLM 全量提取 (主) |
 |------|---------|---------|
-| LLM 调用次数 | N 道题需要 N 次（答案提取 + 类型分类 + 详解生成） | 1 次/文档 |
-| 答案匹配 | 正则 44% + LLM 补答 | LLM 一次性标注 |
+| 切分方式 | regex QNO + 跨页合并 (4000+ 行) | LLM 语义理解，一次完成 |
+| LLM 调用 | N 道题需要 N 次（答案提取 + 类型分类） | 1 次/文档（DeepSeek reasoning） |
+| stem 来源 | TaggedTextBlock 拼装（易截断/污染） | LLM 从 Markdown 原文逐字复制 |
+| 答案匹配 | P2 regex 配对 ~44% + LLM 补答 | LLM 一次性标注 |
+| 跨页问题 | 三层打分 + VL 验证 | 不存在（LLM 看全文） |
+| 一题多问 | regex 子题分组 | LLM 语义理解 |
 | 来源信息 | 仅文件名推断 | LLM 从 Markdown 标题行提取 |
-| 数据结构 | 分散在多个步骤 | 一次 JSON 全部入库 |
 
 ### Prompt 策略
 
 - 输入: 完整 Markdown（含 `##` 标题、LaTeX `$...$`、`<img>` 图片引用、`<table>` 表格）
-- 输出: `metadata`（纯结构化） + `questions`（qno/type/section/answer/explanation/score）
-- `raw_markdown` 原样保留用于前端渲染，不放入 LLM 输出
-- 使用 DeepSeek reasoning mode + `response_format: {"type": "json_object"}`（API 保证合法 JSON，根除 LaTeX 转义崩溃 — Session #94）
+- 输出: `metadata` + `questions[]`（每个 question 含完整 `stem`（原文逐字复制）、`options`、`type`、`answer`、`explanation`、`difficulty`、`knowledge_points`）
+- stem 策略: **完整原文，不改写** — LLM 从输入 Markdown 原样复制从题号到下一题号之间的全文。保留所有 LaTeX、图片引用、表格。不改写、不总结、不省略。
+- 使用 DeepSeek reasoning mode + `response_format: {"type": "json_object"}` + `max_tokens=16384`
 
 ### 回退策略
 
-LLM 标注失败（空响应、JSON 解析失败）→ 自动回退到正则管线（`QuestionStructurer.structure()`）。
+LLM 全量提取失败（空响应、JSON 解析失败、questions < 动态阈值、stem_quality 平均 < 0.5）→ 自动回退到正则管线（`QuestionStructurer.structure()`）。
 
 ### 相关配置
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `LLM_ANNOTATION_ENABLED` | `false` | 启用 LLM 标注分支 |
+| `LLM_ANNOTATION_ENABLED` | `true` (v3.0) | 启用 LLM 全量提取主路径 |
+
+### 阶段规划
+
+| 阶段 | 内容 | 状态 |
+|:---:|------|:---:|
+| 1 | stem 提取 + 质量验证（教师版内嵌格式） | 实施中 (Session #114) |
+| 2 | body/answer 分割（独立答案区格式） | 待实施 |
 
 ---
 
@@ -280,18 +301,18 @@ extract_pdf_whole(pdf_path)
 
 ## 6. 关键源文件地图
 
-| 文件 | 职责 |
-|------|------|
-| `app/domains/document/parallel_extraction/_paddleocr_vl_client.py` | **PP-StructureV3 API 客户端** (旧 submit/poll, 待迁移) |
-| `app/domains/document/parallel_extraction/pipeline.py` | 管线编排 |
-| `app/domains/document/async_document.py` | 文档处理入口 `_step_parallel_extract()` |
-| `app/domains/document/async_document.py` | 文档处理入口 `_step_parallel_extract()` + LLM 标注 `_step_llm_annotate()` / `_save_annotated_questions()` (Session #91) |
-| `app/domains/question/_page_vl_extractor.py` | Whole-PDF VL `extract_pdf_whole()` |
-| `app/domains/question/structurer.py` | 题目结构化 + 跨页合并 |
-| `app/domains/knowledge/mapper.py` | 知识图谱映射 |
-| `app/domains/student/sse_handler.py` | SSE 流式解答 (详解不入库) |
-| `app/mcp/servers/training_server.py` | 训练集 MCP 工具 (不持久化) |
-| `app/gateway/router.py` | LLM Gateway 多模型路由 |
+| 文件 | 职责 | 路径角色 |
+|------|------|:---:|
+| `app/domains/document/parallel_extraction/_paddleocr_vl_client.py` | **PP-StructureV3 API 客户端** | 主+回退 |
+| `app/domains/document/async_document.py` | **LLM 全量提取主路径**: `_step_llm_annotate()` + `_save_annotated_questions()` + Prompt V2 + `_clean_stem_for_db()` + `_score_stem_quality()` | 主 |
+| `app/domains/document/async_pipeline.py` | 管线编排 + enrich/explain worker + 3-queue | 主+回退 |
+| `app/domains/question/structurer.py` | 正则管线（回退）: QuestionStructurer + 跨页合并 + P2 答案配对 | 回退 |
+| `app/domains/question/_page_vl_extractor.py` | Whole-PDF VL 提取（回退路径中的 low-yield fallback） | 回退 |
+| `app/domains/question/llm_annotation.py` | LLMAnnotationPipeline（旧 hybrid，v3.0 后不再主动调用） | 废弃 |
+| `app/domains/knowledge/mapper.py` | 知识图谱映射 | 主 |
+| `app/domains/student/sse_handler.py` | SSE 流式解答 | 主 |
+| `app/gateway/router.py` | LLM Gateway 多模型路由 + `max_tokens` 参数透传 | 主 |
+| `app/gateway/provider.py` | LLM Provider: DeepSeek/MIMO + `max_tokens` 覆盖 | 主 |
 
 ---
 

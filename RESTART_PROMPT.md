@@ -1,7 +1,7 @@
 # AI Tutors 系统重启提示词
 
 > 将此文件全部内容复制粘贴给新会话的 Claude，即可快速恢复完整工作上下文。
-> 最后更新: 2026-07-22 Session #106 | 版本: 1.7.0
+> 最后更新: 2026-07-25 Session #122 | 版本: 1.21.0
 
 ---
 
@@ -29,13 +29,9 @@
 # ── 基础设施 ──
 docker compose up -d postgres redis minio    # 端口: 15432 / 16379 / 9000
 
-# ── 后端（自动清理端口 + 启动）──
+# ── 后端 ──
 cd "D:/Project/AI Tutors/backend"
-python scripts/start_backend.py --port 8000
-
-# 如果端口被僵尸 TCP 条目占用（Windows 120s TcpTimedWaitDelay），
-# 脚本会自动等待释放。加 --force 可跳过等待（可能启动失败）。
-# 单独清理端口: python scripts/kill_port.py 8000
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # ── 前端 ──
 cd "D:/Project/AI Tutors/frontend"
@@ -50,190 +46,153 @@ npm run dev                                    # 端口: 3000
 | Redis | 16379 | — |
 | MinIO | 9000 | `minioadmin:minioadmin` |
 
-**.env 关键配置**: `VL_PRIMARY=mimo`, `VL_OCR_MODEL=mimo-v2.5`, `PADDLEOCR_VL_LAYOUT_MODE=api`, `PADDLEOCR_ANNOTATION_MODE=hybrid`, `LLM_GATEWAY_MODE=live`, `PARALLEL_EXTRACTION_ENABLED=true`, `PIPELINE_WORKERS=6`
+> **⚠️ S#122 已知问题**: SO_REUSEADDR 导致 netstat 显示虚假 PID（kill 报 "No such process"），但不影响实际端口使用。重启电脑后自动清除。前端 proxy 指向 8000。Python `.pyc` 缓存可能导致 uvicorn `--reload` 不生效——代码修改后 API 仍返回旧结果时，需清 `app/__pycache__/` 后重启。
+
+**.env 关键配置**: `VL_PRIMARY=mimo`, `VL_OCR_MODEL=mimo-v2.5`, `PADDLEOCR_VL_LAYOUT_MODE=api`, `LLM_GATEWAY_MODE=live`, `LLM_ANNOTATION_ENABLED=true`, `PARALLEL_EXTRACTION_ENABLED=true`, `PIPELINE_WORKERS=6`
 
 ---
 
-## 三、Session #102 — 9 科题型体系重构
-
-`backend/app/domains/question/llm_annotation.py`:
-- `_QUESTION_TYPES`: 5→9 科，新增 chinese/biology/history/geography
-- 英语 `writing` 拆分为 `practical_writing` + `continuation_writing`
-- `_ALL_VALID_QUESTION_TYPES`: 14→35 类型
-
-`backend/app/domains/question/models.py`: `question_type VARCHAR(20)` → `VARCHAR(30)`（手动 ALTER TABLE 已执行）
-
-`backend/alembic/versions/014_widen_question_type.py`: 新 migration 文件
-
----
-
-## 四、Session #103 — Bug 修复
-
-### 4.1 formula_latex 重复追加（已修复）
-
-**文件**: `async_document.py:_save_question_block()` L2219-2247
-
-**根因**: PP-StructureV3 markdown 已含 `$$...$$` 公式，C3 formula_blocks 又返回裸 LaTeX。`formula_latex not in q_text` 检查永远为 True（裸 LaTeX 不在带 `$$` 的 markdown 中），导致每个公式出现两次。
-
-**修复**: 检测 `q_text` 含 LaTeX 定界符时，逐公式检查是否已存在（含 `$$` 变体匹配），只追加真正缺失的公式。
-
-### 4.2 PP-StructureV3 管线 3 连 Bug（已修复但未验证）
-
-**Bug 1** `_paddleocr_vl_client.py:134`: `client` 未定义 → `self._get_client()`
-**Bug 2** `types.py:187 PaddleOCRResult`: 缺少 `paddleocr_markdown` 字段 → 已添加
-**Bug 3** `component2_paddle_extraction.py:188`: `show_log=False` 在 PaddleOCR 3.7.0 不支持 → 已移除（`use_gpu=self._use_gpu` 仍保留，如报错需移除）
-
----
-
-## 五、Session #104-105 — 管线重构（已实施 ✅）
-
-### 5.1 诊断结论（Session #104）
-
-处理时间长（~20min/doc）的三大根因：
-1. **三重 LLM 标注**：N 次 MIMO per-question + 1 次 DeepSeek
-2. **富化阻塞 worker**：解答/难度/嵌入在保存后仍占用 worker
-3. **GPU 争用**：PaddleOCR + Ollama embedding + Ollama chat 争抢 8GB VRAM
-
-### 5.2 重构实施（Session #104 编码 + #105 收尾）
-
-| 改造 | 内容 | 状态 |
-|------|------|:---:|
-| 合并标注 | `_LLM_ANNOTATION_PROMPT` 增 difficulty/KP；merge 同时合并 | ✅ |
-| 两阶段处理 | Phase 1 快速入库(~3min)；Phase 2 异步富化(解答/难度/嵌入)→新队列 | ✅ |
-| Worker 优化 | 3-queue: doc + enrich + explain（动态分配）| ✅ |
-| 标注并发化 | `LLMAnnotationPipeline.process()` → `asyncio.gather` + Semaphore(6) | ✅ #105 |
-| Semaphore(1) | PP-StructureV3 API 调用串行化防并发过载 | ✅ |
-
-预期：单文档 ~20min → ~3-5min。**Session #106 验证**: 3 文档 Phase 1 ~1min（提速约 60x），Phase 2 异步富化正常消费。
-
----
-
-## 六、Session #106 — 管线重构后首次 E2E + 知识点映射修复
-
-### 6.1 E2E 3 文档测试结果
-
-| 科目 | 题目数 | 解答 | 难度 | 嵌入 | 状态 |
-|------|--------|------|------|------|:--:|
-| 数学 | 23 | 23/23 | 23/23 | 23/23 | ✅ 100% |
-| 英语 | 34 | 34/34 | 34/34 | — | ✅ 完成 |
-| 物理 | 19 | 19/19 | 19/19 | — | ✅ 完成 |
-| **总计** | **76** | **76/76** | **76/76** | **23/76** | — |
-
-Phase 1 约 1 分钟完成 3 份文档全部入库（vs 重构前约 20min/doc）。
-
-### 6.2 知识点映射修复
-
-**问题**：`question_knowledge` 表 0 条记录。根因链：
-1. `LLM_ANNOTATION_ENABLED=false` → 无 LLM 来源 KP
-2. `_step_parallel_extract` 构建了 `knowledge_results` 但结果在管线传递中丢失
-3. Phase 2 富化流程从未包含 KP 映射步骤
-
-**修复**：`async_pipeline.py:_process_enrichment_task()` Step 0 新增知识点映射：
-```
-旧: solve → difficulty → embed → explain_enqueue
-新: knowledge_map → solve → difficulty → embed → explain_enqueue
-```
-- 从 DB 自动检测学科 → 关键词匹配 → `save_question_knowledge()`
-- 无 LLM 调用，不增加显著耗时
-- 覆盖所有提取路径（Route A/B/C）
-- 已验证：76 题 → 323 条 KP 记录（数学 173 + 物理 110 + 英语 40）
-
-**已知限制**：英语覆盖率 35%（12/34 题），因阅读题不含语法关键词。需后续扩充 `tree_seed/english.py` 关键词列表。
-
-
-
----
-
-## 七、E2E 测试 — 状态
-
-### 当前状态（Session #106）
-
-**3 科（数学/英语/物理）**: ✅ 76 题全部成功入库，解答/难度 100% 完成，323 条知识点映射。
-**5 科全量**: 🔄 待继续（加语文/化学）。
-
-### 已确认修复
-
-管线已验证可工作。7 处 bug 修复 + 1 项新功能全部确认有效：
-1. `PaddleOCRResult.paddleocr_markdown` 字段缺失 → 已添加
-2. `_paddleocr_vl_client.py:134` NameError → `self._get_client()`
-3. `component2_paddle_extraction.py` PaddleOCR 3.7.0 兼容 → 移除 legacy 参数
-4. `formula_latex` 重复追加 → 定界符感知去重
-5. `question_type VARCHAR(20)→30` + 9 科题型体系
-6. 端口管理脚本 (`kill_port.py` + `start_backend.py`)
-7. **知识点映射** → `async_pipeline.py` Step 0 新增，已验证 323 条记录 ✅
-
-### 重启后操作（推荐：5 科全量 E2E 测试）
-
-```bash
-# 1. 验证关键修复在位
-cd "D:/Project/AI Tutors/backend"
-grep "self._get_client()" app/domains/document/parallel_extraction/_paddleocr_vl_client.py
-grep "paddleocr_markdown: str" app/domains/document/parallel_extraction/types.py
-grep "knowledge_map" app/domains/document/async_pipeline.py  # 应有 Step 0 匹配
-
-# 2. 启动后端
-python scripts/start_backend.py --port 8000
-
-# 3. 清数据 + 跑 5 科 E2E
-export PYTHONPATH=.
-python scripts/clear_test_data.py
-python scripts/e2e_three_docs.py  # 数学+英语+物理，约 5min
-
-# 4. 验证知识点映射
-python -c "
-import asyncio
-from sqlalchemy import text
-from app.db.session import async_session_factory
-async def c():
-    async with async_session_factory() as s:
-        r = await s.execute(text('SELECT COUNT(*) FROM question_knowledge'))
-        print(f'KP records: {r.scalar()}')
-asyncio.run(c())
-"
-```
-
----
-
-## 八、已知待办
-
-### 高优（下次会话优先）
-1. ~~管线重构实施~~ → ✅ 已完成（Session #104-#105）
-2. ~~知识点映射修复~~ → ✅ 已完成（Session #106）
-3. **E2E 5 科全流程测试** — 清数据 → 上传 PDF → 验证全流程
-4. Alembic version 对齐（014 migration 文件在但 DB 未记录）
-
-### 中优
-5. 英语 Q4416 多题合并
-6. 选择题前端排版（Q4452）
-7. 中英科目 KP 覆盖率低 → `tree_seed/english.py` + `tree_seed/chinese.py` 关键词待扩充
-
-### 低优（API 层面，不可控）
-8. 化学仪器图标签（N₂/K₁等）被解析为独立 display formula
-9. `Na_2SO_3` → `Na.2^{SO_3}` 下标误识别
-
----
-
-## 八、架构红线
-
-- API → Service → Repository → Database 唯一调用链
-- Agent 通过 MCP Tool 调用 Service；前端不可直接访问数据库
-- 知识树不可自动扩展；所有 LLM 调用必须经 Gateway 路由
-- 数据库不存储 COT（思维链）
-
----
-
-## 九、给 Claude 的工作指令
+## 三、架构核心规则（不可违反）
 
 ```
-继续 AI Tutors 项目。版本 1.7.0。
+UI → API → Service → MCP Client → MCP Server → Infra
+```
+
+1. **唯一调用链**: API → Service → Repository → Database
+2. **Agent 通过 Tool 调用 Service**（MCP Server 是唯一工具层）
+3. **前端不可直接访问数据库**
+4. **数据库不存储 COT（思维链）**
+5. **知识树不可自动扩展**
+6. **所有 LLM 调用必须经 Gateway 路由**
+7. **LLM 全量提取是题目结构化主路径** (#114): PP-StructureV3 Markdown → DeepSeek 一次性提取完整 stem + 标注 → 入库。正则管线仅作回退。
+
+---
+
+## 四、当前系统状态（Session #122 结束）
+
+### 4.1 管线架构
+
+```
+Phase 1 (doc worker): 上传 → OCR → LLM 全量提取 (主) → 答案验证 → 图片URL重写 → 保存 ~30s/doc
+Phase 2 (enrich worker): knowledge_map → solve → difficulty → embed → explain_enqueue
+Phase 3 (explain worker): Stage 1 学科路由 → Stage 2 DeepSeek 审核 → 保存
+```
+
+**#122 新增修复**:
+- **_step_solve_question() 答案验证**: Phase 2 solve 保存前调用 `_validate_llm_answer()` (BUG-1)
+- **_step_solve_question() 去重**: 加 `get_by_question()` 检查，Phase 1 已有方案时跳过 (BUG-2)
+- **异常日志升级**: `_log_to_db()` / `_create_document_pages()` 异常 `debug→warning` + `exc_info=True` (BUG-3/4)
+- **QuestionService.list_questions() 修复**: 无筛选时 `else: []` → `list_all()` 分页查询 (BUG-5，前端"获取题目失败"根因)
+- **QuestionRepository.list_all()**: 新增分页全量查询方法
+
+**3-queue**: doc×4 + enrich×2 + explain×2
+
+### 4.2 数据现状（Session #122 结束）
+
+| 指标 | 数值 | 说明 |
+|------|:---:|------|
+| MinIO 文档 | 305 份 PDF | ✅ 数据安全 |
+| DB 文档 | 10 条 | 478-482 (completed, 旧), 483-487 (failed, S#122 重插入) |
+| 题目 | 138 题 | 属于旧 docs 478-482 |
+| 解答 | 155 | 含 17 重复（BUG-2 修复前数据） |
+
+> **⚠️ 前端可能仍显示 0 题**: BUG-5 代码已修复，但需确保 `.pyc` 缓存清除（重启电脑可解决）。
+
+### 4.3 VRAM 瓶颈（持续）
+
+```
+RTX 4060 8GB VRAM 预算:
+  qwen3.5:4b          4.3 GB (explain Phase 3)
+  qwen3-embedding:4b  2.4 GB (embed Phase 2)
+  余量                 1.3 GB ← 不足以并行
+```
+
+### 4.4 E2E 测试报告
+
+最新: `backend/scripts/E2E_TEST_REPORT_S121.md` — 5科全量，138题，详解88%，答案污染28%（BUG-1 修复前）
+
+---
+
+## 五、已知待办（Session #122 更新）
+
+### 🔴 P1 — 验证/调试
+1. **验证 BUG-1/2 修复** — 下一轮 E2E 测试确认答案污染率从 28% → ~3%，重复 Solution 归零
+2. **验证 BUG-3/4 修复** — 确认异常日志可见后 `_log_to_db()` / `_create_document_pages()` 的问题根因
+3. **验证 BUG-5 修复** — 重启电脑后前端题目列表能否正常显示 138 题
+4. **文档 483-487 status=failed** — 138 题成功入库但文档标记 failed，需查日志定位
+
+### 🟡 P2 — 高优
+5. **嵌入 VRAM 死锁** — 建议评估云端 embedding API (S#117→S#121)
+6. **Python .pyc 缓存** — 代码修改后 uvicorn `--reload` 可能不自动重载，需手动清 `__pycache__`
+
+### 🟢 P3 — 低优
+7. 化学 LLM 指令歧义 — V3 prompt 对化学教师版导致 LLM 回显指令文本而非答案 (S#121)
+8. GBK 日志编码 → UTF-8 (S#117)
+
+---
+
+## 六、S#122 修改文件清单
+
+| 文件 | 修改 | 说明 |
+|------|------|------|
+| `backend/app/domains/document/async_pipeline.py` | `_step_solve_question()` 重写 | +答案验证 +去重 |
+| `backend/app/domains/document/async_document.py` | 2 处异常日志升级 | `debug→warning`+exc_info |
+| `backend/app/domains/question/service.py` | `list_questions()` else 分支 | `[]`→`list_all()` |
+| `backend/app/domains/question/repository.py` | 新增 `list_all()` | 分页全量查询 |
+
+### 其他关键文件
+
+| 文件 | 说明 |
+|------|------|
+| `backend/scripts/E2E_TEST_REPORT_S121.md` | **#121 E2E 测试报告（最新）** |
+| `backend/scripts/cleanup_db.py` | 数据库全量清空脚本 |
+| `backend/scripts/re_extract_v3.py` | 文档重提取与重入队脚本 |
+| `backend/app/domains/document/async_document.py` | 文档处理核心管线 + `_validate_llm_answer()` |
+| `backend/app/domains/document/async_pipeline.py` | 异步管道 worker |
+| `backend/app/domains/document/vram_monitor.py` | VRAM 监控与智能路由 (S#118) |
+| `backend/app/mcp/servers/llm_server.py` | LLM MCP Server + P2 salvage + CoT guard |
+| `backend/app/main.py` | FastAPI 入口 + SO_REUSEADDR patch (S#120) |
+
+---
+
+## 七、Session 历史
+
+| Session | 日期 | 内容 |
+|---------|------|------|
+| #117 | 07-24 | E2E 5科全流程: 142题/0错误, VRAM瓶颈, COT边界, 端口zombie |
+| #118 | 07-24 | VRAM感知调度: vram_monitor + 详解MIMO路由 + 嵌入优先 |
+| #119 | 07-24 | 5项P1诊断: 答案验证方案设计, ON DELETE CASCADE 验证, 修复方案 |
+| #120 | 07-24 | 5项P1修复: _validate_llm_answer(), document_id过滤, doc_pages/logs, SO_REUSEADDR, re_extract |
+| #121 | 07-25 | E2E 5科全量重测: 138题, 详解88%, 答案污染28%, 4新bug发现 |
+| **#122** | **07-25** | **4项Bug修复: BUG1-2 _step_solve_question 验证+去重, BUG3-4 日志升级, BUG5 list_questions 空列表修复** |
+
+---
+
+## 八、给 Claude 的工作指令
+
+```
+继续 AI Tutors 项目。版本 1.21.0。
 
 快速恢复:
-1. 读 §五「Session #104-105 管线重构」→ 4 大改造已全部实施 ✅
-2. 读 §六「Session #106」→ 知识点映射已修复 ✅，E2E 3 科验证通过
-3. 读 CLAUDE.md 回顾架构规则
+1. 读 RESTART_PROMPT.md §三 架构规则
+2. 读 RESTART_PROMPT.md §四 系统状态
+3. 读 RESTART_PROMPT.md §五 已知待办（按优先级）
+4. 读 CLAUDE.md 完整规则
 
-当前优先:
-A. E2E 5 科全流程测试 — 清数据 → 上传 PDF → 验证全流程
-B. 修复 Alembic version 对齐
-C. 扩充 tree_seed 关键词（英语/语文 KP 覆盖率低）
+当前状态:
+- BUG-1~5 代码已修复，待 E2E 验证实际效果
+- DB 有 138 题（旧 docs 478-482），MinIO 有 305 份 PDF
+- 文档 483-487 需重处理（status=failed）
+- 前端若显示 0 题: 清 __pycache__ 后重启后端（BUG-5 代码已修但缓存可能未清）
+
+下一步:
+A. 验证前端题目列表正常显示（应能显示 138 题）
+B. 排查 doc 483-487 failed 原因（看 backend 日志）
+C. E2E 小规模测试验证 BUG-1/2 修复效果
+
+VRAM: 嵌入 31%, 详解 88% (VRAM 感知路由生效)
+
+启动命令:
+  后端: cd "D:/Project/AI Tutors/backend" && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+  前端: cd "D:/Project/AI Tutors/frontend" && npm run dev
 ```

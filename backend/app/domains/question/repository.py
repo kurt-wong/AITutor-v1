@@ -75,6 +75,17 @@ class QuestionRepository:
         )
         return list(result.scalars().all())
 
+    async def list_all(
+        self, skip: int = 0, limit: int = 100, exclude_generated: bool = False,
+    ) -> list[Question]:
+        """List all questions with pagination (Session #122)."""
+        stmt = select(Question).order_by(Question.created_at.desc())
+        if exclude_generated:
+            stmt = stmt.where(Question.source_type != "generated")
+        stmt = stmt.offset(skip).limit(limit)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def update(
         self,
         question_id: int,
@@ -109,6 +120,7 @@ class QuestionRepository:
         query: str = "",
         subject_id: int | None = None,
         difficulty: int | None = None,
+        document_id: int | None = None,
         skip: int = 0,
         limit: int = 20,
         exclude_generated: bool = False,
@@ -119,6 +131,7 @@ class QuestionRepository:
             query: Text to search in content
             subject_id: Subject filter
             difficulty: Difficulty filter
+            document_id: Document filter (Session #120)
             skip: offset
             limit: Maximum results
             exclude_generated: If True, exclude questions with source_type='generated'
@@ -137,6 +150,9 @@ class QuestionRepository:
 
         if difficulty is not None:
             stmt = stmt.where(Question.difficulty == difficulty)
+
+        if document_id is not None:
+            stmt = stmt.where(Question.document_id == document_id)
 
         if exclude_generated:
             stmt = stmt.where(Question.source_type != "generated")

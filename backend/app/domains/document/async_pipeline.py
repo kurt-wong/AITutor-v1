@@ -703,11 +703,13 @@ class AsyncPipeline(_DocumentProcessing):
     # ── Session #47 Part B: Explanation Generation ──────────────────
 
     async def _process_explanation_task(self, task_data: dict[str, Any]) -> None:
-        """Process an explanation generation task through 3-stage pipeline.
+        """Process an explanation generation task through 2-stage pipeline.
 
-        Stage 1: Qwen3.5 4B (local Ollama) generates detailed explanation
-        Stage 2: MIMO v2.5 (cloud) validates correctness
-        Stage 3: DeepSeek v4 Pro (cloud) reviews and polishes
+        Stage 1: Subject-based model routing (Session #110):
+          - Math choice     -> qwen3.5:4b
+          - Physics/Chemistry choice -> MIMO v2.5
+          - Other subjects  -> qwen3.5:4b
+        Stage 2: DeepSeek V4 Pro review (mandatory for all)
 
         Saves the final explanation to the solutions table.
         Re-queues on transient API failures (up to 3 attempts).
@@ -776,26 +778,50 @@ class AsyncPipeline(_DocumentProcessing):
         question_type: str = "",
         options: list[str] | None = None,
     ) -> dict[str, Any]:
-        """3-stage explanation generation pipeline.
+        """2-stage explanation generation with subject-based model routing.
 
-        Stage 1: Qwen3.5 4B (local, free) — generates draft explanation
-        Stage 2: MIMO v2.5 (cloud, cheap) — validates correctness
-        Stage 3: DeepSeek v4 Pro (cloud, accurate) — final review & polish
+        IMPORTANT: Only for questions WITHOUT pre-existing explanations.
+        Answer-key explanations (mode="extracted") skip this pipeline entirely
+        (filter: ``not sq.get("explanation")`` in enrich worker Step 4).
 
-        Cost-optimized: the most token-intensive step (generation) uses
-        the free local model. Only validation and review use paid APIs.
+        Session #110 routing (LLM-generated choice questions):
+        - Math choice     -> qwen3.5:4b (local, free)
+        - Physics/Chemistry choice -> MIMO v2.5 (cloud, cheap)
+        - Other subjects  -> qwen3.5:4b (existing behavior)
+
+        Stage 2 (MANDATORY for LLM-generated): DeepSeek V4 Pro reviews.
+        No LLM-generated explanation is saved without DeepSeek review.
 
         Returns:
             {"status": "ok"|"error", "stages": [...], "model_source": str,
              "error": str|None}
         """
-        from app.gateway.router import llm_gateway  # MCP 豁免: generate_vibethinker 无对应 tool
+        from app.gateway.router import llm_gateway
         from app.mcp.client import mcp_client
         from app.db.session import async_session_factory
         from app.domains.question.solution_repository import SolutionRepository
+        from sqlalchemy import text
 
         options = options or []
         stages_completed: list[str] = []
+
+        # ── Resolve subject name for routing ──────────────────────
+        subject_name = ""
+        try:
+            async with async_session_factory() as session:
+                r = await session.execute(
+                    text(
+                        "SELECT sub.name FROM questions q "
+                        "JOIN subjects sub ON q.subject_id = sub.id "
+                        "WHERE q.id = :qid"
+                    ),
+                    {"qid": question_id},
+                )
+                row = r.fetchone()
+                if row:
+                    subject_name = row[0] or ""
+        except Exception:
+            subject_name = ""
 
         # Build prompt context
         options_text = ""
@@ -804,194 +830,250 @@ class AsyncPipeline(_DocumentProcessing):
                 f"{chr(65+i)}. {opt}" for i, opt in enumerate(options)
             )
 
-        # ── Stage 1: Qwen3.5 4B generates explanation ────────────
         stage1_prompt = _STAGE1_EXPLAIN_PROMPT.format(
             stem=stem, options_text=options_text, answer=answer,
             question_type=question_type or "未知",
         )
 
-        await self._log_step(
-            task_id, step="explain_stage1",
-            message=f"Stage 1: Qwen3.5 4B generating for Q{question_id}",
-        )
-        logger.info(
-            "Stage 1/3: Qwen3.5 4B explaining Q%d (%d chars stem)",
-            question_id, len(stem),
-        )
+        # ── Session #117: VRAM-aware local LLM check ─────────
+        # Before routing to local qwen3.5:4b, check if GPU is free.
+        # If embedding model is loaded → route to MIMO API instead.
+        from app.domains.document.vram_monitor import should_use_local_llm
 
-        # MCP 豁免: generate_vibethinker 直接调用 Ollama /api/generate，
-        # 不走 Gateway 标准路由。该函数无对应 MCP tool，且属于
-        # 本地模型调用（非 cloud API），架构迁移优先级低。
-        vibe_result = await llm_gateway.generate_vibethinker(stage1_prompt)
-        if vibe_result.get("error") or not vibe_result.get("response", "").strip():
-            error_msg = vibe_result.get("error", "Empty Qwen3.5 4B response")
-            logger.warning(
-                "Stage 1 failed for Q%d: %s — falling back to DeepSeek direct",
-                question_id, error_msg,
-            )
-            await self._log_step(
-                task_id, step="explain_stage1_fallback",
-                message=f"Qwen3.5 4B failed ({error_msg}), falling back to DeepSeek direct",
+        _use_local = await should_use_local_llm()
+        if not _use_local:
+            logger.info(
+                "VRAM busy — using MIMO API for Q%d explain instead of local qwen",
+                question_id,
             )
 
-            # Session #98 P1: When local Qwen3.5 fails (GPU contention,
-            # timeout, empty response), fallback to cloud DeepSeek to
-            # generate the explanation directly.  This avoids the 63%
-            # failure rate observed in the 8-doc batch test.
-            deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
-                "mode": "tutor",
-                "prompt": _STAGE1_EXPLAIN_PROMPT.format(
-                    stem=stem, options_text=options_text, answer=answer,
-                    question_type=question_type or "未知",
-                ),
-            })
-            deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
-                "error": deepseek_raw.get("error", "MCP调用失败"), "response": "",
-            }
-            final_explanation = deepseek_result.get("response", "")
-            model_source = "deepseek_direct_fallback"
-            stages_completed.append("deepseek_direct_fallback")
+        # ── Stage 1: Subject-based model routing ──────────────────
+        is_math_choice = (
+            subject_name and '数学' in subject_name
+            and question_type and 'choice' in question_type.lower()
+        )
+        is_pc_choice = (
+            subject_name
+            and ('物理' in subject_name or '化学' in subject_name)
+            and question_type and 'choice' in question_type.lower()
+        )
 
-            if not final_explanation.strip():
-                logger.error(
-                    "DeepSeek fallback also failed for Q%d — no explanation",
-                    question_id,
+        draft_explanation = ""
+        model_source = ""
+
+        if is_math_choice:
+            # Math choice -> qwen3.5:4b (or MIMO if VRAM busy, S#117)
+            if _use_local:
+                route_label = "qwen3.5:4b (math choice)"
+                await self._log_step(
+                    task_id, step="explain_stage1",
+                    message=f"Stage 1: {route_label} for Q{question_id}",
                 )
-                return {
-                    "status": "error",
-                    "error": f"Qwen3.5 4B: {error_msg} | DeepSeek fallback: {deepseek_result.get('error', 'empty response')}",
-                    "stages": stages_completed,
+                logger.info(
+                    "Stage 1: qwen3.5:4b explaining Q%d (math choice, %d ch stem)",
+                    question_id, len(stem),
+                )
+                vibe_result = await llm_gateway.generate_vibethinker(stage1_prompt)
+                if vibe_result.get("error") or not vibe_result.get("response", "").strip():
+                    error_msg = vibe_result.get("error", "Empty response")
+                    logger.warning(
+                        "qwen3.5:4b failed for Q%d: %s -> MIMO fallback",
+                        question_id, error_msg,
+                    )
+                    mimo_raw = await mcp_client.call_tool("llm_gateway.generate", {
+                        "mode": "fast", "prompt": stage1_prompt,
+                    })
+                    mimo_result = mimo_raw.get("data", {}) if mimo_raw.get("success") else {
+                        "error": mimo_raw.get("error", "MCP failure"), "response": "",
+                    }
+                    draft_explanation = mimo_result.get("response", "")
+                    model_source = "mimo_fallback"
+                    stages_completed.append("mimo_fallback")
+                else:
+                    draft_explanation = vibe_result["response"]
+                    model_source = "qwen3.5:4b"
+                    stages_completed.append("qwen_stage1")
+            else:
+                # VRAM busy → use MIMO API directly
+                route_label = "MIMO v2.5 (math, VRAM busy)"
+                await self._log_step(
+                    task_id, step="explain_stage1",
+                    message=f"Stage 1: {route_label} for Q{question_id}",
+                )
+                logger.info(
+                    "Stage 1: MIMO v2.5 explaining Q%d (VRAM busy, %d ch stem)",
+                    question_id, len(stem),
+                )
+                mimo_raw = await mcp_client.call_tool("llm_gateway.generate", {
+                    "mode": "fast", "prompt": stage1_prompt,
+                })
+                mimo_result = mimo_raw.get("data", {}) if mimo_raw.get("success") else {
+                    "error": mimo_raw.get("error", "MCP failure"), "response": "",
                 }
-
+                draft_explanation = mimo_result.get("response", "")
+                model_source = "mimo-v2.5"
+                stages_completed.append("mimo_stage1")
             logger.info(
-                "Stage 1 fallback: DeepSeek → %d chars for Q%d",
-                len(final_explanation), question_id,
-            )
-            # Skip Stage 2+3 — fallback result goes straight to save
-            # (jump to the save block at the end of this method)
-
-        else:
-            draft_explanation = vibe_result["response"]
-            stages_completed.append("qwen_stage1")
-            logger.info(
-                "Stage 1/3 done: Qwen3.5 4B → %d chars for Q%d",
-                len(draft_explanation), question_id,
+                "Stage 1 done: %s -> %d chars for Q%d",
+                model_source, len(draft_explanation), question_id,
             )
 
-            # ── Stage 2: MIMO v2.5 validates ─────────────────────────
-            stage2_prompt = _MIMO_VALIDATE_PROMPT.format(
-                stem=stem, answer=answer, explanation=draft_explanation,
-                question_type=question_type or "未知",
-            )
-
+        elif is_pc_choice:
+            # Physics/Chemistry choice -> MIMO v2.5
             await self._log_step(
-                task_id, step="explain_stage2",
-                message=f"Stage 2: MIMO v2.5 validating for Q{question_id}",
+                task_id, step="explain_stage1",
+                message=f"Stage 1: MIMO v2.5 (phys/chem choice) for Q{question_id}",
             )
-            logger.info("Stage 2/3: MIMO v2.5 validating Q%d", question_id)
-
+            logger.info(
+                "Stage 1: MIMO v2.5 explaining Q%d (phys/chem, %d ch stem)",
+                question_id, len(stem),
+            )
             mimo_raw = await mcp_client.call_tool("llm_gateway.generate", {
-                "mode": "fast", "prompt": stage2_prompt,
+                "mode": "fast", "prompt": stage1_prompt,
             })
             mimo_result = mimo_raw.get("data", {}) if mimo_raw.get("success") else {
-                "error": mimo_raw.get("error", "MCP调用失败"), "response": "",
+                "error": mimo_raw.get("error", "MCP failure"), "response": "",
             }
-            mimo_response = mimo_result.get("response", "")
-            mimo_passed = "通过" in mimo_response and "不通过" not in mimo_response
-            stages_completed.append("mimo_validate")
-
-            if mimo_passed:
-                logger.info(
-                    "Stage 2/3: MIMO passed for Q%d — proceeding to review",
-                    question_id,
-                )
-
-                # ── Stage 3: DeepSeek v4 Pro reviews ─────────────────
-                stage3_prompt = _DEEPSEEK_REVIEW_PROMPT.format(
-                    stem=stem, answer=answer, explanation=draft_explanation,
-                    question_type=question_type or "未知",
-                )
-
-                await self._log_step(
-                    task_id, step="explain_stage3",
-                    message=f"Stage 3: DeepSeek v4 Pro reviewing for Q{question_id}",
-                )
-                logger.info("Stage 3/3: DeepSeek v4 Pro reviewing Q%d", question_id)
-
-                deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
-                    "mode": "tutor", "prompt": stage3_prompt,
-                })
-                deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
-                    "error": deepseek_raw.get("error", "MCP调用失败"), "response": "",
-                }
-                final_explanation = deepseek_result.get("response", draft_explanation)
-                model_source = "qwen+mimo+deepseek"
-                stages_completed.append("deepseek_review")
-
-                if not final_explanation.strip():
-                    final_explanation = draft_explanation
-                    model_source = "qwen+mimo"
-
-                logger.info(
-                    "Stage 3/3 done: DeepSeek review → %d chars for Q%d",
-                    len(final_explanation), question_id,
-                )
-            else:
-                # ── MIMO rejected → re-generate with DeepSeek directly ──
+            if mimo_result.get("error") or not mimo_result.get("response", "").strip():
+                error_msg = mimo_result.get("error", "Empty response")
                 logger.warning(
-                    "Stage 2/3: MIMO rejected Q%d explanation: %s",
-                    question_id, mimo_response[:200],
+                    "MIMO v2.5 failed for Q%d: %s -> qwen3.5:4b fallback",
+                    question_id, error_msg,
                 )
+                vibe_result = await llm_gateway.generate_vibethinker(stage1_prompt)
+                draft_explanation = vibe_result.get("response", "")
+                model_source = "qwen_fallback"
+                stages_completed.append("qwen_fallback")
+            else:
+                draft_explanation = mimo_result["response"]
+                model_source = "mimo-v2.5"
+                stages_completed.append("mimo_stage1")
+            logger.info(
+                "Stage 1 done: %s -> %d chars for Q%d",
+                model_source, len(draft_explanation), question_id,
+            )
 
+        else:
+            # Default: qwen3.5:4b (or MIMO if VRAM busy, S#117)
+            if _use_local:
+                route_label = "qwen3.5:4b (default)"
                 await self._log_step(
-                    task_id, step="explain_stage3_fallback",
-                    message=f"Stage 3 fallback: DeepSeek v4 Pro re-generating for Q{question_id}",
+                    task_id, step="explain_stage1",
+                    message=f"Stage 1: {route_label} for Q{question_id}",
                 )
-
-                deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
-                    "mode": "tutor",
-                    "prompt": _STAGE1_EXPLAIN_PROMPT.format(
-                        stem=stem, options_text=options_text, answer=answer,
-                        question_type=question_type or "未知",
-                    ),
-                })
-                deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
-                    "error": deepseek_raw.get("error", "MCP调用失败"), "response": "",
-                }
-                final_explanation = deepseek_result.get("response", "")
-                model_source = "deepseek_direct"
-                stages_completed.append("deepseek_direct")
-
-                if not final_explanation.strip():
-                    # Both MIMO and DeepSeek failed — use Qwen3.5 4B draft as-is
+                logger.info(
+                    "Stage 1: qwen3.5:4b explaining Q%d (default, %d ch stem)",
+                    question_id, len(stem),
+                )
+                vibe_result = await llm_gateway.generate_vibethinker(stage1_prompt)
+                if vibe_result.get("error") or not vibe_result.get("response", "").strip():
+                    error_msg = vibe_result.get("error", "Empty response")
                     logger.warning(
-                        "Stage 3 fallback also failed for Q%d — using Qwen3.5 4B draft",
-                        question_id,
+                        "qwen3.5:4b failed for Q%d: %s -> DeepSeek fallback",
+                        question_id, error_msg,
                     )
-                    final_explanation = draft_explanation
-                    model_source = "qwen_only"
+                    deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
+                        "mode": "tutor", "prompt": stage1_prompt,
+                    })
+                    deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
+                        "error": deepseek_raw.get("error", "MCP failure"), "response": "",
+                    }
+                    draft_explanation = deepseek_result.get("response", "")
+                    model_source = "deepseek_fallback"
+                    stages_completed.append("deepseek_fallback")
+                else:
+                    draft_explanation = vibe_result["response"]
+                    model_source = "qwen3.5:4b"
+                    stages_completed.append("qwen_stage1")
+            else:
+                # VRAM busy → use MIMO API directly (S#117)
+                route_label = "MIMO v2.5 (default, VRAM busy)"
+                await self._log_step(
+                    task_id, step="explain_stage1",
+                    message=f"Stage 1: {route_label} for Q{question_id}",
+                )
+                logger.info(
+                    "Stage 1: MIMO v2.5 explaining Q%d (VRAM busy, %d ch stem)",
+                    question_id, len(stem),
+                )
+                mimo_raw = await mcp_client.call_tool("llm_gateway.generate", {
+                    "mode": "fast", "prompt": stage1_prompt,
+                })
+                mimo_result = mimo_raw.get("data", {}) if mimo_raw.get("success") else {
+                    "error": mimo_raw.get("error", "MCP failure"), "response": "",
+                }
+                draft_explanation = mimo_result.get("response", "")
+                model_source = "mimo-v2.5"
+                stages_completed.append("mimo_stage1")
+            logger.info(
+                "Stage 1 done: %s -> %d chars for Q%d",
+                model_source, len(draft_explanation), question_id,
+            )
 
-        # ── Save to database (shared by all paths) ──────────────────
-        # Session #98 P1: Save block is placed outside the if/else so
-        # both the normal 3-stage path and the Stage-1-failure fallback
-        # path converge here.
+        # All Stage 1 models failed
+        if not draft_explanation.strip():
+            logger.error(
+                "All Stage 1 models failed for Q%d", question_id,
+            )
+            return {
+                "status": "error",
+                "error": "All Stage 1 models failed",
+                "stages": stages_completed,
+            }
+
+        # ── Stage 2: DeepSeek V4 Pro review (MANDATORY for all) ───
+        stage2_prompt = _DEEPSEEK_REVIEW_PROMPT.format(
+            stem=stem, answer=answer, explanation=draft_explanation,
+            question_type=question_type or "未知",
+        )
+
+        await self._log_step(
+            task_id, step="explain_stage2",
+            message=f"Stage 2: DeepSeek V4 Pro reviewing for Q{question_id}",
+        )
+        logger.info(
+            "Stage 2/2: DeepSeek reviewing Q%d (draft=%d ch, src=%s)",
+            question_id, len(draft_explanation), model_source,
+        )
+
+        deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
+            "mode": "tutor", "prompt": stage2_prompt,
+        })
+        deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
+            "error": deepseek_raw.get("error", "MCP failure"), "response": "",
+        }
+        final_explanation = deepseek_result.get("response", "")
+        stages_completed.append("deepseek_review")
+
+        if not final_explanation.strip():
+            logger.warning(
+                "DeepSeek review failed for Q%d (%s) — using draft",
+                question_id, deepseek_result.get("error", "empty"),
+            )
+            final_explanation = draft_explanation
+            model_source = model_source + "_no_review"
+        else:
+            model_source = model_source + "+deepseek_review"
+            logger.info(
+                "Stage 2/2 done: DeepSeek -> %d chars for Q%d",
+                len(final_explanation), question_id,
+            )
+
+        # ── Save to database ──────────────────────────────────────
         try:
             async with async_session_factory() as session:
                 sol_repo = SolutionRepository(session)
-                # Check if solution already exists
                 existing = await sol_repo.get_by_question(question_id)
                 if existing:
-                    # Update existing solution with explanation
                     await sol_repo.update(
                         existing.id,
                         explanation=final_explanation,
                     )
                     logger.info(
-                        "Updated existing solution for Q%d with explanation (%d chars)",
+                        "Updated solution for Q%d (%d chars)",
                         question_id, len(final_explanation),
                     )
                 else:
-                    # Create new solution record
                     await sol_repo.create(
                         question_id=question_id,
                         final_answer=answer,
@@ -1000,7 +1082,7 @@ class AsyncPipeline(_DocumentProcessing):
                         mode="explanation_pipeline",
                     )
                     logger.info(
-                        "Created solution for Q%d with explanation (%d chars, source=%s)",
+                        "Created solution for Q%d (%d chars, src=%s)",
                         question_id, len(final_explanation), model_source,
                     )
                 await session.commit()
@@ -1012,7 +1094,7 @@ class AsyncPipeline(_DocumentProcessing):
                 "explanation_len": len(final_explanation),
             }
         except Exception as e:
-            logger.error(f"Failed to save explanation for Q{question_id}: {e}")
+            logger.error(f"Save failed for Q{question_id}: {e}")
             return {
                 "status": "error",
                 "error": f"Save failed: {e}",
@@ -1184,35 +1266,35 @@ class AsyncPipeline(_DocumentProcessing):
             )
             steps_completed.append("difficulty")
 
-            # ── Step 3: Embedding (concurrent, pause explain workers) ──
-            await self.pause_explain_workers()
-            try:
-                _embed_sem = asyncio.Semaphore(4)
+            # ── Step 3: Embedding (no longer pauses explain workers) ──
+            # Session #117: explain workers route to MIMO API when
+            # embedding model occupies GPU (VRAM-aware routing).
+            # This keeps embedding on local GPU while explains flow
+            # through cloud API without blocking.
+            _embed_sem = asyncio.Semaphore(4)
 
-                async def _embed_one(sq: dict) -> bool:
-                    async with _embed_sem:
-                        try:
-                            embed_result = await self._step_embed(
-                                sq["id"], sq["content"],
-                            )
-                            return embed_result.get("status") != "error"
-                        except Exception as e:
-                            logger.warning(
-                                "Enrich embed failed for Q%d: %s", sq["id"], e,
-                            )
-                            return False
+            async def _embed_one(sq: dict) -> bool:
+                async with _embed_sem:
+                    try:
+                        embed_result = await self._step_embed(
+                            sq["id"], sq["content"],
+                        )
+                        return embed_result.get("status") != "error"
+                    except Exception as e:
+                        logger.warning(
+                            "Enrich embed failed for Q%d: %s", sq["id"], e,
+                        )
+                        return False
 
-                embed_results = await asyncio.gather(
-                    *[_embed_one(sq) for sq in questions],
-                )
-                embed_count = sum(1 for ok in embed_results if ok)
-                await self._log_step(
-                    task_id, "embed",
-                    f"向量嵌入完成: {embed_count}/{len(questions)}",
-                )
-                steps_completed.append("embed")
-            finally:
-                await self.resume_explain_workers()
+            embed_results = await asyncio.gather(
+                *[_embed_one(sq) for sq in questions],
+            )
+            embed_count = sum(1 for ok in embed_results if ok)
+            await self._log_step(
+                task_id, "embed",
+                f"向量嵌入完成: {embed_count}/{len(questions)}",
+            )
+            steps_completed.append("embed")
 
             # ── Step 4: Enqueue explanation generation ──
             needs_explanation = [
@@ -1447,6 +1529,11 @@ class AsyncPipeline(_DocumentProcessing):
         """Save a solution extracted directly from the document (no LLM call).
 
         Used when the uploaded document already contains standard answers.
+
+        Idempotent: skips creation when a solution already exists for this
+        question (e.g. from the LLM annotation path).  This prevents
+        duplicate extracted-mode solutions that shadow higher-quality
+        llm_annotation answers.
         """
         try:
             from app.db.session import async_session_factory
@@ -1454,6 +1541,19 @@ class AsyncPipeline(_DocumentProcessing):
 
             async with async_session_factory() as session:
                 sol_repo = SolutionRepository(session)
+                existing = await sol_repo.get_by_question(question_id)
+                if existing is not None:
+                    logger.debug(
+                        "Skip extracted solution for Q%d: already has solution "
+                        "(mode=%s, id=%d)",
+                        question_id, existing.mode, existing.id,
+                    )
+                    return {
+                        "status": "skipped",
+                        "question_id": question_id,
+                        "reason": f"existing solution (mode={existing.mode})",
+                    }
+
                 await sol_repo.create(
                     question_id=question_id,
                     final_answer=answer,
@@ -1474,6 +1574,12 @@ class AsyncPipeline(_DocumentProcessing):
         """Generate solution for a question via MCP solve_question and persist to DB.
 
         Calls llm_gateway.solve_question, then saves to solutions table.
+
+        Session #122: Added _validate_llm_answer() guard (BUG-1: P2 salvage
+        answer overwrite) and existing-solution dedup check (BUG-2: duplicate
+        solutions).  Phase 1 may already have saved a solution via
+        _save_annotated_questions() — creating another would pollute answers
+        and double the solution count.
         """
         from app.mcp.client import mcp_client
 
@@ -1487,16 +1593,48 @@ class AsyncPipeline(_DocumentProcessing):
             return {"status": "error", "error": result.get("error", {}).get("message", "unknown")}
 
         sol_data = result.get("data", {})
-        final_answer = sol_data.get("final_answer", "")
-        if not final_answer:
+        final_answer_raw = sol_data.get("final_answer", "")
+        if not final_answer_raw:
             logger.warning(
                 f"solve_question Q{question_id} empty answer. "
                 f"raw_keys={list(sol_data.keys())}, provider={sol_data.get('provider')}, model={sol_data.get('model_used')}"
             )
             return {"status": "skipped", "reason": "empty answer"}
 
+        # ── Session #122 BUG-1: Validate LLM answer before saving ─────
+        # The P2 salvage path in llm_server.py extracts final_answer from
+        # raw JSON via regex, bypassing _validate_llm_answer() which only
+        # runs during Phase 1 LLM annotation.  This guard catches boilerplate
+        # answers, cross-question dumps, and type mismatches before they
+        # pollute the DB.
+        from app.domains.document.async_document import _validate_llm_answer
+
+        # Resolve question type for type-aware validation
+        qtype = "calculation"  # default
         try:
             from app.db.session import async_session_factory
+            from sqlalchemy import text
+            async with async_session_factory() as _qs:
+                _r = await _qs.execute(
+                    text("SELECT question_type FROM questions WHERE id = :qid"),
+                    {"qid": question_id},
+                )
+                _row = _r.fetchone()
+                if _row and _row[0]:
+                    qtype = _row[0]
+        except Exception:
+            pass
+
+        final_answer = _validate_llm_answer(str(final_answer_raw), qtype)
+        if not final_answer:
+            logger.warning(
+                "solve_question Q%d: answer REJECTED by _validate_llm_answer "
+                "(type=%s, raw=%r)",
+                question_id, qtype, str(final_answer_raw)[:80],
+            )
+            return {"status": "skipped", "reason": "answer rejected by validation"}
+
+        try:
             from app.domains.question.solution_repository import SolutionRepository
 
             # Session #98 P2-E: Sanitize solution_steps to prevent DB insert
@@ -1507,6 +1645,24 @@ class AsyncPipeline(_DocumentProcessing):
 
             async with async_session_factory() as session:
                 sol_repo = SolutionRepository(session)
+
+                # ── Session #122 BUG-2: Dedup check ──────────────────
+                # Phase 1 _save_annotated_questions() may have already
+                # created a solution (mode="llm_annotation").  Creating
+                # another would double-count and risk answer pollution.
+                existing = await sol_repo.get_by_question(question_id)
+                if existing is not None:
+                    logger.debug(
+                        "Skip auto_solve for Q%d: already has solution "
+                        "(mode=%s, id=%d)",
+                        question_id, existing.mode, existing.id,
+                    )
+                    return {
+                        "status": "skipped",
+                        "question_id": question_id,
+                        "reason": f"existing solution (mode={existing.mode})",
+                    }
+
                 await sol_repo.create(
                     question_id=question_id,
                     final_answer=final_answer,

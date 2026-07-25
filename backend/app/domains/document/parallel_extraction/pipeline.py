@@ -83,13 +83,16 @@ class ParallelExtractionPipeline:
     # ── Public API ────────────────────────────────────────────────────
 
     async def extract(
-        self, document_data: bytes, file_type: str = "pdf"
+        self, document_data: bytes, file_type: str = "pdf",
+        subject_code: str | None = None,
     ) -> ParallelExtractionResult:
         """Run full 4-component pipeline on a document.
 
         Args:
             document_data: raw bytes of the PDF or image file
             file_type: "pdf" or "image"
+            subject_code: optional subject identifier for per-subject
+                          OCR model routing (S#126: chemistry → VL-1.6)
 
         Returns:
             ParallelExtractionResult with text_blocks, formula_blocks,
@@ -111,7 +114,7 @@ class ParallelExtractionPipeline:
             settings.PADDLEOCR_VL_ENABLED
             and settings.PADDLEOCR_VL_LAYOUT_MODE == "api"
         ):
-            return await self._extract_via_paddleocr_full(document_data)
+            return await self._extract_via_paddleocr_full(document_data, subject_code)
 
         page_images: list[str] = []
         try:
@@ -173,7 +176,7 @@ class ParallelExtractionPipeline:
             if settings.PADDLEOCR_VL_ENABLED:
                 logger.info("C3+C4: Using PaddleOCR-VL API path (Phase 3+)")
                 formula_blocks, figure_anchors, display_formula_map, tables = (
-                    await self._run_c3_c4_via_paddleocr(document_data, layouts)
+                    await self._run_c3_c4_via_paddleocr(document_data, layouts, subject_code)
                 )
                 provider = "paddleocr_vl_api"
             else:
@@ -292,7 +295,7 @@ class ParallelExtractionPipeline:
 
         verifier = VLVerifier(
             vl_model=getattr(settings, "VL_OCR_MODEL", "qwen3.6-plus"),
-            latex_model=getattr(settings, "VL_C3_MODEL", ""),
+            latex_model="",  # S#128: VL_C3_MODEL config removed
             vl_semaphore=self._vl_semaphore,
             c3b_primary=getattr(settings, "VL_C3B_PRIMARY", "mimo"),
         )
@@ -324,21 +327,31 @@ class ParallelExtractionPipeline:
 
     async def _extract_via_paddleocr_full(
         self, document_data: bytes,
+        subject_code: str | None = None,
     ) -> ParallelExtractionResult:
         """Full extraction via PaddleOCR-VL API (replaces C1+C2+C3+C4).
 
         Phase 4: PaddleOCR-VL provides all layout analysis — text blocks,
         formulas, figures, and tables. No local OCR or VL models needed.
 
+        S#126: Per-subject OCR model routing — chemistry uses VL-1.6
+        (preserves Unicode subscripts and reaction arrows); all other
+        subjects use PP-StructureV3 (better LaTeX handling).
+
         Falls back to Route A (C1-C4) on API failure.
         """
         from app.domains.document.parallel_extraction._paddleocr_vl_client import (
             PaddleOCRVlClient,
+            resolve_ocr_model,
         )
 
-        logger.info("Phase 4: Full PaddleOCR-VL extraction starting")
+        model_name = resolve_ocr_model(subject_code)
+        logger.info(
+            "Phase 4: Full PaddleOCR-VL extraction (model=%s, subject=%s)",
+            model_name, subject_code or "unknown",
+        )
 
-        client = PaddleOCRVlClient()
+        client = PaddleOCRVlClient(model_name=model_name)
         try:
             # Session #78: outer timeout — PP-StructureV3 can stall under
             # load (TRAE 27-PDF: 2 PDFs timed out at 120s).  150s gives
@@ -464,6 +477,7 @@ class ParallelExtractionPipeline:
                 success=True,
                 answer_section=answer_section,
                 paddleocr_markdown=result.full_markdown,
+                paddleocr_job_id=result.job_id,
                 paddleocr_display_formulas=display_formula_map,
                 paddleocr_tables=table_dicts,
             )
@@ -552,6 +566,7 @@ class ParallelExtractionPipeline:
 
     async def _run_c3_c4_via_paddleocr(
         self, document_data: bytes, layouts: list,
+        subject_code: str | None = None,
     ) -> tuple[list, list, dict, list]:
         """Run PaddleOCR-VL API to get formulas + figures + tables.
 
@@ -565,9 +580,11 @@ class ParallelExtractionPipeline:
         """
         from app.domains.document.parallel_extraction._paddleocr_vl_client import (
             PaddleOCRVlClient,
+            resolve_ocr_model,
         )
 
-        client = PaddleOCRVlClient()
+        model_name = resolve_ocr_model(subject_code)
+        client = PaddleOCRVlClient(model_name=model_name)
         try:
             # Session #78: outer timeout (see _extract_via_paddleocr_full).
             result = await asyncio.wait_for(

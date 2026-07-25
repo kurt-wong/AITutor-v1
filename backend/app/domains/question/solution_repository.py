@@ -40,9 +40,18 @@ class SolutionRepository:
         return solution
 
     async def get_by_question(self, question_id: int) -> Solution | None:
-        """Get solution by question ID."""
+        """Get solution by question ID.
+
+        Returns the most recent solution when multiple exist (e.g.
+        llm_annotation + extracted from dual-path processing).
+        """
+        from sqlalchemy import desc
+
         result = await self.session.execute(
-            select(Solution).where(Solution.question_id == question_id)
+            select(Solution)
+            .where(Solution.question_id == question_id)
+            .order_by(desc(Solution.id))
+            .limit(1)
         )
         return result.scalar_one_or_none()
 

@@ -52,7 +52,20 @@ logger = get_logger("parallel_extraction.paddleocr_vl_client")
 
 # ── API Constants ──────────────────────────────────────────────────────
 _JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
-_MODEL_NAME = "PP-StructureV3"   # P0 修复: PaddleOCR-VL-1.6 不是合法模型名
+_DEFAULT_MODEL_NAME = "PP-StructureV3"   # P0 修复: PaddleOCR-VL-1.6 不是合法模型名
+
+# ── S#126: Per-Subject OCR Model Routing ─────────────────────────────
+# PP-StructureV3 systematically degrades chemistry symbols:
+#   - Unicode subscript retention: 0% (vs VL-1.6 100%)
+#   - Reaction arrow retention: 0% (vs VL-1.6 100%)
+#   - Data corruption: isotope ⁸⁰Se → ¹⁸⁰Se (mass number error)
+# Chemistry → PaddleOCR-VL-1.6 (end-to-end VL, preserves chemical notation)
+# All other subjects → PP-StructureV3 (modular layout, better LaTeX)
+_SUBJECT_OCR_MODEL: dict[str, str] = {
+    "chemistry": "PaddleOCR-VL-1.6",
+    "CHEM": "PaddleOCR-VL-1.6",
+}
+
 # Session #78: aligned with official API docs (5s poll interval recommended).
 # 300s was ~15× normal latency (13p PDF ≈ 18-21s).  90s covers ~50-page docs;
 # for 1000-page API max, increase to 300s.
@@ -79,10 +92,12 @@ class PaddleOCRVlClient:
         token: str = "",
         timeout: float = 300.0,
         max_retries: int = 2,
+        model_name: str = "",
     ):
         self._token = token or settings.PADDLEOCR_VL_TOKEN
         self._timeout = timeout or settings.PADDLEOCR_VL_API_TIMEOUT
         self._max_retries = max_retries or settings.PADDLEOCR_VL_MAX_RETRIES
+        self._model_name = model_name or _DEFAULT_MODEL_NAME
         self._http_client: Optional[httpx.AsyncClient] = None
 
     # ── Public API ────────────────────────────────────────────────────
@@ -197,7 +212,7 @@ class PaddleOCRVlClient:
                     _JOB_URL,
                     headers=self._auth_headers,
                     data={
-                        "model": _MODEL_NAME,
+                        "model": self._model_name,
                         "optionalPayload": optional_payload,
                     },
                     files={
@@ -619,3 +634,14 @@ class PaddleOCRVlClient:
                     "block_label": block.block_label,
                 })
         return blocks
+
+
+def resolve_ocr_model(subject_code: str | None) -> str:
+    """Resolve OCR model name from subject code.
+
+    S#126: Chemistry → PaddleOCR-VL-1.6 (preserves subscripts, reaction arrows).
+    All other subjects → PP-StructureV3 (modular layout, better LaTeX).
+    """
+    if subject_code and subject_code in _SUBJECT_OCR_MODEL:
+        return _SUBJECT_OCR_MODEL[subject_code]
+    return _DEFAULT_MODEL_NAME

@@ -64,7 +64,7 @@ export default function QuestionPage() {
                     <Tag color="blue">#{q.id}</Tag>
                     {q.difficulty && <Tag color={DIFFICULTY_COLORS[q.difficulty]}>{q.difficulty}</Tag>}
                   </Space>
-                  <Paragraph style={{ marginTop: 8 }}><MathRenderer content={q.content || ""} /></Paragraph>
+                  <Paragraph style={{ marginTop: 8, whiteSpace: "pre-wrap" }}><MathRenderer content={q.content || ""} /></Paragraph>
                   <Text type="secondary">{q.source_type}</Text>
                 </Card>
               </List.Item>

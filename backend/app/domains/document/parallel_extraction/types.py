@@ -143,6 +143,7 @@ class ParallelExtractionResult:
     error_message: Optional[str] = None
     answer_section: Any | None = None  # AnswerSection from Layer 1 detection
     paddleocr_markdown: str = ""  # Full-document markdown from PP-StructureV3
+    paddleocr_job_id: str = ""  # PP-StructureV3 API job ID (for image ZIP download)
     paddleocr_display_formulas: dict[str, list[str]] = field(default_factory=dict)
     paddleocr_tables: list = field(default_factory=list)
 

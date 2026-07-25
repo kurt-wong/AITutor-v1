@@ -213,9 +213,30 @@ class KnowledgeMapper:
         """Fallback mapping based on question type when keywords miss.
 
         Subject-aware fallbacks — uses subject prefix when available.
-        Covers all 6 question types from structurer.
+        Session #111: English choice/fill questions default to ENG-VOCAB
+        instead of ENG-UNKNOWN since standalone word/phrase options are
+        characteristic of vocabulary/cloze exercises.
         """
         subj = subject + "-" if subject else "MATH-"
+
+        # Subject-specific overrides for better fallback granularity
+        _SUBJ_OVERRIDES: dict[str, dict[str, tuple[str, str]]] = {
+            "ENG": {
+                "choice": ("ENG-VOCAB", "词汇选择题"),
+                "fill": ("ENG-VOCAB", "词汇填空题"),
+                "essay": ("ENG-WRITE", "写作题"),
+            },
+        }
+        if subject and subject in _SUBJ_OVERRIDES:
+            override = _SUBJ_OVERRIDES[subject].get(question_type)
+            if override:
+                return KnowledgeMapping(
+                    node_code=override[0],
+                    node_name=override[1],
+                    confidence=0.35,
+                    method="type_heuristic",
+                )
+
         _TYPE_FALLBACK: dict[str, tuple[str, str]] = {
             "choice": (f"{subj}UNKNOWN", "选择题通用"),
             "multi_choice": (f"{subj}UNKNOWN", "多选题通用"),
@@ -319,8 +340,8 @@ class KnowledgeMapper:
             )
             full_prompt = f"{system_prompt}\n\nQuestion: {question_text}"
             # MCP 豁免: KnowledgeMapper 是 KnowledgeServer 的内部实现依赖，
-            # 知识点映射无对应标准 MCP tool。TODO(Session #60): 新增
-            # knowledge_server.map_question MCP tool 封装此逻辑。
+            # 直接调用 LLM Gateway。对外 MCP tool map_question_to_knowledge
+            # 已由 knowledge_server.py 提供。
             response = await llm_gateway.generate(mode="fast", prompt=full_prompt)
 
             raw_text = response.get("response", "")

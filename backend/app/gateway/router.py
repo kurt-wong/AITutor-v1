@@ -469,6 +469,8 @@ class LLMGateway:
     async def generate(
         self, mode: str, prompt: str, images: list[str] | None = None,
         response_format: dict[str, str] | None = None,
+        max_tokens: int | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         if mode not in VALID_MODES:
             raise ValueError(f"Invalid mode '{mode}'. Must be one of: {VALID_MODES}")
@@ -488,14 +490,22 @@ class LLMGateway:
         primary = self.get_provider(effective_mode)
         primary_name = primary.name
 
-        result = await primary.generate(prompt, response_format=response_format)
+        result = await primary.generate(
+            prompt, response_format=response_format, max_tokens=max_tokens,
+            model=model,
+        )
 
         # Check if primary failed (error field OR empty response)
         primary_failed = bool(result.get("error")) or not result.get("response", "").strip()
         if primary_failed:
             logger.warning(f"Primary provider {primary_name} failed (error={result.get('error')}, empty={not result.get('response', '').strip()}), trying fallback")
             fallback = self.get_fallback_provider(primary_name)
-            result = await fallback.generate(prompt, response_format=response_format)
+            # model names are provider-specific ("deepseek-v4-pro" won't
+            # work on MIMO), and get_fallback_provider() always returns a
+            # different provider → never pass model override to fallback.
+            result = await fallback.generate(
+                prompt, response_format=response_format, max_tokens=max_tokens,
+            )
             fallback_failed = bool(result.get("error")) or not result.get("response", "").strip()
             if fallback_failed:
                 logger.warning("Both cloud providers failed, trying local Ollama")
@@ -616,7 +626,7 @@ class LLMGateway:
         }
 
     async def generate_vibethinker(
-        self, prompt: str, *, num_predict: int = 8192,
+        self, prompt: str, *, num_predict: int = 16384,
     ) -> dict[str, Any]:
         """Generate a response from local VibeThinker model via Ollama.
 
@@ -626,6 +636,9 @@ class LLMGateway:
         pipeline.
 
         Uses Ollama /api/generate (not OpenAI-compatible endpoint).
+        Session #111: num_predict increased 8192→16384 — qwen3.5:4b
+        thinking mode consumes num_predict from the response quota;
+        5/33 questions had empty response at 8192.
         Longer timeout and higher num_predict than standard text gen.
         """
         import httpx

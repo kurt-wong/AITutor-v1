@@ -11,6 +11,7 @@ Prompts loaded from YAML via PromptLoader (prompt.md §2 Rule 4).
 """
 
 import logging
+import re
 from typing import Any
 
 from app.mcp.base import MCPServerBase, MCPTool, success_response, error_response
@@ -98,6 +99,119 @@ def _normalize_keys(parsed: dict[str, Any]) -> None:
                     break
 
 
+# ── COT Filtering (Session #115) ──────────────────────────────────
+
+_COT_PATTERNS = re.compile(
+    r"(?:首先[，,].*(?:要求|需要|让我|分析|思考|我们|来看|观察)|"
+    r"用户要求我|"
+    r"输出必须是|"
+    r"让我(?:分析|思考|想想|们|看看|检查)|"
+    r"我需要(?:先|首先|分析|理解|判断|计算|求解)|"
+    r"Let me (?:think|analyze|consider|break|solve|first)|"
+    r"I need to (?:first|understand|analyze|solve|find)|"
+    r"这道题(?:考查|考察|涉及|要求|需要|属于)|"
+    r"题目(?:要求|考查|给出|中)|"
+    r"已知[：:]|"
+    r"由(?:题意|题设|已知条件|条件)可[知得]|"
+    r"我们(?:需要|知道|可以|来|先|首先|来看)|"
+    r"解题思路[：:]|"
+    r"分析[：:]\s*\n|"
+    r"步骤\s*\d+\s*[：:]|"
+    r"解法\s*\d*\s*[：:]|"
+    r"根据(?:题意|已知|公式|定理|定义))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_ANSWER_TRANSITIONS = [
+    r'最终答案\s*[：:]\s*',
+    r'故答案为?\s*[：:]\s*',
+    r'答案为?\s*[：:]\s*',
+    r'正确答案为?\s*[：:]\s*',
+    r'所以\s*(?:正确\s*)?答案\s*(?:是|为|：|:)\s*',
+    r'因此\s*[,，]?\s*(?:正确\s*)?答案\s*(?:是|为|：|:)\s*',
+    r'(?:final\s+)?answer\s*[：:]\s*',
+    r'正确选项\s*(?:是|为|：|:)\s*',
+    r'综上所述\s*[,，]?\s*(?:答案|选项)\s*(?:是|为|：|:)\s*',
+    r'故选(?:择)?\s*[：:]?\s*',
+    r'故[，,]?\s*(?:答案为?|选择?)?\s*(?:[：:]|是|为)?\s*',
+    r'即\s*[,，]?\s*(?:答案|结果)?\s*(?:为|是|：|:)?\s*',
+    r'所求(?:结果|答案)?\s*(?:为|是|：|:)\s*',
+    r'综上[，,]?\s*(?:[，,]?\s*(?:答案|结果为?|可得))?\s*(?:[：:]|是|为)?\s*',
+    r'因此[，,]?\s*(?:[，,]?\s*(?:该题|本题|此题))?\s*(?:答案|结果|选)?\s*(?:[：:]|是|为)?\s*',
+]
+
+
+def _strip_cot_from_answer(text: str) -> str:
+    """Remove chain-of-thought / reasoning from an answer string.
+
+    Called on both the JSON-parsed path (final_answer may contain leaked
+    reasoning) and the raw-text fallback path.
+
+    Strategy (applied in order):
+      1. Strip <think>...</think> tags
+      2. If COT indicators detected at start, try to extract answer after
+         transition markers
+      3. If answer is obviously too long (>500 chars) for a final answer,
+         try last-line fallback
+      4. Return cleaned text
+    """
+    if not text or len(text) < 3:
+        return text
+
+    # 1. Strip <think> tags
+    cleaned = re.sub(
+        r"<think>.*?</think>", "", text,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+
+    if not cleaned:
+        return text  # Don't return empty if think tags consumed everything
+
+    # 2. Detect COT indicators in first 300 chars
+    if _COT_PATTERNS.search(cleaned[:300]):
+        # Try to extract answer after transition markers
+        for pattern in _ANSWER_TRANSITIONS:
+            m = re.search(pattern, cleaned, re.IGNORECASE)
+            if m:
+                after = cleaned[m.end():].strip()
+                if after and len(after) > 2 and len(after) <= 500:
+                    return after
+                elif after and len(after) > 2:
+                    # Answer is still long — take first meaningful segment
+                    lines = after.split("\n")
+                    for line in lines:
+                        stripped = line.strip()
+                        if stripped and len(stripped) > 2 and len(stripped) <= 200:
+                            return stripped
+                    # Fallback: first 200 chars
+                    return after[:200].strip()
+
+        # No transition marker found — try last-line extraction
+        lines = cleaned.strip().split("\n")
+        for line in reversed(lines):
+            stripped = line.strip()
+            if stripped and 2 < len(stripped) <= 200:
+                # Skip lines that look like COT (contain "首先", "分析", etc.)
+                if not _COT_PATTERNS.search(stripped[:100]):
+                    return stripped
+
+        # All lines look like COT — return truncated version
+        # (better than showing 3000 chars of reasoning as "answer")
+
+    # 3. Length check: if answer > 500 chars, it's probably COT
+    if len(cleaned) > 500:
+        # Try extract: look for short final line that looks like an answer
+        lines = cleaned.strip().split("\n")
+        for line in reversed(lines):
+            stripped = line.strip()
+            if 2 < len(stripped) <= 200 and not _COT_PATTERNS.search(stripped[:100]):
+                return stripped
+        # Fallback: truncate
+        return cleaned[:200].strip() + "…"
+
+    return cleaned
+
+
 class LLMGatewayMCPServer(MCPServerBase):
     """LLM Gateway MCP Server."""
 
@@ -146,10 +260,9 @@ class LLMGatewayMCPServer(MCPServerBase):
                     raw_text = result.get("response", "").strip()
                     # Session #98 P2-E: Strip <think>...</think> CoT tags
                     # that MIMO sometimes leaks into the final response.
-                    import re as _re_cot
-                    raw_text = _re_cot.sub(
+                    raw_text = re.sub(
                         r"<think>.*?</think>", "", raw_text,
-                        flags=_re_cot.DOTALL | _re_cot.IGNORECASE,
+                        flags=re.DOTALL | re.IGNORECASE,
                     ).strip()
                     result["response"] = raw_text
                     if raw_text and len(raw_text) > 10:
@@ -186,11 +299,27 @@ class LLMGatewayMCPServer(MCPServerBase):
                 _normalize_keys(parsed)
 
             if parsed and str(parsed.get("final_answer", "")).strip():
-                # Successfully parsed with non-empty answer
+                # ── Session #115: COT filtering on successful JSON path ──
+                # Even when JSON parses correctly, the final_answer field
+                # may contain the LLM's reasoning chain (e.g. "首先分析…所以答案是B").
+                # Apply the same COT guards to strip reasoning from the answer.
+                final_answer_raw = str(parsed.get("final_answer", "")).strip()
+                final_answer = _strip_cot_from_answer(final_answer_raw)
+                if final_answer != final_answer_raw:
+                    logger.info(
+                        "COT stripped from final_answer (Q%s): %d→%d chars",
+                        question_id, len(final_answer_raw), len(final_answer),
+                    )
+
+                solution_steps = parsed.get("solution_steps", [])
+                explanation = parsed.get("explanation", "")
+                # Note: solution_steps sanitization is handled by
+                # _sanitize_solution_steps() in async_pipeline.py when saving.
+
                 solution = {
-                    "final_answer": parsed.get("final_answer", ""),
-                    "solution_steps": parsed.get("solution_steps", []),
-                    "explanation": parsed.get("explanation", ""),
+                    "final_answer": final_answer,
+                    "solution_steps": solution_steps,
+                    "explanation": explanation,
                     "model_used": result.get("model", "unknown"),
                     "provider": result.get("provider", "unknown"),
                     "question_id": question_id,
@@ -214,7 +343,6 @@ class LLMGatewayMCPServer(MCPServerBase):
                 # try to extract the real answer after common CoT→answer
                 # transition markers.  Only fall back to [解析失败] when
                 # extraction yields nothing useful.
-                import re  # 修复: 此前未导入导致 NameError → LLM_FAILURE
                 _COT_INDICATORS = re.compile(
                     r"(?:首先[，,].*(?:要求|需要|让我)|"
                     r"用户要求我|"
@@ -242,22 +370,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                     # Session #99: Try to extract the answer portion after
                     # common CoT→answer transition markers (e.g. "最终答案：",
                     # "所以答案是") instead of blindly replacing with
-                    # [解析失败].
-                    _ANSWER_TRANSITIONS = [
-                        r'最终答案\s*[：:]\s*',
-                        r'故答案为?\s*[：:]\s*',
-                        r'答案为?\s*[：:]\s*',
-                        r'正确答案为?\s*[：:]\s*',
-                        r'所以\s*(?:正确\s*)?答案\s*(?:是|为|：|:)\s*',
-                        r'因此\s*[,，]?\s*(?:正确\s*)?答案\s*(?:是|为|：|:)\s*',
-                        r'(?:final\s+)?answer\s*[：:]\s*',
-                        r'正确选项\s*(?:是|为|：|:)\s*',
-                        r'综上所述\s*[,，]?\s*(?:答案|选项)\s*(?:是|为|：|:)\s*',
-                        r'故选(?:择)?\s*[：:]?\s*',
-                        r'故[，,]?\s*(?:答案为?|选择?)?\s*(?:[：:]|是|为)?\s*',
-                        r'即\s*[,，]?\s*(?:答案|结果)?\s*(?:为|是|：|:)?\s*',
-                        r'所求(?:结果|答案)?\s*(?:为|是|：|:)\s*',
-                    ]
+                    # [解析失败].  Uses module-level _ANSWER_TRANSITIONS.
                     extracted = raw_response
                     for pattern in _ANSWER_TRANSITIONS:
                         m = re.search(pattern, extracted, re.IGNORECASE)
@@ -303,13 +416,12 @@ class LLMGatewayMCPServer(MCPServerBase):
 
                 elif raw_response.strip().startswith("{"):
                     # Raw response looks like JSON — try regex salvage
-                    import re as _re
                     # Extract "final_answer" value from JSON-like text
                     fa_patterns = [
-                        _re.compile(r'"final_answer"\s*:\s*"((?:[^"\\]|\\.)*)"'),
-                        _re.compile(r'"最终答案"\s*:\s*"((?:[^"\\]|\\.)*)"'),
-                        _re.compile(r'"答案"\s*:\s*"((?:[^"\\]|\\.)*)"'),
-                        _re.compile(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                        re.compile(r'"final_answer"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                        re.compile(r'"最终答案"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                        re.compile(r'"答案"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+                        re.compile(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"'),
                     ]
                     for pat in fa_patterns:
                         m = pat.search(raw_response)

@@ -31,6 +31,7 @@ from app.domains.question.service import QuestionService
 from app.domains.question.solution_service import SolutionService
 from app.domains.system.config_service import SystemConfigService
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from app.domains.question.models import QuestionKnowledge
 from app.gateway.router import llm_gateway
 
@@ -89,6 +90,7 @@ async def list_admin_questions(
     subject_id: int | None = Query(None),
     subject: str | None = Query(None),
     difficulty: int | None = Query(None, ge=1, le=5),
+    document_id: int | None = Query(None),
     keyword: str | None = Query(None),
     request: Request = None,
     session: AsyncSession = Depends(get_db),
@@ -100,6 +102,7 @@ async def list_admin_questions(
     - subject_id: subject ID
     - subject: subject name (mapped to subject_id via SUBJECT_MAP)
     - difficulty: difficulty level (1-5)
+    - document_id: filter by document ID (Session #120)
     - keyword: search in question content
     Supports pagination (skip, limit).
     """
@@ -111,6 +114,7 @@ async def list_admin_questions(
         keyword=keyword,
         subject_id=subject_id,
         difficulty=difficulty,
+        document_id=document_id,
         skip=skip,
         limit=limit,
     )
@@ -359,15 +363,18 @@ async def analyze_document(
     kp_map: dict[int, list[dict]] = {qid: [] for qid in q_ids}
     if q_ids:
         kp_rows = await session.execute(
-            select(QuestionKnowledge).where(
+            select(QuestionKnowledge)
+            .options(selectinload(QuestionKnowledge.knowledge_node))
+            .where(
                 QuestionKnowledge.question_id.in_(q_ids)
             )
         )
         for kp in kp_rows.scalars().all():
+            node = kp.knowledge_node
             kp_map[kp.question_id].append({
-                "node_code": kp.node_code,
-                "node_name": kp.node_name,
-                "confidence": kp.confidence,
+                "node_code": node.code if node else "",
+                "node_name": node.name if node else "",
+                "confidence": kp.confidence_score,
             })
 
     result: dict = {

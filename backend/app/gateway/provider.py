@@ -66,6 +66,7 @@ class LLMProvider(ABC):
         prompt: str,
         model: str | None = None,
         response_format: dict[str, str] | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Generate a response from the LLM.
 
@@ -108,6 +109,7 @@ class OpenAICompatibleProvider(LLMProvider):
         prompt: str,
         model: str | None = None,
         response_format: dict[str, str] | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Generate a response using OpenAI-compatible chat completions API.
 
@@ -116,6 +118,8 @@ class OpenAICompatibleProvider(LLMProvider):
             model: Override default model.
             response_format: e.g. {"type": "json_object"} for guaranteed
                 valid JSON output (API handles internal escaping).
+            max_tokens: Override the provider's default max_tokens (used for
+                long-form outputs like LLM annotation which needs 16384).
 
         Includes retry logic with exponential backoff for transient errors.
         """
@@ -134,7 +138,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 json_body: dict[str, Any] = {
                     "model": selected_model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": self._max_tokens,
+                    "max_tokens": max_tokens or self._max_tokens,
                 }
                 if response_format is not None:
                     json_body["response_format"] = response_format

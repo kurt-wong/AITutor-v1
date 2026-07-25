@@ -1044,7 +1044,6 @@ class QuestionStructurer:
         # ── 2. VL extraction for complex pages ──────────────────────
         vl_results: dict[int, PageVLResult] = {}
         if vl_page_nums:
-            import asyncio
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
@@ -1211,7 +1210,6 @@ class QuestionStructurer:
             return self._structure_from_text_only(page_texts)
 
         # ── Async dispatch: extract_pdf_whole() ─────────────────────
-        import asyncio
         import concurrent.futures
 
         from app.domains.document.parallel_extraction._vl_client import (

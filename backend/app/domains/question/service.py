@@ -32,17 +32,27 @@ class QuestionService:
         skip: int = 0,
         limit: int = 100,
     ) -> dict:
-        """List questions with optional filters."""
+        """List questions with optional filters.
+
+        Session #122: Fixed else-branch that returned empty list when no
+        filter was provided, causing frontend question bank to always show
+        "no questions" regardless of DB content.
+        """
         if subject_id:
             questions = await self.repo.list_by_subject(subject_id, skip=skip, limit=limit)
+            total = len(questions)
         elif document_id:
             questions = await self.repo.list_by_document(document_id)
+            total = len(questions)
         else:
-            questions = []
+            questions = await self.repo.list_all(
+                skip=skip, limit=limit, exclude_generated=True,
+            )
+            total = await self.repo.count_all(exclude_generated=True)
 
         return {
             "questions": [self._to_dict(q) for q in questions],
-            "total": len(questions),
+            "total": total,
         }
 
     # ── Admin methods ─────────────────────────────────────────
@@ -52,6 +62,7 @@ class QuestionService:
         keyword: str | None = None,
         subject_id: int | None = None,
         difficulty: int | None = None,
+        document_id: int | None = None,
         skip: int = 0,
         limit: int = 100,
     ) -> dict:
@@ -64,6 +75,7 @@ class QuestionService:
             query=keyword or "",
             subject_id=subject_id,
             difficulty=difficulty,
+            document_id=document_id,
             skip=skip,
             limit=limit,
             exclude_generated=True,

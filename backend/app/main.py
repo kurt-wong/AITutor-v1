@@ -8,6 +8,7 @@ Architecture rules enforced:
 - Structured logging with request_id tracking (SAD §13, Project Rules §9)
 """
 
+import socket as _socket
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,6 +22,27 @@ from app.core.config import settings
 from app.core.logging import get_logger, setup_logging
 
 logger = get_logger("app.main")
+
+# ── Session #120: Windows TCP port zombie mitigation ──────────────────
+# On Windows, when a process crashes the TCP port may remain in TIME_WAIT
+# for up to 120s (TcpTimedWaitDelay default).  Setting SO_REUSEADDR on
+# the server socket before uvicorn binds allows immediate rebinding.
+# This monkey-patch modifies the default server socket creation to include
+# SO_REUSEADDR, which is safe in single-process deployment scenarios.
+
+_orig_socket_create = _socket.socket
+
+
+def _reuseaddr_socket(*args, **kwargs):
+    sock = _orig_socket_create(*args, **kwargs)
+    try:
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    except OSError:
+        pass
+    return sock
+
+
+_socket.socket = _reuseaddr_socket
 
 
 @asynccontextmanager

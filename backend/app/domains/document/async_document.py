@@ -29,35 +29,157 @@ logger = get_logger("async.document")
 
 # ── LLM Annotation Prompt (Session #91: 一次性标注完整试卷 Markdown) ──────
 
-_LLM_ANNOTATION_PROMPT = """\
-你是一位教育文档结构化专家。以下是一份试卷的完整 Markdown（含 LaTeX 公式、图片引用、表格）。
+# ── LLM Annotation Prompt ──────────────────────────────────────────
+# S#128: The single active annotation prompt.  V1 (Session #91) and
+# V2 (Session #114) have been removed.  All code paths — main,
+# fallback, and QNO retry — use this prompt exclusively.
+#
+# The prompt splits Markdown at the answer-key boundary so the LLM
+# receives separated {body} (exam questions) and {answers} (answer key)
+# sections.  When no separate answer section exists, {body} receives
+# the full markdown and {answers} gets a placeholder.
+#
+# Key features (accumulated across S#114–S#128):
+#   1. answer field mandatory for ALL types
+#   2. Explicit answer-key matching rules ("参考答案区通常格式为...")
+#   3. Stem verbatim copy — LLM preserves original formatting;
+#      option line-break splitting handled by _split_inline_options()
+#   4. Anti-hallucination rules (don't guess/fix OCR artifacts)
+#   5. Compound-question merging ((1)(2)(3) sub-items stay in one qno)
+#   2. Explicit answer-key matching rules ("参考答案区通常格式为...")
+#   3. Options formatting: each choice on its own line
+#   4. Stem verbatim copy + option line-break enforcement
 
-请从 Markdown 中提取所有信息，返回严格的 JSON：
+_LLM_ANNOTATION_PROMPT_V3 = """\
+你是一位教育文档结构化专家。以下是一份试卷的正文和参考答案区。
 
-{{
-  "metadata": {{
-    "year": 2026,
-    "district": "海淀区",
-    "school": "人大附中",
-    "subject": "数学",
-    "exam_type": "期末考试",
-    "grade": "高一"
-  }},
+请提取所有题目信息，返回严格的 JSON。请完整输出所有题目，不要省略任何内容。输出可以很长（最多 80000 字符），优先保证每道题目的 stem、options 内容完整性。宁可输出更长，也不能截断题目。
+
+## 输出格式
+
+{
+  "metadata": {
+    "year": 2026, "district": "海淀区", "school": "人大附中",
+    "subject": "数学", "exam_type": "期末考试", "grade": "高一"
+  },
   "questions": [
-    {{
+    {
       "qno": 1,
+      "stem": "从试卷正文逐字复制——从题号到下一题题号之前的完整内容。保留所有 $...$、$$...$$、![...](...)、<table>、换行、缩进。不要改写、总结或省略。",
+      "options": ["A. 选项1", "B. 选项2", "C. 选项3", "D. 选项4"],
       "type": "choice",
-      "section": "选择题",
-      "answer": "C",
-      "explanation": "由$x+1>0$得...（如有解析则提取）",
-      "score": 4,
+      "answer": "B",
+      "explanation": "详细解答过程（如有）。对于填空题/解答题，从「参考答案」区提取该题号对应的完整解过程（包括解、证明、推导等）；对于选择题，从正文【详解】标记提取。纯最终结果且确无解过程才留空。",
       "difficulty": "basic",
-      "knowledge_points": ["集合运算", "绝对值不等式"]
-    }}
+      "knowledge_points": ["知识点1", "知识点2"]
+    }
   ]
-}}
+}
 
-## 提取规则
+## 核心规则
+
+### stem 字段（最重要）
+- stem 是**试卷正文**的逐字复制——不改写、不总结、不省略
+- 从该题 QNO 开始，到下一题 QNO 之前（或文档结束）的所有内容
+- 必须保留所有 LaTeX（$...$、$$...$$）、图片引用（![...](...)）、HTML 表格、换行、缩进
+- stem 中移除【答案】和【详解】标记及其后的内容（放入 answer/explanation 字段）
+- 选择题：stem 必须包含 A/B/C/D 四个选项的完整文本（保持原始排版，不要重新格式化）
+- 解答题/填空题：stem 包含题目完整叙述和各小题编号
+
+### 阅读理解/完形填空 — 材料文本必须包含在 stem 中
+- 对于阅读理解题（如语文、英语），一组题目前通常有一段或多段**材料/文章**，之后是若干基于该材料的问题
+- **必须**将材料文本包含在**该组第一道题的 stem 开头**（所有依赖该材料的题目都要能看到完整材料）
+- 每道依赖材料的题的 stem = 材料文本 + 该题的具体问题
+- 例如：一篇文章后跟 3 道题 → Q1 stem 以文章全文开头，再跟 Q1 具体问题；Q2 stem 同样以文章全文开头，再跟 Q2 问题；以此类推
+- 不要只提取问题而省略材料——没有材料，单独的问题无法作答
+
+### 综合题与子小题（重要 — 防止过度拆分）
+- 文档中可能包含**综合大题**（推断题、实验题、流程题、综合计算题等），一个大题号下设若干子问题
+- 子问题的编号方式：(1)(2)(3)、①②③、a)b)c)、i)ii)iii) 等——**这些不是独立题目**
+- **必须将综合大题作为一个整体输出**：
+  - qno = 大题号（如 21）
+  - stem = 大题号 + 完整题干描述 + 所有子问题（包括子编号）
+  - 不要把每个子问题拆成独立题目
+- 判断方法：如果文档中出现 "21. 某实验小组...（1）...（2）...（3）..." → 这是一道题（qno=21），不是 3 道题
+- 独立题目之间通常由换题号的行首数字标记（如下一行的 "22. ..."）来分隔
+
+### 教师版内嵌格式
+题干后紧跟【答案】X【详解】Y... 的格式：
+  例："1. 已知集合 A={x|x>1}，则...【答案】B【详解】由题意得，..."
+  处理：
+    ① stem = "1. 已知集合 A={x|x>1}，则..."（去除【答案】和【详解】部分）
+    ② answer = "B"
+    ③ explanation = "由题意得，..."
+
+### OCR 不清晰时的处理（重要 — 防止编造内容）
+OCR 输出的 Markdown 可能会存在乱码、缺字、公式扭曲等问题。遇到以下情况时：
+- **禁止猜测或编造**：如果某个字、词语、公式在 OCR 输出中不清晰，不要用自己的知识去"补全"或"修正"它
+- **保留原样**：OCR 输出是什么就复制什么，即使看起来像是错字或乱码
+- **禁止推理**：不要让 LLM 自身的知识干扰对 OCR 文本的忠实复制。你的任务是从 OCR 文本中提取信息，不是纠正 OCR 文本
+- 如果整段 OCR 输出无法辨认（大段乱码），保留乱码原文，不要编造合理内容替代
+- 示例：OCR 输出 "已知函数 f(x)=x^2+2̸x+1" → stem 中保留 "f(x)=x^2+2̸x+1"，不要改写为 "f(x)=x^2+2x+1"
+
+### 答案来源与提取（重要 — 本次改进的核心）
+
+每道题的答案有两种可能来源（按优先级）：
+  **来源 1**：正文中该题后紧跟的【答案】标记（内嵌答案）→ 优先级最高
+  **来源 2**：文档末尾「参考答案」区中该题号对应的答案 → 次优先级
+
+**提取规则（必须遵守）**：
+1. 如果正文中有【答案】标记 → 以正文答案为准，忽略参考答案区该题号的答案
+2. 如果正文中**没有**【答案】标记 → **必须**从「参考答案」区查找该题号的答案
+3. 参考答案区常见格式：
+   - "1.A  2.B  3.C  ..."（选择题答案连排）
+   - "一、选择题：1.B  2.D  3.A  ..."
+   - "16.m=-1  17.最小正周期为π  18.a的取值范围为(-∞,2]  ..."（解答题答案）
+   - "三、解答题：16.（1）m=-1（2）a>2  ..."
+4. **禁止将解答题的 answer 留空**（除非参考答案区确实没有该题号）
+5. **禁止填写**"参考答案"、"略"、"见解析"、"详见解析"
+
+### answer 字段（关键 — 必须准确、简短、仅含最终结果）
+
+**严格禁止以下行为（会导致答案被拒绝）**：
+- ❌ 将整个「参考答案」区的文本复制到一个题目的 answer 中（每道题只需自己的答案）
+- ❌ 将解题过程/推导步骤作为 answer（这些属于 explanation 字段）
+- ❌ 填写"参考答案"、"答案见解析"、"略"、"详见解析"等元描述
+- ❌ 选择题 answer 填多个字母、分数、解释或 LaTeX 公式
+- ❌ 将其他题目的答案混入当前题目的 answer
+
+**正确格式**：
+- 选择题：严格单个字母（A 或 B 或 C 或 D），仅此而已。例如："B"（不是 "B.选项内容"）
+- 填空题：最终数值/表达式/短语。例如："-2"、"(-∞, 2]"、"2"、"m=-1"
+- 解答题：仅提取最终结果。例如："最小正周期为π"、"a的取值范围为(-∞,2]"
+- 如果确实找不到答案，填 ""（但必须在参考答案区仔细逐题查找后才可填 ""）
+- **每道题的 answer 长度应在 100 字符以内（选择题 5 字符以内）**
+
+### explanation 字段（重要 — 本次改进）
+解释/详解有两个可能来源：
+  **来源 1**：正文中的【详解】标记（教师版内嵌格式）→ 直接提取其后的文本
+  **来源 2**：「参考答案」区中该题号的详细解过程（独立答案区格式）→ 必须完整提取
+
+**提取规则**：
+1. 选择题：如果正文有【详解】→ 提取为 explanation；否则留空
+2. 填空题：从「参考答案」区提取该题号对应的全部文本（含"解："、"由题意得"等前缀），完整复制——不只提取最终结果
+3. 解答题/计算题/证明题：从「参考答案」区提取该题号对应的**完整解题过程**。如果答案区包含"解：..."、"证明：..."等步骤，必须全部放入 explanation
+4. **禁止只复制最终结果作为 explanation**——explanation 应该是解题过程，不是答案本身
+5. 如果参考答案区对该题只有最终结果没有过程（如只写 "16. m=-1"），则 explanation 留空
+
+### options 字段
+- 仅 choice / multi_choice 题型需要
+- 从 stem 中提取 A/B/C/D 选项文本，放入 options 数组
+- 每个 option 保持原始 LaTeX 格式
+
+### type 字段
+- choice: 有 A/B/C/D 选项的选择题
+- multi_choice: 多选题
+- fill: 有 ___ 或（  ）留空的填空题
+- proof: 证明题
+- calculation: 计算/求解/化简题
+- essay: 阅读/写作/简答/完形/语法填空
+
+### 无法确定的值
+- metadata 中无法确定的字段设为 null
+- answer 找不到时设为 ""（确认参考答案区也没有）
 
 ### metadata
 - year: 从标题行提取年份（如 "2026 北京二中高一（上）期末" → 2026）
@@ -68,52 +190,728 @@ _LLM_ANNOTATION_PROMPT = """\
 - grade: 年级（高一/高二/高三/初一/初二/初三 等）
 - 无法确定的字段设为 null
 
-### questions
-- qno: 题号（整数）
-- type: "choice" | "fill" | "essay" | "proof" | "calculation" | "multi_choice"
-- section: 所属大题标题（如 "选择题"、"填空题"、"解答题"）
-- answer: 参考答案（选择题填选项字母，填空题填数值/表达式，解答题可为空字符串）
-- explanation: 答案解析/详解（Markdown 中有解析则提取，否则为 ""）
-- score: 分值（整数），无法确定时填 null
-
-### 题目类型判定（严格）
-- 选择题: 有 A/B/C/D 选项 → "choice"
-- 多选题: 有 "多选" 或 ≥5 个选项且有 "全选对" 等说明 → "multi_choice"
-- 填空题: 有 "___" 或 "（  ）" 留空标记 → "fill"
-- 证明题: 有 "证明" 关键词 → "proof"
-- 计算/解答题: 有 "计算"、"求解"、"化简" 等 → "calculation"
-- 作文/阅读/简答: 有 "阅读"、"写作"、"简述" 等 → "essay"
-
-### 答案提取
-- Markdown 中 "参考答案" 之后的部分是答案区
-- 选择题答案通常是单个字母（A/B/C/D）
-- 填空题答案通常是数字、表达式或短语
-- 解答题的 answer 可为空（需要 LLM 后续解答）
-
-### 评分信息
-- 括号中的分数信息如 "（4分）"、"（共 13 分）"、"（每小题 5 分）"
-- 提取数字作为 score
-
 ### difficulty（难度评级）
 - 根据题目复杂度判断：easy（极简）、basic（基础）、medium（中等）、hard（困难）、very_hard（极难）
-- easy: 直接套公式、一步计算、常识判断
-- basic: 课本例题级别，单一知识点
-- medium: 需要组合 2-3 个知识点
-- hard: 综合题，需要多步推理
-- very_hard: 压轴题、竞赛题，需要创造性思维
 
 ### knowledge_points（知识点）
 - 2-4 个具体知识点，中文描述
 - 例如：["集合运算", "绝对值不等式"]、["牛顿第二定律", "摩擦力"]
-- 学科相关术语，尽可能精确
 
-## Markdown 内容
+## 试卷正文
+{body}
 
-{markdown}
+## 参考答案区
+{answers}
 
 ## 输出
-
 只返回 JSON，不要任何其他文字。"""
+
+
+# ── Session #125: Subject-Specific Prompt Instructions ─────────────────
+# Appended to the base annotation prompt based on subject_code.
+# Each entry adds domain-specific extraction guidance that improves
+# LLM output quality for subjects with unique notation or question formats.
+
+_SUBJECT_PROMPT_ADDITIONS: dict[str, str] = {
+    "CHEM": """
+## 化学学科特别指令
+
+### 化学方程式与符号
+- 化学方程式中的 →（反应箭头）、⇌（可逆反应）、↑（气体）、↓（沉淀）是题目的核心内容，必须在 stem 中完整保留
+- 反应条件（如"加热"、"高温"、"催化剂"、"通电"等，通常写在箭头上下方）如出现在 OCR 文本中，必须保留
+- 化学式中的下标数字（如 H₂O 的 2、Fe₃O₄ 的 3 和 4）是标准表示，即使 OCR 转为普通数字（H2O、Fe3O4），也不要试图"修正"——保持原文
+- 离子符号（Fe³⁺、SO₄²⁻ 等）同理，OCR 可能转为 Fe3+、SO42-，保持原文
+- 化学式中的 ""（如 2H₂ + O₂ → 2H₂O 前面的化学计量数）与下标区分开
+
+### 化学题型特征
+- 化学选择题 stem 通常较短（只含核心问题，不含冗长叙述），这是正常的——不要因此降低 stem 质量
+- 实验题通常有较长描述，包含实验步骤、装置说明、数据表格——这些都是 stem 的一部分，必须完整复制
+- 推断题 stem 包含物质转化关系描述（"A 是...，B 是...，A 与 B 反应生成 C..."），必须完整保留
+- 化学计算题的最终答案通常是数值+单位（如"0.5 mol/L"、"80%"），放在 answer 字段
+
+### 化学表格与数据
+- 元素周期表片段、实验数据表（温度/体积/浓度）、溶解度表等在 OCR 中可能转为 HTML <table> 或纯文本——无论哪种形式，必须逐字复制到 stem 中
+- 如果表格在 OCR 中丢失或破碎，至少保留表格前后的文字描述""",
+
+    "CHN": """
+## 语文学科特别指令
+
+### 阅读理解 — 材料处理（最高优先级）
+- 语文阅读理解的材料（文章、散文、小说节选）通常篇幅很长（500-2000 字），必须完整包含在依赖该材料的每道题 stem 开头
+- 如果多道题共享同一篇材料，每道题的 stem = 材料全文 + 该题具体问题
+- 材料中可能包含 OCR 断行（段落中断、换行错位），请尽量修复段落结构，但不要改动文字内容
+
+### 文言文阅读
+- 文言文材料通常包含原文+注释+翻译（或部分翻译），三者都要保留在 stem 中
+- 文言文注释格式通常为"①【注】... ②【注】..."或"（注：...）"，不要丢弃
+- 文言文中的通假字标注（如"说—悦"）、词类活用标注等保留原文
+
+### 古诗词鉴赏
+- 诗词正文的排版（每句一行、上下阕分隔）对理解很重要，请尽量保留
+- 诗词后的注释（作者、背景、词语解释）是题目的一部分，必须包含
+
+### 语言运用题
+- 病句修改、成语使用、修辞判断等题型的 stem 通常包含多个例句或选项文本，全部保留
+- 作文题的 stem 包含题目+写作要求（字数、文体、内容要求等），完整复制
+
+### 语文题型特征
+- 语文主观题（简答、鉴赏、论述）的 answer 可以是关键词/要点，也可以是原文中的关键句——从参考答案区提取
+- 发散性题目（如"谈谈你的理解"）答案可能以要点形式给出（"①... ②... ③..."），完整保留
+- 作文题没有标准答案，answer 设为 ""，但 stem 必须包含完整的写作要求""",
+}
+
+# Map Chinese subject names to codes for prompt lookup
+_SUBJECT_CN_TO_PROMPT_KEY: dict[str, str] = {
+    "化学": "CHEM",
+    "语文": "CHN",
+}
+
+
+def _get_subject_prompt_addition(subject_code: str | None) -> str:
+    """Return subject-specific prompt instructions for the given subject.
+
+    Args:
+        subject_code: Subject identifier (e.g. "CHEM", "化学", "CHN", "语文")
+
+    Returns:
+        Additional prompt text, or "" if no subject-specific instructions.
+    """
+    if not subject_code:
+        return ""
+
+    # Normalize: Chinese name → code
+    key = _SUBJECT_CN_TO_PROMPT_KEY.get(subject_code, subject_code)
+    return _SUBJECT_PROMPT_ADDITIONS.get(key, "")
+
+
+# ── Stem Quality Helpers (Session #114) ──────────────────────────────
+
+# S#128: Split inline choice options into one-per-line format.
+# Previously the LLM was asked to do this (V3 prompt "选择题选项格式"
+# section), but that conflicted with the "逐字复制" instruction.
+# Now the LLM keeps original formatting and this function handles
+# the split deterministically.
+_INLINE_OPTION_MARKER_RE = re.compile(
+    r'[A-H][.．、)]|[(（][A-H][)）]',
+)
+
+
+def _split_inline_options(stem: str) -> str:
+    """Split inline choice options (A.xx B.xx C.xx D.xx) to one per line.
+
+    Only transforms lines containing 3+ option markers (A-H).
+    Lines with 0-2 markers are left unchanged — this avoids
+    false-positives on text like "已知集合 A={x|x>1}".
+    """
+    lines = stem.split('\n')
+    result: list[str] = []
+    for line in lines:
+        markers = list(_INLINE_OPTION_MARKER_RE.finditer(line))
+        if len(markers) < 3:
+            result.append(line)
+            continue
+        # Extract prefix text before the first option marker
+        before = line[:markers[0].start()].strip()
+        # Extract each option segment
+        option_lines: list[str] = []
+        for i, m in enumerate(markers):
+            start = m.start()
+            end = markers[i + 1].start() if i + 1 < len(markers) else len(line)
+            option_lines.append(line[start:end].strip())
+        if before:
+            result.append(before)
+        result.append('\n'.join(option_lines))
+    return '\n'.join(result)
+
+
+def _clean_stem_for_db(stem: str) -> str:
+    """Post-process LLM-returned stem before DB insert.
+
+    Removes residual annotation markers, question numbers, and
+    formatting artifacts that the LLM may have left in the stem.
+    """
+    # -1. Split inline options (S#128): A.xx B.xx C.xx D.xx → one per line
+    stem = _split_inline_options(stem)
+    # 0. Strip leading question number (e.g. "1.", "12．", "3、")
+    #    The QNO is stored in question_number; display stem without it.
+    stem = re.sub(
+        r'^\s*(?:[（(]\s*)?\d{1,3}\s*[.．、)\s）]\s*',
+        '', stem, count=1,
+    )
+    # 1. Remove residual 【答案】...【详解】... markers
+    stem = re.sub(r'【答案】.*?(?:【详解】|$)', '', stem, flags=re.DOTALL)
+    stem = re.sub(r'【详解】.*$', '', stem, flags=re.DOTALL)
+    # 2. Remove score annotations like （4分）/（共13分）/（每小题5分）
+    stem = re.sub(r'[（(]\s*(?:共\s*)?\d+\s*分\s*[）)]', '', stem)
+    # 3. Remove standalone page-marker lines (e.g. "第2页 / 共19页")
+    stem = re.sub(r'^第\d+页\s*/\s*共\d+页\s*$', '', stem, flags=re.MULTILINE)
+    # 4. Collapse 3+ consecutive newlines to 2
+    stem = re.sub(r'\n{3,}', '\n\n', stem)
+    return stem.strip()
+
+
+def _score_stem_quality(stem: str, options: list[str] | None = None) -> float:
+    """Score stem extraction quality from 0.0 to 1.0.
+
+    Used as a quality gate: stems scoring below 0.5 are dropped and
+    trigger fallback to the regex pipeline.
+
+    When ``options`` is provided (A/B/C/D choices), short-stem penalties
+    are reduced because valid choice/fill questions often have brief
+    stems whose real content is in the options array.
+
+    Penalty table:
+      -0.5: stem shorter than 20 chars (→ -0.2 if options present)
+      -0.3: no CJK characters (likely not a real question)
+      -0.4: starts with bare 【 or ] (residual annotation)
+      -0.3: "参考答案" present (answer section leaked into stem)
+      -0.3: short (<15 chars) AND no LaTeX (→ waived if options present)
+    """
+    # Determine if we have meaningful options to offset short-stem penalties
+    _has_opts = bool(
+        options
+        and isinstance(options, list)
+        and len([o for o in options if o and str(o).strip()]) >= 2
+    )
+
+    score = 1.0
+    if len(stem) < 20:
+        score -= 0.2 if _has_opts else 0.5
+    if not re.search(r'[一-鿿]', stem):
+        score -= 0.3
+    # Only penalize if line starts with bare 【/】without preceding CJK/ASCII
+    if re.match(r'^[【\]]', stem[:10]) and not re.search(r'[一-鿿a-zA-Z0-9]', stem[:10]):
+        score -= 0.4
+    if '参考答案' in stem:
+        score -= 0.3
+    if len(stem) < 15 and not re.search(r'[$\\\\]', stem):
+        if not _has_opts:
+            score -= 0.3
+    return max(0.0, score)
+
+
+# ── S#127: Question Count Sanity Check ─────────────────────────────────
+# Instead of heuristic per-page estimates, extract top-level question
+# numbers directly from the OCR markdown and compare to the LLM output.
+# Chinese exam papers use clear QNO patterns like "1.", "12．", "21、"
+# at line starts — this is data-driven and subject-agnostic.
+
+# Matches line-start QNOs: 1-2 digits followed by . 、 ． or )
+# Excludes: 4+ digit numbers (years like 2024.), parenthesized (1)/①
+# sub-questions, Chinese section headers (一、二、三、)
+_QNO_LINE_RE = re.compile(
+    r'^\s*(\d{1,2})[.、．)](?!\d)',
+    re.MULTILINE,
+)
+
+# Max reasonable ratio of LLM questions to markdown QNOs.
+# S#126: VL-1.6 markdown 16 QNOs → Pro 22Q = 1.38x, Flash 28Q = 1.75x.
+# 1.5x gives a safe margin for legitimate multi-part questions while
+# flagging clear over-splitting (Flash's 1.75x triggered, Pro's 1.38x passes).
+_QNO_RATIO_WARN = 1.5
+_QNO_RATIO_CRITICAL = 2.0
+
+
+def _extract_markdown_qno_count(markdown: str) -> int:
+    """Count unique top-level question numbers in OCR markdown.
+
+    Only counts line-start ``1-99.`` / ``1-99、`` / ``1-99．`` patterns.
+    Parenthesized sub-questions ``(1)``, circled numbers ``①``, and
+    Chinese section headers ``一、`` are intentionally excluded.
+    """
+    matches = _QNO_LINE_RE.findall(markdown)
+    unique = set()
+    for m in matches:
+        n = int(m)
+        if 1 <= n <= 99:
+            unique.add(n)
+    return len(unique)
+
+
+def _check_question_count_sanity(
+    markdown_qno_count: int,
+    llm_question_count: int,
+) -> tuple[bool, str]:
+    """Compare markdown QNO count against LLM question count.
+
+    Returns:
+        (is_ok, detail_message).
+        is_ok=True: ratio is within acceptable range.
+        is_ok=False: potential over-splitting or under-extraction.
+    """
+    if markdown_qno_count == 0:
+        # No QNOs found — markdown may be too degraded for this check.
+        # Return ok=True (don't block processing on unreadable documents).
+        return True, "no QNOs found in markdown (skipping check)"
+
+    ratio = llm_question_count / markdown_qno_count
+    if ratio <= _QNO_RATIO_WARN:
+        return True, (
+            f"ok ({llm_question_count}Q / {markdown_qno_count} markdown QNOs"
+            f" = {ratio:.1f}x)"
+        )
+    elif ratio <= _QNO_RATIO_CRITICAL:
+        return False, (
+            f"WARN: possible over-splitting ({llm_question_count}Q / "
+            f"{markdown_qno_count} markdown QNOs = {ratio:.1f}x"
+            f" > {_QNO_RATIO_WARN}x threshold)"
+        )
+    else:
+        return False, (
+            f"CRITICAL: severe over-splitting ({llm_question_count}Q / "
+            f"{markdown_qno_count} markdown QNOs = {ratio:.1f}x"
+            f" > {_QNO_RATIO_CRITICAL}x threshold)"
+        )
+
+
+# ── S#127: QNO Retry Prompt ───────────────────────────────────────────
+# When the sanity check flags over-splitting, re-submit the full markdown
+# with an explicit retry prefix that tells the LLM how many questions the
+# document actually contains and asks it to re-analyze carefully.
+_QNO_RETRY_PREFIX = """\
+## ⚠️ 重试指令 — 题目数不匹配
+
+上一次提取的题目数（{llm_count} 题）远多于文档中实际标注的题号数（约 {qno_count} 个题号）。
+这意味着你可能将综合大题的各个子小题（(1)(2)(3) 或 ①②③）错误地拆分成了独立题目。
+
+请仔细重新阅读完整 Markdown，注意区分：
+- **主题目题号**：1. 2. 3. ... 21. 22.（行首，1-2 位数字 + . / 、/ ．）
+- **子小题编号**：(1) (2) (3) 或 ① ② ③ —— 这些不是独立题目，而是同一道题的子问题
+
+综合题（如推断题、实验题、流程题）通常以一个大题号标注，下设若干子问题。请将它们作为一个题目输出：
+- stem 应包含大题号 + 完整的题干描述 + 所有子问题
+- 不要把每个子问题拆成独立题目
+
+请重新提取，确保题目数与文档中的主题目题号数大致匹配。
+
+---
+"""
+
+
+# ── Session #125: Chemistry Markdown Pre-cleaning ──────────────────────
+
+# Mapping of subjects that need OCR artifact pre-cleaning before LLM input.
+# Chemistry Markdown from PP-StructureV3 often has:
+#   1. Reaction arrows rendered as hyphens or garbled Unicode
+#   2. State symbols (g/l/s/aq) separated from formulas
+#   3. Subscript/superscript numbers merged into regular text
+#   4. Table-heavy layouts (periodic table, experimental data) lost in OCR
+_SUBJECTS_NEEDING_PRE_CLEAN = frozenset({"CHEM", "化学", "chemistry"})
+
+
+def _pre_clean_markdown(markdown: str, subject_code: str | None = None) -> str:
+    """Apply subject-specific OCR artifact cleanup before LLM annotation.
+
+    The PP-StructureV3 OCR pipeline produces Markdown that may contain
+    artifacts specific to certain subjects.  This function applies
+    targeted regex-based cleanup to improve LLM extraction quality.
+
+    Args:
+        markdown: Raw OCR Markdown from PP-StructureV3
+        subject_code: Subject identifier (e.g. "CHEM", "化学", "chemistry")
+
+    Returns:
+        Cleaned Markdown (or original if no cleaning needed).
+    """
+    if not markdown or not subject_code:
+        return markdown
+
+    # Only apply chemistry-specific cleaning for now
+    is_chem = (
+        subject_code in _SUBJECTS_NEEDING_PRE_CLEAN
+        or (isinstance(subject_code, str)
+            and subject_code.lower() in _SUBJECTS_NEEDING_PRE_CLEAN)
+    )
+    if not is_chem:
+        return markdown
+
+    text = markdown
+
+    # ── Rule 1: Normalize chemical reaction arrows ──────────────
+    # PP-StructureV3 may render → as -, —, ->, or lose it entirely.
+    # Restore common arrow variants to standard Unicode.
+    text = re.sub(r'(?<=[\s)])-(?=>\s*[A-Z])', '→', text)  # " - >" pattern
+    text = re.sub(r'(?<=[\s)])=>(?=\s*[A-Z])', '→', text)    # " => X" pattern
+    # Reversible reaction arrows ←→
+    text = re.sub(r'(?<=[\s)])<==?(?=>\s*[A-Z])', '⇌', text)
+    text = re.sub(r'(?<=[\s)])⇌(?=\s*[A-Z])', '⇌', text)     # preserve existing
+    # Gas ↑ / precipitate ↓ symbols
+    text = re.sub(r'(?<=[\s)])\^(?=\s*[↑])', '↑', text)
+    text = re.sub(r'(?<=[\s)])v(?=\s*[↓])', '↓', text)
+
+    # ── Rule 2: Fix state symbol spacing ───────────────────────
+    # "( g )", "( s )", "( 1 )", "( aq )" with stray spaces
+    for state in ("g", "s", "l", "aq"):
+        text = re.sub(
+            rf'\(\s*{state}\s*\)',
+            f'({state})',
+            text,
+            flags=re.IGNORECASE,
+        )
+
+    # ── Rule 3: Normalize common OCR garbage in chemistry ──────
+    # PP-StructureV3 may produce stray punctuation or broken Unicode
+    # in heavily formatted regions (tables, diagrams).
+    # Remove isolated single-character lines that aren't CJK/LaTeX.
+    lines = text.split('\n')
+    cleaned_lines = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Drop lines that are a single stray punctuation/symbol
+        # (but keep CJK chars, LaTeX $, and contentful lines)
+        if (len(stripped) <= 2
+                and stripped
+                and not re.search(r'[一-鿿a-zA-Z0-9$\\\[\]]', stripped)):
+            # Check context: if adjacent lines have content, this is
+            # likely OCR noise, not a real line
+            prev_ok = (
+                i > 0
+                and len(lines[i - 1].strip()) > 10
+                and re.search(r'[一-鿿a-zA-Z]', lines[i - 1])
+            )
+            next_ok = (
+                i < len(lines) - 1
+                and len(lines[i + 1].strip()) > 10
+                and re.search(r'[一-鿿a-zA-Z]', lines[i + 1])
+            )
+            if prev_ok and next_ok:
+                continue  # drop isolated noise line between content
+        cleaned_lines.append(line)
+
+    if len(cleaned_lines) < len(lines):
+        text = '\n'.join(cleaned_lines)
+
+    # ── Rule 4: Chemistry table detection hint ─────────────────
+    # Add a comment for the LLM when table-like structures are
+    # detected (periodic table fragments, experimental data grids).
+    # This is a lightweight annotation, not a transformation.
+    table_rows = 0
+    for line in text.split('\n'):
+        # Count lines with 4+ pipe-separated cells
+        if line.count('|') >= 3:
+            table_rows += 1
+    if table_rows >= 3:
+        # Inject a hint at the start for the LLM
+        text = (
+            "> 注：以下 Markdown 包含化学表格（元素周期表/实验数据/反应表格）。"
+            "请将表格内容作为题目 stem 的一部分逐字保留。\n\n" + text
+        )
+
+    if len(text) != len(markdown):
+        logger.debug(
+            "Chemistry pre-clean: %d → %d chars",
+            len(markdown), len(text),
+        )
+
+    return text
+
+
+# ── Session #120: LLM Answer Validation ──────────────────────────────
+
+# Boilerplate patterns that the LLM sometimes returns as answers instead
+# of the actual correct answer.  These are section headers, meta-comments,
+# or teacher-edition artifacts.
+_ANSWER_BOILERPLATE = frozenset({
+    "参考答案", "答案见解析", "略", "详见解析", "答案略",
+    "见解析", "参考解析", "答案详解", "解答见解析",
+})
+
+# Substrings that signal the LLM copied answer-section text instead of
+# a single question's answer.  Presence forces the answer to be cleared.
+_ANSWER_CONTAMINATION_MARKERS = (
+    "【答案】", "【详解】", "【分析】", "【解答】",
+    "【解析】", "【说明】",
+)
+
+# Maximum answer length per question type.  Longer answers are almost
+# certainly cross-question dumps or full solution paragraphs that belong
+# in explanation, not final_answer.
+_ANSWER_MAX_LENGTH: dict[str, int] = {
+    "choice": 10,        # single letter + optional spaces
+    "multi_choice": 20,  # e.g. "ABC" or "A, C"
+    "fill": 200,         # short expression / number / phrase
+    "calculation": 300,  # final result + optional unit
+    "proof": 200,        # brief conclusion
+    "essay": 300,        # short answer text
+}
+
+
+def _validate_llm_answer(answer: str, qtype: str) -> str:
+    """Validate and clean an LLM-returned answer before DB insertion.
+
+    Detects common LLM extraction errors:
+    1. Boilerplate text (section headers, meta-comments)
+    2. Cross-question answer dumps (multi-question answer text in one field)
+    3. Type-mismatched answers (long explanation for choice questions)
+    4. Contamination markers (residual 【答案】/【详解】 markers)
+
+    Returns cleaned answer string, or "" when the answer is rejected.
+    """
+    if not answer or not answer.strip():
+        return ""
+
+    cleaned = answer.strip()
+
+    # ── Rule 1: Exact boilerplate match ──────────────────────────
+    if cleaned in _ANSWER_BOILERPLATE:
+        logger.debug("Answer validation: rejected boilerplate %r", cleaned[:40])
+        return ""
+
+    # ── Rule 2: Contamination markers present ────────────────────
+    for marker in _ANSWER_CONTAMINATION_MARKERS:
+        if marker in cleaned:
+            logger.debug(
+                "Answer validation: rejected answer with marker %r: %r",
+                marker, cleaned[:80],
+            )
+            return ""
+
+    # ── Rule 3: Length limits by question type ───────────────────
+    max_len = _ANSWER_MAX_LENGTH.get(qtype, 300)
+    if len(cleaned) > max_len:
+        logger.warning(
+            "Answer validation: rejected %s answer (%d chars > %d max): %r",
+            qtype, len(cleaned), max_len, cleaned[:80],
+        )
+        return ""
+
+    # ── Rule 4: Choice/Multi-choice — must be letter(s) only ─────
+    if qtype in ("choice", "multi_choice"):
+        # Strip common wrappers: dots, spaces, parentheses
+        import re
+        stripped = re.sub(r'[.\s()（）]', '', cleaned)
+        # After stripping, should be only uppercase letters
+        if not re.match(r'^[A-D]+$', stripped):
+            # Try to extract just the letter portion
+            letter_match = re.match(r'^[A-D]', cleaned)
+            if letter_match:
+                cleaned = letter_match.group(0)
+                logger.debug(
+                    "Answer validation: extracted letter %r from %r",
+                    cleaned, answer[:40],
+                )
+            else:
+                logger.warning(
+                    "Answer validation: choice answer not a letter: %r",
+                    cleaned[:60],
+                )
+                return ""
+
+    return cleaned
+
+
+# ── Phase 2: Body/Answer Markdown Splitting (Session #115) ──────────────
+
+def _split_markdown_at_answer_section(markdown: str) -> tuple[str, str]:
+    """Split exam Markdown into body and answer sections.
+
+    Searches for common answer-section header patterns and returns
+    (body_md, answer_md).  When no split point is found, returns
+    (markdown, "").
+
+    Used by _step_llm_annotate() to feed the LLM with cleanly separated
+    body + answers, enabling accurate answer extraction for ALL question
+    types (including calculation/proof questions whose answers only
+    appear in the trailing answer key).
+    """
+    import re
+
+    # Ordered by specificity: longer/more-specific patterns first
+    patterns = [
+        r'\n#{1,3}\s*参考答案与解析\b',
+        r'\n#{1,3}\s*答案与解析\b',
+        r'\n#{1,3}\s*参考答案\b',
+        r'\n#{1,3}\s*试题答案\b',
+        r'\n#{1,3}\s*答案\b',
+        r'\n(?:={3,}|-{3,})\s*\n',  # horizontal-rule delimited section
+        r'\n参考答案与解析\b',
+        r'\n答案与解析\b',
+        r'\n参考答案\b',
+        r'\n试题答案\b',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, markdown)
+        if match:
+            split_point = match.start()
+            # Walk back to the preceding newline for a clean boundary
+            prev_nl = markdown.rfind('\n', 0, split_point)
+            if prev_nl >= 0:
+                split_point = prev_nl
+            body = markdown[:split_point].strip()
+            answer = markdown[split_point:].strip()
+            # Require at least 20 meaningful chars in the answer section
+            # (avoids false splits on incidental "答案" mentions)
+            if len(answer) >= 20:
+                logger.debug(
+                    "Markdown split: body=%d chars, answer=%d chars "
+                    "(pattern: %s)",
+                    len(body), len(answer), pattern.strip(),
+                )
+                return body, answer
+            else:
+                logger.debug(
+                    "Answer section too short (%d chars) — "
+                    "ignoring split at '%s'",
+                    len(answer), pattern.strip(),
+                )
+
+    logger.debug("No answer-section split point found in %d-char markdown",
+                 len(markdown))
+    return markdown, ""
+
+
+async def _rewrite_stem_image_urls(
+    questions: list[dict[str, Any]],
+    job_id: str,
+    task_id: str = "",
+) -> list[dict[str, Any]]:
+    """Rewrite PP-StructureV3 <img src="imgs/..."> paths to MinIO URLs.
+
+    Downloads the image ZIP from PP-StructureV3 API using the stored job_id,
+    uploads each image to MinIO, and replaces ``imgs/...`` paths in all
+    question stems with MinIO object URLs.
+
+    Called from _save_annotated_questions before DB insertion so images
+    are available to the frontend immediately.
+
+    Returns the question list with rewritten stems (in-place mutation +
+    return for convenience).
+    """
+    import httpx
+    import re as _re_img
+    import tempfile
+    import zipfile
+    import shutil
+    import os as _os
+
+    from app.core.config import settings as _settings
+    from app.db.minio import upload_file as _minio_upload
+
+    _JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+
+    # Collect unique imgs/... paths across all stems
+    img_paths: set[str] = set()
+    for q in questions:
+        stem = str(q.get("stem", ""))
+        for m in _re_img.finditer(r'<img\s+src="(imgs/[^"]+)"', stem):
+            img_paths.add(m.group(1))
+
+    if not img_paths:
+        return questions
+
+    logger.info(
+        "Image URL rewrite: %d unique imgs/ paths in %d questions (job=%s)",
+        len(img_paths), len(questions), job_id,
+    )
+
+    # ── Get ZIP download URL from job status ────────────────────────
+    zip_url = ""
+    try:
+        auth_headers = {
+            "Authorization": f"token {_settings.PADDLEOCR_VL_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{_JOB_URL}/{job_id}", headers=auth_headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            result_info = data.get("data", {}).get("resultUrl", {})
+            zip_url = (
+                result_info.get("markdownZipUrl")
+                or result_info.get("zipUrl")
+                or ""
+            )
+    except Exception as exc:
+        logger.warning(
+            "Failed to get ZIP URL for job %s: %s — keeping imgs/ paths",
+            job_id, exc,
+        )
+        return questions
+
+    if not zip_url:
+        logger.warning(
+            "No image ZIP URL for job %s — keeping imgs/ paths", job_id,
+        )
+        return questions
+
+    # ── Download ZIP, upload images, build URL map ──────────────────
+    tmp_dir = tempfile.mkdtemp(prefix="ppsv3_annot_imgs_")
+    url_map: dict[str, str] = {}
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(zip_url)
+            resp.raise_for_status()
+            zip_path = _os.path.join(tmp_dir, "images.zip")
+            with open(zip_path, "wb") as f:
+                f.write(resp.content)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmp_dir)
+
+        for root, _dirs, files in _os.walk(tmp_dir):
+            for fn in files:
+                if not fn.lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"),
+                ):
+                    continue
+                local_path = _os.path.join(root, fn)
+                rel = _os.path.relpath(local_path, tmp_dir).replace("\\", "/")
+                obj_name = f"ppsv3-images/{job_id}/{rel}"
+                with open(local_path, "rb") as imgf:
+                    _minio_upload(
+                        object_name=obj_name,
+                        data=imgf,
+                        length=_os.path.getsize(local_path),
+                        content_type=f"image/{fn.rsplit('.', 1)[-1]}",
+                        bucket="question-images",
+                    )
+                minio_url = f"/api/files/question-images/{obj_name}"
+                # Map both relative forms: "imgs/filename" and raw filename
+                url_map[f"imgs/{fn}"] = minio_url
+                url_map[rel] = minio_url
+                logger.debug("Uploaded annot image: %s → %s", rel, minio_url)
+
+        uploaded = len(url_map) // 2  # each image has 2 key forms
+        logger.info(
+            "Image URL rewrite: uploaded %d images for job %s → %d stems",
+            uploaded, job_id, len(questions),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Image download/upload failed for job %s: %s — "
+            "keeping imgs/ paths", job_id, exc,
+        )
+        return questions
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if not url_map:
+        return questions
+
+    # ── Rewrite stems in-place ──────────────────────────────────────
+    rewritten = 0
+    for q in questions:
+        stem = str(q.get("stem", ""))
+        if "imgs/" not in stem:
+            continue
+        for orig_path, minio_url in url_map.items():
+            stem = stem.replace(
+                f'src="{orig_path}"', f'src="{minio_url}"',
+            )
+        if stem != q.get("stem", ""):
+            q["stem"] = stem
+            rewritten += 1
+
+    logger.info(
+        "Image URL rewrite: %d/%d stems rewritten for job %s",
+        rewritten, len(questions), job_id,
+    )
+
+    return questions
+
 
 # Session #105: Document-level semaphore for PP-StructureV3 API.
 # The external SaaS API cannot handle concurrent document submissions
@@ -121,6 +919,22 @@ _LLM_ANNOTATION_PROMPT = """\
 # lets downstream markdown processing (structuring, annotation, save)
 # still run in parallel across doc workers.
 _PP_API_SEM = asyncio.Semaphore(1)
+
+# Session #125: Limit concurrent MIMO annotation calls.
+# MIMO API has rate limits; a burst of N doc workers all calling
+# the reasoning endpoint would cause 429s.  Semaphore(2) allows modest
+# parallelism while staying under the rate limit.
+_LLM_ANNOTATION_SEM = asyncio.Semaphore(2)  # Limit concurrent MIMO annotation calls
+
+# ── S#126: Per-Subject LLM Annotation Routing ─────────────────────────
+# Chemistry annotation → DeepSeek V4 Pro (via mode="reasoning").
+# Pro preserves comprehensive question structure (keeps (1)(2)(3)
+# sub-items as one question) while Flash atomically splits them.
+# MIMO API was unreachable in S#126 experiment (4/4 failures);
+# routing directly to DeepSeek avoids the MIMO→fallback hop entirely.
+_CHEM_LLM_ANNOTATION_MODE = "reasoning"       # routes directly to DeepSeek
+_CHEM_LLM_ANNOTATION_MODEL = "deepseek-v4-pro"
+_CHEM_LLM_SUBJECTS: frozenset[str] = frozenset({"chemistry", "CHEM"})
 
 # Valid types from LLM annotation
 _LLM_VALID_TYPES = frozenset({
@@ -253,6 +1067,74 @@ class _DocumentProcessing:
     TASK_STATE_COMPLETED = "completed"
     TASK_STATE_FAILED = "failed"
 
+    # ── Session #120: DB Persistence Helpers ─────────────────────────────
+
+    @staticmethod
+    async def _create_document_pages(
+        doc_id: int, page_count: int, session,
+    ) -> None:
+        """Create document_pages rows after PDF conversion.
+
+        One row per page with ocr_status='pending'.  Updated to 'completed'
+        after successful extraction.
+        """
+        from app.domains.document.models import DocumentPage
+
+        for pn in range(1, page_count + 1):
+            session.add(DocumentPage(
+                document_id=doc_id,
+                page_number=pn,
+                ocr_status="pending",
+            ))
+        await session.flush()
+        logger.debug(
+            "Created %d document_pages rows for doc %d", page_count, doc_id,
+        )
+
+    @staticmethod
+    async def _save_processing_log(
+        doc_id: int, stage: str, message: str, session,
+    ) -> None:
+        """Write a processing log entry to document_processing_logs.
+
+        Called at each major pipeline stage for operational visibility and
+        debugging.  Non-critical — failures are logged but not raised.
+        """
+        from app.domains.document.models import DocumentProcessingLog
+
+        session.add(DocumentProcessingLog(
+            document_id=doc_id,
+            stage=stage,
+            message=message,
+        ))
+        await session.flush()
+
+    @staticmethod
+    async def _log_to_db(doc_id: int | None, stage: str, message: str) -> None:
+        """Non-critical wrapper: write a processing log to the DB.
+
+        Creates its own session; failures are swallowed (processing must not
+        fail because logging is unavailable).
+        """
+        if doc_id is None:
+            return
+        try:
+            from app.db.session import async_session_factory
+            from app.domains.document.models import DocumentProcessingLog
+
+            async with async_session_factory() as s:
+                s.add(DocumentProcessingLog(
+                    document_id=doc_id,
+                    stage=stage,
+                    message=message,
+                ))
+                await s.commit()
+        except Exception as e:
+            logger.warning(
+                "Processing log write failed (non-critical): %s", e,
+                exc_info=True,
+            )
+
     # ── Document Task Processing ──────────────────────────────────────────
 
     async def _process_document_task(self, task_data: dict[str, Any]) -> None:
@@ -297,7 +1179,9 @@ class _DocumentProcessing:
 
         await update_progress(0, "start", f"开始处理: {file_path}")
 
-        # Update document status to "processing" in DB immediately
+        # Update document status to "processing" in DB immediately.
+        # Also resolve document_id early for Session #120 processing logs.
+        doc_id: int | None = None
         try:
             from app.db.session import async_session_factory
             from sqlalchemy import text
@@ -307,6 +1191,14 @@ class _DocumentProcessing:
                     text("UPDATE documents SET processing_status = :status WHERE object_key = :key"),
                     {"status": "processing", "key": file_path},
                 )
+                # Resolve document_id for processing logs
+                r = await proc_session.execute(
+                    text("SELECT id FROM documents WHERE object_key = :key"),
+                    {"key": file_path},
+                )
+                _row = r.fetchone()
+                if _row:
+                    doc_id = _row[0]
                 await proc_session.commit()
         except Exception as e:
             logger.warning(f"Failed to update document status to processing: {e}")
@@ -390,6 +1282,34 @@ class _DocumentProcessing:
                 await update_progress(
                     20, "convert", f"PDF 转换完成: {total_pages} 页"
                 )
+                # Session #120: Create document_pages rows for tracking
+                # Session #123: Split try/except — _log_to_db and
+                # _create_document_pages must not share an exception handler
+                # (each can fail independently; one failure shouldn't block the other).
+                if doc_id:
+                    # Step 1: write convert log (non-critical; has own internal try/except)
+                    try:
+                        await _DocumentProcessing._log_to_db(
+                            doc_id, "convert",
+                            f"PDF → {total_pages} page images",
+                        )
+                    except Exception as _le:
+                        logger.warning(
+                            "convert log write failed (non-critical): %s", _le,
+                            exc_info=True,
+                        )
+                    # Step 2: create document_pages rows (non-critical; independent of Step 1)
+                    try:
+                        async with async_session_factory() as _ps:
+                            await _DocumentProcessing._create_document_pages(
+                                doc_id, total_pages, _ps,
+                            )
+                            await _ps.commit()
+                    except Exception as _pe:
+                        logger.warning(
+                            "doc_pages creation failed (non-critical): %s", _pe,
+                            exc_info=True,
+                        )
             else:
                 # Image file - save directly
                 ext = (
@@ -415,65 +1335,158 @@ class _DocumentProcessing:
                 await update_progress(
                     22, "extract", f"并行提取中 ({len(pages_to_process)} 页)..."
                 )
-                merged_blocks, paddleocr_markdown = await self._step_parallel_extract(
+                (
+                    merged_blocks, paddleocr_markdown, paddleocr_job_id,
+                ) = await self._step_parallel_extract(
                     task_id, data, pages_to_process, subject=subject_code,
                 )
                 steps_completed.append("extract")
 
-                # Session #94: LLM annotation for metadata + answers
+                # ── Session #125: Unified LLM full extraction (single MIMO call) ──
+                # Replaces the old two-call approach:
+                #   OLD: Path 1 (metadata merge, no stem) + Path 2 (full extraction)
+                #   NEW: One call → Try 1: _save_annotated_questions() direct DB insert
+                #                 Try 2: merge LLM stem + annotations into regex blocks
+                #                 Fallback: regex blocks as-is
+                llm_full_extraction_ok = False
                 logger.info("LLM annotate check: markdown=%d blocks=%d",
                     len(paddleocr_markdown), len(merged_blocks))
-                if paddleocr_markdown and merged_blocks:
-                    await update_progress(40, "llm_annotate", "LLM 标注中...")
-                    annotated = await self._step_llm_annotate(
+                if (settings.LLM_ANNOTATION_ENABLED
+                        and paddleocr_markdown and merged_blocks):
+                    await update_progress(40, "llm_annotate", "LLM 全量提取中...")
+                    annotation = await self._step_llm_annotate(
                         task_id, paddleocr_markdown,
+                        subject_code=subject_code,
                     )
-                    if annotated:
+                    if annotation:
                         await self._save_document_metadata(
-                            file_path, annotated.get("metadata", {}),
+                            file_path, annotation.get("metadata", {}),
                         )
-                        # Merge LLM answers into question blocks
-                        llm_qs = {
-                            q.get("qno"): q
-                            for q in annotated.get("questions", [])
-                            if isinstance(q, dict)
-                        }
-                        merged_count = 0
-                        type_count = 0
-                        diff_count = 0
-                        kp_count = 0
-                        for blk in merged_blocks:
-                            qno = blk.get("question_no")
-                            llm_q = llm_qs.get(int(qno)) if qno else None
-                            if llm_q:
-                                ans = str(llm_q.get("answer", "")).strip()
-                                if ans and not blk.get("answer"):
-                                    blk["answer"] = ans
-                                    blk["answer_source"] = "llm_annotation"
-                                    merged_count += 1
-                                # Session #104: also merge type, difficulty, KP
-                                # from the unified LLM annotation call
-                                llm_type = str(llm_q.get("type", "")).strip()
-                                if llm_type and blk.get("question_type") in (
-                                    None, "", "calculation",
-                                ):
-                                    blk["question_type"] = llm_type
-                                    type_count += 1
-                                llm_diff = llm_q.get("difficulty")
-                                if llm_diff and not blk.get("difficulty"):
-                                    blk["difficulty"] = llm_diff
-                                    diff_count += 1
-                                llm_kps = llm_q.get("knowledge_points", [])
-                                if llm_kps and not blk.get("knowledge_points"):
-                                    blk["knowledge_points"] = llm_kps
-                                    kp_count += 1
-                        await self._log_step(
-                            task_id, "llm_annotate",
-                            f"LLM annotation: {len(annotated.get('questions',[]))} "
-                            f"questions, {merged_count} answers, {type_count} types, "
-                            f"{diff_count} difficulties, {kp_count} KP sets merged",
+                        llm_questions = annotation.get("questions", [])
+                        if llm_questions:
+                            # ── Try 1: Full extraction via _save_annotated_questions ──
+                            saved_questions = await self._save_annotated_questions(
+                                task_id=task_id,
+                                annotation=annotation,
+                                file_path=file_path,
+                                subject_code=subject_code,
+                                pdf_data=data if is_pdf else None,
+                                pages_to_process=pages_to_process,
+                                paddleocr_job_id=paddleocr_job_id,
+                            )
+                            if saved_questions:
+                                steps_completed.append("llm_annotate")
+                                await update_progress(
+                                    60, "store",
+                                    f"LLM 全量提取入库: {len(saved_questions)} 道题目",
+                                )
+                                steps_completed.append("store")
+                                merged_blocks = []  # Skip regex save
+                                llm_full_extraction_ok = True
+                                await _DocumentProcessing._log_to_db(
+                                    doc_id, "llm_store",
+                                    f"LLM annotation: {len(saved_questions)} questions saved",
+                                )
+                            else:
+                                # ── Try 2: Quality gate failed — merge LLM
+                                # stem + annotations into regex blocks ──
+                                logger.warning(
+                                    "LLM full extraction quality gate failed — "
+                                    "merging LLM stem + annotations into "
+                                    "regex blocks",
+                                )
+                                llm_qs = {
+                                    q.get("qno"): q
+                                    for q in llm_questions
+                                    if isinstance(q, dict)
+                                }
+                                stem_count = 0
+                                merged_count = 0
+                                type_count = 0
+                                diff_count = 0
+                                kp_count = 0
+                                for blk in merged_blocks:
+                                    qno = blk.get("question_no")
+                                    llm_q = llm_qs.get(int(qno)) if qno else None
+                                    if not llm_q:
+                                        continue
+                                    # Session #114: Replace regex stem with
+                                    # LLM stem when quality is sufficient
+                                    llm_stem = str(llm_q.get("stem", "")).strip()
+                                    if llm_stem:
+                                        cleaned = _clean_stem_for_db(llm_stem)
+                                        # Session #125: Extract options
+                                        # before scoring so _score_stem_quality
+                                        # can reduce short-stem penalties
+                                        # for choice questions.
+                                        opts = llm_q.get("options") or []
+                                        if isinstance(opts, list):
+                                            opts = [
+                                                str(o).strip() for o in opts
+                                                if o and str(o).strip()
+                                            ]
+                                        else:
+                                            opts = []
+                                        quality = _score_stem_quality(
+                                            cleaned, opts,
+                                        )
+                                        if quality >= 0.5 and len(cleaned) > 20:
+                                            if opts and not any(
+                                                o.strip() in cleaned
+                                                for o in opts if o.strip()
+                                            ):
+                                                cleaned = (
+                                                    cleaned + "\n"
+                                                    + "\n".join(opts)
+                                                )
+                                            blk["question_text"] = cleaned
+                                            stem_count += 1
+                                    # Merge answer (even if stem not replaced)
+                                    ans = str(llm_q.get("answer", "")).strip()
+                                    if ans and not blk.get("answer"):
+                                        blk["answer"] = ans
+                                        blk["answer_source"] = "llm_annotation"
+                                        merged_count += 1
+                                    # Merge type, difficulty, KP
+                                    llm_type = str(llm_q.get("type", "")).strip()
+                                    if llm_type and blk.get("question_type") in (
+                                        None, "", "calculation",
+                                    ):
+                                        blk["question_type"] = llm_type
+                                        type_count += 1
+                                    llm_diff = llm_q.get("difficulty")
+                                    if llm_diff and not blk.get("difficulty"):
+                                        blk["difficulty"] = llm_diff
+                                        diff_count += 1
+                                    llm_kps = llm_q.get("knowledge_points", [])
+                                    if llm_kps and not blk.get("knowledge_points"):
+                                        blk["knowledge_points"] = llm_kps
+                                        kp_count += 1
+                                await self._log_step(
+                                    task_id, "llm_annotate",
+                                    f"LLM merge: {len(llm_questions)} questions, "
+                                    f"{stem_count} stems, {merged_count} answers, "
+                                    f"{type_count} types, {diff_count} diffs, "
+                                    f"{kp_count} KP sets",
+                                )
+                                await update_progress(
+                                    42, "llm_annotate",
+                                    "LLM 标注已合并到正则切分结果",
+                                )
+                        else:
+                            await self._log_step(
+                                task_id, "llm_annotate",
+                                "LLM annotation: metadata only, no questions",
+                            )
+                    else:
+                        logger.warning(
+                            "LLM annotation returned None — "
+                            "using regex pipeline",
                         )
-                        update_progress(42, "llm_annotate", "LLM 标注完成")
+                        await update_progress(
+                            38, "llm_annotate",
+                            "LLM 标注为空，使用正则管线",
+                        )
 
                 if is_pdf:
                     pdf_doc.close()
@@ -482,10 +1495,16 @@ class _DocumentProcessing:
                         38, "extract",
                         f"并行提取完成: {len(merged_blocks)} 道题目",
                     )
-                else:
+                    await _DocumentProcessing._log_to_db(
+                        doc_id, "extract",
+                        f"Extracted {len(merged_blocks)} questions",
+                    )
+                elif not llm_full_extraction_ok:
                     await update_progress(
                         38, "extract", "并行提取完成，未识别到题目"
                     )
+                    # llm_full_extraction_ok=True: progress already at 60%,
+                    # don't overwrite with "未识别到题目"
             else:
                 # ── Route B: PP-Structure + VL fallback (concurrent) ──
                 from app.domains.document.extraction_orchestrator import (
@@ -578,53 +1597,6 @@ class _DocumentProcessing:
                         38, "extract", "提取完成，未识别到题目"
                     )
                 steps_completed.append("extract")
-
-            # ── Session #91: LLM Annotation branch ──
-            # When enabled, bypass the regex-based question structuring pipeline
-            # and use a single LLM call to annotate the full Markdown → structured
-            # JSON (metadata + questions).  This replaces the per-question regex
-            # split + answer matching with one LLM call.
-            paddleocr_markdown = locals().get("paddleocr_markdown", "")
-
-            if settings.LLM_ANNOTATION_ENABLED and paddleocr_markdown:
-                await update_progress(
-                    38, "llm_annotate",
-                    f"LLM 标注中（{len(paddleocr_markdown)} 字符）...",
-                )
-                annotation = await self._step_llm_annotate(
-                    task_id, paddleocr_markdown,
-                )
-                if annotation and annotation.get("questions"):
-                    await update_progress(
-                        45, "llm_annotate",
-                        f"LLM 标注完成: {len(annotation['questions'])} 道题目",
-                    )
-                    # Direct DB insert from LLM annotation
-                    saved_questions = await self._save_annotated_questions(
-                        task_id=task_id,
-                        annotation=annotation,
-                        file_path=file_path,
-                        subject_code=subject_code,
-                        pdf_data=data if is_pdf else None,
-                        pages_to_process=pages_to_process,
-                    )
-                    steps_completed.append("llm_annotate")
-                    await update_progress(
-                        60, "store",
-                        f"LLM 标注入库: {len(saved_questions)} 道题目",
-                    )
-                    steps_completed.append("store")
-                    # Skip regex-based save path
-                    merged_blocks = []
-                else:
-                    logger.warning(
-                        "LLM annotation returned empty — "
-                        "falling back to regex pipeline"
-                    )
-                    await update_progress(
-                        38, "llm_annotate",
-                        "LLM 标注为空，回退到正则管线",
-                    )
 
             # Step 3: Atomic save — question + images + solution (40% → 60%)
             # 仅在 LLM 标注未执行时重置（否则会覆盖 LLM 标注入库结果，
@@ -787,6 +1759,11 @@ class _DocumentProcessing:
             await update_progress(
                 100, "done", f"处理完成: 共 {len(saved_questions)} 道题目"
             )
+            await _DocumentProcessing._log_to_db(
+                doc_id, "done",
+                f"Completed: {len(saved_questions)} questions, "
+                f"steps: {', '.join(steps_completed)}",
+            )
             await self._set_status(task_id, {
                 "state": TASK_STATE_COMPLETED,
                 "progress": 100,
@@ -866,7 +1843,7 @@ class _DocumentProcessing:
         # submissions (returns empty text_blocks under load).  Downstream
         # markdown processing still runs in parallel.
         async with _PP_API_SEM:
-            result = await pipeline.extract(pdf_data, "pdf")
+            result = await pipeline.extract(pdf_data, "pdf", subject_code=subject)
 
         if not result.success:
             logger.warning(
@@ -907,7 +1884,7 @@ class _DocumentProcessing:
         if use_hybrid:
             # ── Session #104: Hybrid now = regex split only ──
             # type/difficulty/KP are filled by the unified _step_llm_annotate
-            # (one DeepSeek call) instead of N per-question MIMO calls.
+            # (one MIMO call) instead of N per-question MIMO calls.
             # This eliminates ~14min of serial LLM annotation per document.
             structurer = QuestionStructurer()
             structured = structurer.structure(
@@ -1172,22 +2149,30 @@ class _DocumentProcessing:
             except Exception:
                 pass
 
-        return question_blocks, getattr(result, "paddleocr_markdown", "")
+        return (
+            question_blocks,
+            getattr(result, "paddleocr_markdown", ""),
+            getattr(result, "paddleocr_job_id", ""),
+        )
 
     # ── Session #91: LLM Annotation Methods ──────────────────────────────
 
     async def _step_llm_annotate(
         self, task_id: str, full_markdown: str,
+        subject_code: str | None = None,
     ) -> dict[str, Any] | None:
         """Annotate full exam Markdown via LLM → metadata + questions JSON.
 
-        Uses MIMO fast mode (low cost, fast response) to extract:
+        Uses MIMO V2.5 (mode="fast", 1M context) as primary, with
+        DeepSeek → Ollama as Gateway fallback chain.  Extracts:
         - metadata: {year, district, school, subject, exam_type, grade}
         - questions: [{qno, type, section, answer, explanation, score}, ...]
 
         Args:
             task_id: Redis task ID for logging
             full_markdown: Complete PP-StructureV3 Markdown output
+            subject_code: Subject identifier for pre-cleaning and
+                          subject-specific prompt instructions
 
         Returns:
             Parsed annotation dict or None on failure.
@@ -1200,14 +2185,9 @@ class _DocumentProcessing:
             )
             return None
 
-        # Truncate markdown to safe size for LLM context (~16K chars)
+        # S#128: Full prompt — no truncation below 48K chars.
+        # Session #125: MIMO V2.5 1M context — no truncation needed.
         markdown_text = full_markdown.strip()
-        if len(markdown_text) > 16000:
-            markdown_text = markdown_text[:16000]
-            logger.warning(
-                "LLM annotation: markdown truncated from %d to 16000 chars",
-                len(full_markdown),
-            )
 
         if len(markdown_text) < 100:
             logger.warning(
@@ -1216,22 +2196,102 @@ class _DocumentProcessing:
             )
             return None
 
-        # 使用 str.replace() 而非 .format()，避免 LaTeX 花括号
-        # （如 \frac{a}{b}、\sqrt{x+1}）被误解析为格式化字段
-        prompt = _LLM_ANNOTATION_PROMPT.replace("{markdown}", markdown_text)
+        # ── Session #125: Subject-specific Markdown pre-cleaning ──
+        if subject_code:
+            markdown_text = _pre_clean_markdown(markdown_text, subject_code)
+
+        # ── Session #115 Phase 2: Body/answer splitting ──────────────
+        body_md, answer_md = _split_markdown_at_answer_section(markdown_text)
+
+        # ── Session #125: Subject-specific prompt instructions ──
+        # Prepend domain-specific extraction guidance for subjects
+        # with unique notation (chemistry formulas, classical Chinese, etc.)
+        subject_prompt_add = _get_subject_prompt_addition(subject_code)
+
+        # ── Session #125: MIMO V2.5 as primary annotation model ──
+        # MIMO has 1M context window → no truncation needed for any
+        # document (including 20+ page Chinese exams).  DeepSeek serves
+        # as fallback via the Gateway's provider chain (MIMO → DeepSeek
+        # → Ollama).  The only cap is the answer section (8K chars —
+        # answer keys are inherently short).
+
+        if answer_md and len(answer_md) >= 20:
+            # ── V3 prompt with separated body + answers ──────────
+            # Session #125: No body truncation — MIMO 1M context
+            # handles full documents.  Log when body exceeds the old
+            # 40K threshold for observability.
+            if len(body_md) > 40000:
+                logger.info(
+                    "LLM V3: full body (%d chars) via MIMO — no truncation",
+                    len(body_md),
+                )
+            max_answer = 8000
+            if len(answer_md) > max_answer:
+                answer_md = answer_md[:max_answer]
+            prompt = _LLM_ANNOTATION_PROMPT_V3.replace(
+                "{body}", body_md,
+            ).replace("{answers}", answer_md)
+            if subject_prompt_add:
+                prompt = subject_prompt_add + "\n" + prompt
+            log_detail = (
+                f"LLM V3 ({len(body_md)} body + "
+                f"{len(answer_md)} answer chars)"
+                + (f" +{subject_code}" if subject_prompt_add else "")
+            )
+        else:
+            # ── V3 fallback (no answer-section split) ────────────
+            # S#128: V1 removed; fallback now uses V3 with full
+            # markdown as body + placeholder for answers section.
+            # Session #125: No truncation — MIMO 1M context.
+            if len(markdown_text) > 48000:
+                logger.info(
+                    "LLM V3 fallback: full markdown (%d chars) via MIMO — no truncation",
+                    len(markdown_text),
+                )
+            prompt = _LLM_ANNOTATION_PROMPT_V3.replace(
+                "{body}", markdown_text,
+            ).replace(
+                "{answers}",
+                "（本试卷无独立参考答案区，所有答案已在正文中标注）",
+            )
+            if subject_prompt_add:
+                prompt = subject_prompt_add + "\n" + prompt
+            log_detail = (
+                f"LLM V3 fallback ({len(markdown_text)} chars, "
+                f"no answer split)"
+                + (f" +{subject_code}" if subject_prompt_add else "")
+            )
 
         await self._log_step(
             task_id, "llm_annotate",
-            f"Calling LLM annotation ({len(markdown_text)} chars)",
+            f"Calling LLM annotation: {log_detail}",
         )
 
         try:
             from app.gateway.router import llm_gateway
 
-            result = await llm_gateway.generate(
-                mode="reasoning", prompt=prompt,
-                response_format={"type": "json_object"},  # API guarantees valid JSON
-            )
+            # Session #125: MIMO V2.5 as primary (mode="fast").
+            # 1M context → no truncation.  Semaphore limits concurrent
+            # annotation calls to 2 to avoid overwhelming the API.
+            # Gateway fallback chain: MIMO → DeepSeek → Ollama.
+            #
+            # S#126: Per-subject LLM routing.
+            # Chemistry → DeepSeek V4 Pro (mode="reasoning", better
+            # comprehensive question merging).  Other subjects keep
+            # mode="fast" → MIMO → DeepSeek V4 Flash fallback.
+            if subject_code and subject_code in _CHEM_LLM_SUBJECTS:
+                annotate_mode = _CHEM_LLM_ANNOTATION_MODE
+                annotate_model = _CHEM_LLM_ANNOTATION_MODEL
+            else:
+                annotate_mode = "fast"
+                annotate_model = None
+            async with _LLM_ANNOTATION_SEM:
+                result = await llm_gateway.generate(
+                    mode=annotate_mode, prompt=prompt,
+                    response_format={"type": "json_object"},
+                    max_tokens=49152,  # Session #125: 32K→49K — MIMO handles larger output
+                    model=annotate_model,
+                )
             response_text = result.get("response", "")
             if not response_text:
                 logger.warning("LLM annotation: empty response")
@@ -1267,13 +2327,24 @@ class _DocumentProcessing:
                     section = q.get("section", "")
                     qtype = self._infer_type_from_section(section)
 
-                answer = str(q.get("answer", "")).strip()
+                answer_raw = str(q.get("answer", "")).strip()
                 explanation = str(q.get("explanation", "")).strip()
+                # Session #120: Validate LLM answer before normalizing.
+                # Catches boilerplate, cross-question dumps, and type
+                # mismatches (e.g. long explanation in choice answer).
+                answer = _validate_llm_answer(answer_raw, qtype)
                 score = q.get("score")
                 try:
                     score = int(score) if score is not None else None
                 except (ValueError, TypeError):
                     score = None
+
+                # Parse stem and options from LLM prompt output
+                stem = str(q.get("stem", "")).strip()
+                options = q.get("options", [])
+                if not isinstance(options, list):
+                    options = []
+                options = [str(o).strip() for o in options if o and str(o).strip()]
 
                 # Session #104: deserialize difficulty and knowledge_points
                 # from LLM annotation (merged into question blocks in merge loop)
@@ -1297,6 +2368,8 @@ class _DocumentProcessing:
                     "answer": answer,
                     "explanation": explanation,
                     "score": score,
+                    "stem": stem,
+                    "options": options,
                     "difficulty": difficulty,
                     "knowledge_points": knowledge_points,
                 })
@@ -1335,9 +2408,130 @@ class _DocumentProcessing:
                             if section_pos >= 0 else 0.0
                         )
 
+            # ── S#127: Question count sanity check + retry ──────────
+            # Compare LLM output count against regex-extracted QNOs
+            # from the original markdown.  If over-splitting detected,
+            # re-submit the full markdown with explicit retry instructions
+            # telling the LLM to respect the document's natural QNO count.
+            markdown_qnos = _extract_markdown_qno_count(full_markdown)
+            count_ok, count_msg = _check_question_count_sanity(
+                markdown_qnos, len(normalized),
+            )
+            if not count_ok:
+                logger.warning(
+                    "LLM annotation QNO sanity: %s — retrying with full markdown",
+                    count_msg,
+                )
+                try:
+                    # Build retry prompt: retry prefix + V3 full-markdown
+                    # S#128: V1 removed; retry now uses V3 with full
+                    # markdown as body + placeholder for answers section
+                    # (no body/answer split — let the LLM re-examine everything).
+                    retry_prefix = _QNO_RETRY_PREFIX.format(
+                        llm_count=len(normalized), qno_count=markdown_qnos,
+                    )
+                    retry_prompt = retry_prefix + _LLM_ANNOTATION_PROMPT_V3.replace(
+                        "{body}", full_markdown,
+                    ).replace(
+                        "{answers}",
+                        "（本试卷无独立参考答案区，所有答案已在正文中标注）",
+                    )
+                    if subject_prompt_add:
+                        retry_prompt = subject_prompt_add + "\n" + retry_prompt
+
+                    async with _LLM_ANNOTATION_SEM:
+                        retry_result = await llm_gateway.generate(
+                            mode=annotate_mode, prompt=retry_prompt,
+                            response_format={"type": "json_object"},
+                            max_tokens=49152,
+                            model=annotate_model,
+                        )
+                    retry_text = retry_result.get("response", "")
+                    if retry_text:
+                        retry_parsed = self._parse_llm_annotation_json(retry_text)
+                        if retry_parsed and isinstance(retry_parsed, dict):
+                            retry_qs = retry_parsed.get("questions", [])
+                            retry_md = retry_parsed.get("metadata", {})
+                            if isinstance(retry_qs, list) and retry_qs:
+                                retry_q_count = len(retry_qs)
+                                retry_ok, retry_msg = _check_question_count_sanity(
+                                    markdown_qnos, retry_q_count,
+                                )
+                                # Use retry if it has fewer questions (closer to
+                                # markdown QNO count) — even if still above threshold,
+                                # fewer is an improvement over the original.
+                                if retry_q_count < len(normalized):
+                                    logger.info(
+                                        "QNO retry improved: %dQ → %dQ (%s)",
+                                        len(normalized), retry_q_count, retry_msg,
+                                    )
+                                    # Re-normalize retry questions
+                                    normalized = []
+                                    for q in retry_qs:
+                                        qno = q.get("qno")
+                                        try:
+                                            qno = int(qno) if qno is not None else None
+                                        except (ValueError, TypeError):
+                                            qno = None
+                                        qtype = q.get("type", "calculation")
+                                        if qtype not in _LLM_VALID_TYPES:
+                                            qtype = self._infer_type_from_section(
+                                                q.get("section", ""),
+                                            )
+                                        answer_raw = str(q.get("answer", "")).strip()
+                                        answer = _validate_llm_answer(answer_raw, qtype)
+                                        score = q.get("score")
+                                        try:
+                                            score = int(score) if score is not None else None
+                                        except (ValueError, TypeError):
+                                            score = None
+                                        stem = str(q.get("stem", "")).strip()
+                                        options = q.get("options", [])
+                                        if not isinstance(options, list):
+                                            options = []
+                                        options = [str(o).strip() for o in options if o and str(o).strip()]
+                                        difficulty = q.get("difficulty")
+                                        if difficulty and difficulty not in (
+                                            "easy", "basic", "medium", "hard", "very_hard",
+                                        ):
+                                            difficulty = None
+                                        knowledge_points = q.get("knowledge_points", [])
+                                        if not isinstance(knowledge_points, list):
+                                            knowledge_points = []
+                                        kp_strs = []
+                                        for kp in knowledge_points:
+                                            kp_strs.append(str(kp).strip())
+                                        normalized.append({
+                                            "qno": qno,
+                                            "type": qtype,
+                                            "section": q.get("section", ""),
+                                            "stem": stem,
+                                            "options": options,
+                                            "answer": answer,
+                                            "explanation": str(q.get("explanation", "")).strip(),
+                                            "score": score,
+                                            "difficulty": difficulty,
+                                            "knowledge_points": kp_strs,
+                                        })
+                                    metadata = retry_md
+                                    count_ok = True
+                                    count_msg = f"retry {retry_msg}"
+                                else:
+                                    logger.info(
+                                        "QNO retry no improvement: %dQ → %dQ, "
+                                        "keeping original",
+                                        len(normalized), retry_q_count,
+                                    )
+                except Exception as retry_exc:
+                    logger.warning(
+                        "QNO retry failed: %s — keeping original result",
+                        str(retry_exc)[:200],
+                    )
+
             await self._log_step(
                 task_id, "llm_annotate",
-                f"LLM annotation: {len(normalized)} questions, "
+                f"LLM annotation: {len(normalized)} questions "
+                f"(markdown ~{markdown_qnos} QNOs, {count_msg}), "
                 f"metadata={list(metadata.keys())}",
             )
 
@@ -1472,6 +2666,7 @@ class _DocumentProcessing:
         subject_code: str | None = None,
         pdf_data: bytes | None = None,
         pages_to_process: list[str] | None = None,
+        paddleocr_job_id: str = "",
     ) -> list[dict]:
         """Save LLM-annotated questions directly to DB (one transaction).
 
@@ -1485,6 +2680,7 @@ class _DocumentProcessing:
             subject_code: Subject from upload form
             pdf_data: Raw PDF bytes (for subject resolution)
             pages_to_process: Page image paths (for image association)
+            paddleocr_job_id: PP-StructureV3 API job ID (for image upload)
 
         Returns:
             List of saved question dicts: [{id, content, answer, ...}]
@@ -1493,6 +2689,21 @@ class _DocumentProcessing:
         questions = annotation.get("questions", [])
         if not questions:
             return []
+
+        # ── Session #115: Rewrite PP-StructureV3 image URLs ──────────
+        # Stems may contain <img src="imgs/..."> paths from PP-StructureV3
+        # markdown.  If a job_id is available, download the image ZIP,
+        # upload to MinIO, and replace paths before saving.
+        if paddleocr_job_id:
+            _has_imgs = any(
+                "<img" in str(q.get("stem", ""))
+                and "imgs/" in str(q.get("stem", ""))
+                for q in questions
+            )
+            if _has_imgs:
+                questions = await _rewrite_stem_image_urls(
+                    questions, paddleocr_job_id, task_id,
+                )
 
         from app.db.session import async_session_factory
         from sqlalchemy import text
@@ -1563,31 +2774,80 @@ class _DocumentProcessing:
             q_repo = QuestionRepository(session)
             saved: list[dict] = []
 
+            # Session #114: Track stem quality across all questions to decide
+            # whether the LLM annotation was successful overall.
+            total_stem_quality = 0.0
+            stem_count = 0
+
             for q in questions:
                 qno = q.get("qno")
                 qtype = q.get("type", "calculation")
                 answer = q.get("answer", "")
-                explanation = q.get("explanation", "")
-                section = q.get("section", "")
                 score = q.get("score")
 
-                # Build content with section context
-                content_parts = []
-                if section:
-                    content_parts.append(f"[{section}]")
-                if score is not None:
-                    content_parts.append(f"（{score}分）")
-                stem = f"第{qno}题" if qno else ""
-                if stem:
-                    content_parts.append(stem)
-                content = " ".join(content_parts)
+                # Session #114: Use LLM-returned stem as content (not
+                # metadata construction).  This fixes the Q5048 bug where
+                # content was "[选择题] （4分） 第1题" instead of the actual
+                # question text.
+                stem_raw = q.get("stem", "").strip()
+                stem = _clean_stem_for_db(stem_raw)
+                # Session #125: Extract options before scoring so
+                # _score_stem_quality can reduce short-stem penalties
+                # for choice/multi_choice questions.
+                _raw_opts = q.get("options") or []
+                if isinstance(_raw_opts, list):
+                    _raw_opts = [
+                        str(o).strip() for o in _raw_opts
+                        if o and str(o).strip()
+                    ]
+                else:
+                    _raw_opts = []
+                stem_quality = _score_stem_quality(stem, _raw_opts)
+                total_stem_quality += stem_quality
+                stem_count += 1
+
+                if stem and stem_quality >= 0.5:
+                    content = stem
+                    # ── Session #115: Options formatting ──────────
+                    # Force each option to its own line for readability.
+                    # Safety net: re-split inline options if LLM returned
+                    # them on a single line despite _split_inline_options().
+                    opts = _raw_opts
+                    if opts:
+                        # Detect inline options: 3+ markers on one line
+                        _inline = bool(
+                            re.search(
+                                r'[A-D][.、．]\s*.+?(?:\s+|$)'
+                                r'[A-D][.、．]\s*.+?(?:\s+|$)'
+                                r'[A-D][.、．]',
+                                content,
+                            )
+                        )
+                        if _inline:
+                            # Strip everything from first inline marker
+                            _m = re.search(r'(?:^|\n)([^\n]*?[A-D][.、．])',
+                                           content)
+                            if _m:
+                                content = content[:_m.start() + _m.start(1)].strip()
+                        if not any(
+                            o.strip() in content for o in opts if o.strip()
+                        ):
+                            content = content + "\n" + "\n".join(opts)
+                else:
+                    logger.warning(
+                        f"Q{qno}: stem quality {stem_quality:.2f} < 0.5, "
+                        f"len={len(stem)}, dropping question"
+                    )
+                    continue  # skip low-quality question
 
                 if not content and not answer:
                     continue  # Skip empty questions
 
+                section = q.get("section", "")
+
                 try:
                     db_q = await q_repo.create(
-                        content=content or f"第{qno}题",
+                        content=content,
                         document_id=doc_id,
                         question_number=qno,
                         subject_id=subject_id,
@@ -1596,40 +2856,63 @@ class _DocumentProcessing:
                     )
                     await session.flush()
 
-                    # Save solution if answer or explanation exists
-                    if answer or explanation:
+                    # Save solution if answer exists
+                    if answer:
                         from app.domains.question.solution_repository import (
                             SolutionRepository,
                         )
                         sol_repo = SolutionRepository(session)
+                        # Session #115: Save LLM explanation when available.
+                        # Non-empty explanations arrive for teacher-edition
+                        # format docs with inline 【详解】 markers.
+                        llm_explanation = q.get("explanation", "")
                         await sol_repo.create(
                             question_id=db_q.id,
                             final_answer=answer or "",
-                            explanation=explanation or None,
+                            explanation=llm_explanation or None,
                             model_source="llm_annotation",
-                            mode="extracted",
+                            mode="llm_annotation",
                         )
+
+                    # ── Session #115: Detect inline <img> tags ──────
+                    # PP-StructureV3 outputs <img src="imgs/..."> for
+                    # embedded figures.  These are not covered by the
+                    # _has_images flag (which only matches ![]() markdown
+                    # references under section headers).  When present,
+                    # associate the rendered page image as fallback.
+                    _stem_text = str(q.get("stem", ""))
+                    _has_md_img = bool(q.get("_has_images", False))
+                    _has_inline_img = "<img" in _stem_text
+                    _q_has_image = _has_md_img or _has_inline_img
 
                     saved.append({
                         "id": db_q.id,
                         "content": content,
                         "answer": answer,
-                        "explanation": explanation,
                         "question_type": qtype,
-                        "has_image": q.get("_has_images", False),
+                        "has_image": _q_has_image,
                         "image_bbox": [0, 0, 0, 0],  # LLM annotation path has no per-figure bbox
                     })
 
                     # ── Associate page image for questions with figures ──
-                    if q.get("_has_images") and pages_to_process:
+                    if _q_has_image and pages_to_process:
                         try:
                             from app.domains.question.image_service import (
                                 QuestionImageService,
                             )
                             img_service = QuestionImageService(session)
 
-                            # Estimate page index from markdown position fraction
+                            # Estimate page index from markdown position fraction.
+                            # For <img> tags without _markdown_position (set
+                            # only for section-header ![]() refs), fall back
+                            # to a crude qno/total estimate.
                             position = q.get("_markdown_position", 0.0)
+                            if position == 0.0 and _has_inline_img:
+                                _total_qs = max(len(questions), 1)
+                                position = max(
+                                    0.0,
+                                    min(1.0, ((qno or 1) - 1) / _total_qs),
+                                )
                             page_idx = min(
                                 int(position * len(pages_to_process)),
                                 len(pages_to_process) - 1,
@@ -1677,11 +2960,40 @@ class _DocumentProcessing:
                     )
                     continue
 
+            # ── Session #114: Overall quality gate ──────────────────
+            # Dynamic threshold: saved questions >= 50% of expected
+            # (1 per page) OR absolute >= 3, AND average stem quality
+            # >= 0.5.  Failing the gate triggers fallback to regex pipeline.
+            total_pages = len(pages_to_process) if pages_to_process else 1
+            min_expected = max(1, total_pages)
+            threshold = max(2, min_expected // 2)
+            avg_quality = total_stem_quality / max(stem_count, 1)
+
+            quality_pass = (
+                len(saved) >= threshold and avg_quality >= 0.5
+            )
+
+            if not quality_pass:
+                logger.warning(
+                    "LLM annotation quality gate FAILED: "
+                    "saved=%d threshold=%d avg_quality=%.2f — "
+                    "rolling back, will fall back to regex pipeline",
+                    len(saved), threshold, avg_quality,
+                )
+                await session.rollback()
+                await self._log_step(
+                    task_id, "llm_save",
+                    f"Quality gate failed: {len(saved)}/{threshold} questions, "
+                    f"avg_quality={avg_quality:.2f}",
+                )
+                return []  # empty → triggers fallback in caller
+
             await session.commit()
 
             await self._log_step(
                 task_id, "llm_save",
-                f"Saved {len(saved)} annotated questions to DB",
+                f"Saved {len(saved)} annotated questions to DB "
+                f"(avg_quality={avg_quality:.2f})",
             )
 
             return saved
