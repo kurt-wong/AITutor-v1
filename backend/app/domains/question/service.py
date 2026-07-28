@@ -133,6 +133,36 @@ class QuestionService:
         """Admin: delete question."""
         return await self.repo.delete(question_id)
 
+    async def get_knowledge_points_for_questions(
+        self, question_ids: list[int],
+    ) -> dict[int, list[dict]]:
+        """Batch-fetch knowledge points for multiple questions.
+
+        Session #137c: Moved from admin API for architecture compliance (B4).
+        Returns {question_id: [{node_code, node_name, confidence}, ...]}.
+        """
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        from app.domains.question.models import QuestionKnowledge
+
+        kp_map: dict[int, list[dict]] = {qid: [] for qid in question_ids}
+        if not question_ids:
+            return kp_map
+
+        kp_rows = await self.session.execute(
+            select(QuestionKnowledge)
+            .options(selectinload(QuestionKnowledge.knowledge_node))
+            .where(QuestionKnowledge.question_id.in_(question_ids))
+        )
+        for kp in kp_rows.scalars().all():
+            node = kp.knowledge_node
+            kp_map[kp.question_id].append({
+                "node_code": node.code if node else "",
+                "node_name": node.name if node else "",
+                "confidence": kp.confidence_score,
+            })
+        return kp_map
+
     @staticmethod
     def _to_dict(q) -> dict:
         return {

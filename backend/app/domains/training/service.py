@@ -75,6 +75,32 @@ class TrainingService:
         ]
 
 
+    async def record_wrong_questions(
+        self, wrong_qids: list[int], error_type: str = "practice_wrong",
+    ) -> int:
+        """Record wrong answers to wrong_questions table.
+
+        Session #137c: Moved from API layer for architecture compliance (B3).
+        Returns the number of wrong questions recorded.
+        """
+        from app.domains.wrong_question.repository import WrongQuestionRepository
+
+        if not wrong_qids:
+            return 0
+
+        wq_repo = WrongQuestionRepository(self.session)
+        count = 0
+        for qid in wrong_qids:
+            existing = await wq_repo.get_by_question(qid)
+            if existing:
+                await wq_repo.increment_count(qid)
+            else:
+                await wq_repo.create(question_id=qid, error_type=error_type)
+            count += 1
+        await self.session.commit()
+        return count
+
+
 class ExamService:
     """Service for exam management."""
 

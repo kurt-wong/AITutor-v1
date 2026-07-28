@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.response import create_response
 from app.db.session import get_db
-from app.db.minio import upload_file
 from app.domains.student.sse_handler import SSEHandler
 from app.domains.wrong_question.service import WrongQuestionService
 from app.mcp.client import mcp_client
@@ -66,22 +65,14 @@ async def student_ask(
         )
 
     # Image validation and upload
+    # Session #137c: Uses DocumentService for architecture compliance (B5).
     image_key: str | None = None
     if image:
         _validate_upload_image(image)
-        # Upload image to MinIO
         image_bytes = await image.read()
-        image_key = f"student-uploads/{uuid.uuid4().hex}.{image.filename.rsplit('.', 1)[-1] if image.filename and '.' in image.filename else 'png'}"
-        import asyncio
-        from io import BytesIO
-        await asyncio.to_thread(
-            lambda: upload_file(
-                object_name=image_key,
-                data=BytesIO(image_bytes),
-                length=len(image_bytes),
-                content_type=image.content_type or "application/octet-stream",
-                bucket="images",
-            )
+        from app.domains.document.service import DocumentService
+        image_key = await DocumentService.upload_student_image(
+            image_bytes, image.filename or "upload.png", image.content_type,
         )
     sse_handler = SSEHandler()
 

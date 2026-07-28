@@ -154,28 +154,16 @@ async def serve_image(image_key: str):
 
     Used by frontend to display question images.
     The image_key is the MinIO object key (e.g., 'documents/abc123.jpg').
+    Session #137c: Uses DocumentService for architecture compliance (B5).
     """
-    from app.db.minio import download_file
-    import mimetypes
+    from app.domains.document.service import DocumentService
 
     try:
-        # Try multiple buckets: question-images, documents, images
-        data = None
-        for bucket in ["question-images", "documents", "images"]:
-            try:
-                data = download_file(image_key, bucket=bucket)
-                break
-            except Exception:
-                continue
-
-        if data is None:
+        result = await DocumentService.download_image(image_key)
+        if result is None:
             raise HTTPException(status_code=404, detail=f"Image not found: {image_key}")
 
-        # Determine content type from file extension
-        content_type, _ = mimetypes.guess_type(image_key)
-        if not content_type:
-            content_type = "image/jpeg"  # default
-
+        data, content_type = result
         return Response(content=data, media_type=content_type)
     except HTTPException:
         raise

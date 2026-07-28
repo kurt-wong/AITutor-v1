@@ -31,8 +31,6 @@ from app.domains.question.service import QuestionService
 from app.domains.question.solution_service import SolutionService
 from app.domains.system.config_service import SystemConfigService
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
-from app.domains.question.models import QuestionKnowledge
 from app.gateway.router import llm_gateway
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -364,23 +362,9 @@ async def analyze_document(
         return dist
 
     # Session #101 P1: batch-fetch knowledge points for E2E verification
+    # Session #137c: Moved to QuestionService for architecture compliance (B4).
     q_ids = [q.id for q in questions]
-    kp_map: dict[int, list[dict]] = {qid: [] for qid in q_ids}
-    if q_ids:
-        kp_rows = await session.execute(
-            select(QuestionKnowledge)
-            .options(selectinload(QuestionKnowledge.knowledge_node))
-            .where(
-                QuestionKnowledge.question_id.in_(q_ids)
-            )
-        )
-        for kp in kp_rows.scalars().all():
-            node = kp.knowledge_node
-            kp_map[kp.question_id].append({
-                "node_code": node.code if node else "",
-                "node_name": node.name if node else "",
-                "confidence": kp.confidence_score,
-            })
+    kp_map = await q_service.get_knowledge_points_for_questions(q_ids)
 
     result: dict = {
         "document": document,

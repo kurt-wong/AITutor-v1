@@ -118,21 +118,15 @@ async def submit_answers(
         })
 
     # Auto-write wrong answers to wrong_questions table. Session #91.
+    # Session #137c: Moved to TrainingService for architecture compliance (B3).
     wrong_qids = [r["question_id"] for r in results if r["is_correct"] is False]
+    wrong_count = 0
     if wrong_qids:
-        from app.domains.wrong_question.repository import WrongQuestionRepository
-        wq_repo = WrongQuestionRepository(session)
-        for qid in wrong_qids:
-            existing = await wq_repo.get_by_question(qid)
-            if existing:
-                await wq_repo.increment_count(qid)
-            else:
-                await wq_repo.create(question_id=qid, error_type="practice_wrong")
-        await session.commit()
+        wrong_count = await service.record_wrong_questions(wrong_qids)
 
     return create_response({
         "total": len(questions),
         "correct": correct_count,
-        "wrong_questions_recorded": len(wrong_qids),
+        "wrong_questions_recorded": wrong_count,
         "results": results,
     }, request)

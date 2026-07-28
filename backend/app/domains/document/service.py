@@ -7,6 +7,7 @@ Architecture rule: Service layer contains business logic, no direct DB access.
 T1-01: Upload document → Store in MinIO → Create DB record
 """
 
+import asyncio
 import uuid
 from io import BytesIO
 
@@ -191,6 +192,55 @@ class DocumentService:
         }.get(doc.file_type, "application/octet-stream")
 
         return (content, doc.filename, content_type)
+
+    @staticmethod
+    async def download_image(image_key: str) -> tuple[bytes, str] | None:
+        """Download image from MinIO with multi-bucket fallback.
+
+        Session #137c: Moved from documents API for architecture compliance (B5).
+        Tries buckets: question-images, documents, images.
+        Returns (data, content_type) or None if not found.
+        """
+        import mimetypes
+
+        data = None
+        for bucket in ["question-images", "documents", "images"]:
+            try:
+                data = download_file(image_key, bucket=bucket)
+                break
+            except Exception:
+                continue
+
+        if data is None:
+            return None
+
+        ext = "." + image_key.rsplit(".", 1)[-1].lower() if "." in image_key else ""
+        content_type = mimetypes.types_map.get(ext, "application/octet-stream")
+        return (data, content_type)
+
+    @staticmethod
+    async def upload_student_image(image_bytes: bytes, filename: str, content_type: str) -> str:
+        """Upload student image to MinIO.
+
+        Session #137c: Moved from student API for architecture compliance (B5).
+        Returns the generated image_key.
+        """
+        import uuid as _uuid
+        from io import BytesIO
+
+        ext = filename.rsplit(".", 1)[-1] if filename and "." in filename else "png"
+        image_key = f"student-uploads/{_uuid.uuid4().hex}.{ext}"
+
+        await asyncio.to_thread(
+            lambda: upload_file(
+                object_name=image_key,
+                data=BytesIO(image_bytes),
+                length=len(image_bytes),
+                content_type=content_type or "application/octet-stream",
+                bucket="images",
+            )
+        )
+        return image_key
 
     async def update_status(self, doc_id: int, status: str) -> bool:
         """Update document processing status by ID."""
