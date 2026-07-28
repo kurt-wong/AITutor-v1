@@ -116,6 +116,20 @@ class KnowledgeMCPServer(MCPServerBase):
             async with async_session_factory() as session:
                 svc = KnowledgeService(session)
                 all_nodes = await svc.list_all_nodes()
+
+                # Filter nodes by subject to prevent cross-subject noise
+                if subject:
+                    from app.domains.knowledge.subject_identifier import SUBJECT_CODE_MAP
+                    subj_prefix = SUBJECT_CODE_MAP.get(subject.lower())
+                    if subj_prefix:
+                        all_nodes = [
+                            n for n in all_nodes
+                            if n.code and (
+                                n.code.startswith(subj_prefix + "-")
+                                or n.code == subj_prefix
+                            )
+                        ]
+
                 node_codes_block = "\n".join(
                     f"  - id={n.id}, code={n.code}, name={n.name}" for n in all_nodes
                 )

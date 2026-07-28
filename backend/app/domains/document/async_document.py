@@ -2910,6 +2910,23 @@ class _DocumentProcessing:
                     srow = sr.fetchone()
                     if srow:
                         subject_id = srow[0]
+                else:
+                    sr = await session.execute(
+                        text(
+                            "SELECT id FROM subjects WHERE "
+                            "LOWER(code) = LOWER(:code) OR LOWER(name) = LOWER(:code) LIMIT 1"
+                        ),
+                        {"code": resolve_code},
+                    )
+                    srow = sr.fetchone()
+                    if srow:
+                        subject_id = srow[0]
+                if subject_id is None:
+                    logger.warning(
+                        "Subject code '%s' not found in subjects table "
+                        "(tried CN map, EN map, direct lookup)",
+                        resolve_code,
+                    )
 
             # ── Update document metadata ────────────────────────────
             if doc_id and metadata:
