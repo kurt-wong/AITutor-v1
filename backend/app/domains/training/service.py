@@ -28,6 +28,7 @@ class TrainingService:
             title=title,
             generation_type=generation_type,
         )
+        await self.session.commit()
         return {
             "id": training_set.id,
             "title": training_set.title,
@@ -127,6 +128,7 @@ class ExamService:
         exam = await self.repo.create_exam(
             title=title,
         )
+        await self.session.commit()
         return {
             "id": exam.id,
             "title": exam.title,

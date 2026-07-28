@@ -15,7 +15,6 @@ Architecture rules:
 """
 
 import asyncio
-import base64
 import json
 import uuid
 from typing import AsyncGenerator, Any
@@ -23,9 +22,9 @@ from typing import AsyncGenerator, Any
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.prompt_loader import get_system_prompt
-from app.db.minio import download_file
 from app.gateway.router import llm_gateway
 from app.domains.student.vision_handler import VisionHandler
+from app.domains.student.image_service import StudentImageService
 
 logger = get_logger("student.sse_handler")
 
@@ -386,117 +385,13 @@ class SSEHandler:
     async def _analyze_image(self, image_key: str) -> dict[str, Any]:
         """Analyze an image or PDF to extract question text.
 
-        Uses VL OCR for structured extraction:
-        - PDF: extracts text directly via pypdf
-        - Image: VL OCR structured extraction → question splitting → image cropping
-
+        Delegates to StudentImageService for MinIO download + VL OCR + splitting.
         Returns structured data with questions and cropped images.
         """
         try:
-            file_bytes = download_file(image_key, bucket="images")
-            if not isinstance(file_bytes, bytes):
-                file_bytes = file_bytes.read()
-
-            # Detect PDF by magic bytes
-            is_pdf = file_bytes[:5] == b"%PDF-"
-            if is_pdf:
-                return self._extract_pdf_text(file_bytes, image_key)
-
-            # Image path: use VL OCR for structured extraction
-            import tempfile
-            from pathlib import Path
-            from app.domains.document.ocr.vl_ocr_provider import VLOCRProvider
-            from app.domains.question.splitter import QuestionSplitter
-            from app.domains.question.image_cropper import QuestionImageCropper
-
-            # Save to temp file for VL OCR
-            safe_name = image_key.replace("/", "_").replace("\\", "_")
-            tmp = Path(tempfile.gettempdir()) / f"vl_{safe_name}.jpg"
-            tmp.write_bytes(file_bytes)
-            logger.info(f"VL OCR temp file: {tmp} ({len(file_bytes)} bytes)")
-
-            try:
-                # Step 1: VL OCR structured extraction
-                provider = VLOCRProvider()
-                image_b64 = provider._resize_image(tmp)
-
-                # Try MIMO first (handles Chinese correctly), then Ollama
-                try:
-                    raw = await provider._call_mimo(image_b64)
-                    vl_data = provider._parse_response(raw)
-                except Exception as e:
-                    logger.warning(f"MIMO failed ({e}), trying Ollama")
-                    raw = await provider._call_ollama(image_b64)
-                    vl_data = provider._parse_response(raw)
-
-                logger.info(f"VL OCR extracted {len(vl_data.get('questions', []))} questions")
-
-                if not vl_data.get("questions"):
-                    # Fallback to VisionHandler if VL returns no questions
-                    vision_handler = VisionHandler()
-                    image_b64_b64 = base64.b64encode(file_bytes).decode("utf-8")
-                    result = await vision_handler.analyze_image(
-                        image_key=image_key,
-                        image_data=image_b64_b64,
-                    )
-                    result["images"] = [image_key]
-                    return result
-
-                # Step 2: Split questions
-                splitter = QuestionSplitter()
-                questions = splitter.split_from_vl(image_key, vl_data)
-
-                # Step 3: Crop images for questions with has_image
-                cropper = QuestionImageCropper()
-                IMAGE_KEYWORDS = {"如图", "图中", "图形", "示意图", "几何图", "坐标图", "函数图象"}
-                question_images = {}  # question_index -> [image_keys]
-
-                for i, q in enumerate(questions):
-                    q_text = q.get("question_text", "")
-                    has_image = q.get("has_image", False) or any(kw in q_text for kw in IMAGE_KEYWORDS)
-                    if has_image:
-                        bbox = q.get("image_bbox", [0, 0, 0, 0])
-                        if bbox != [0, 0, 0, 0]:
-                            # Crop the image
-                            crop_result = await cropper.crop_and_enhance(
-                                image_path=str(tmp),
-                                bbox=bbox,
-                                question_id=i,
-                            )
-                            if crop_result:
-                                question_images[i] = [crop_result["image_key"]]
-                                logger.info(f"Cropped image for Q{i}: {crop_result['image_key']}")
-                            # If crop failed, don't include any image
-
-                # Build combined question text
-                combined_text = "\n".join(
-                    f"({q.get('question_no', i+1)}) {q.get('question_text', '')}"
-                    for i, q in enumerate(questions)
-                )
-
-                # Determine all image keys (unique)
-                all_images = [image_key]  # Always include original
-                for imgs in question_images.values():
-                    for img in imgs:
-                        if img not in all_images:
-                            all_images.append(img)
-
-                return {
-                    "success": True,
-                    "question_text": combined_text,
-                    "questions": questions,
-                    "question_images": question_images,
-                    "images": all_images,
-                    "difficulty": None,
-                    "subject": None,
-                    "confidence": 0.9,
-                    "needs_degradation": False,
-                    "error": None,
-                }
-
-            finally:
-                tmp.unlink(missing_ok=True)
-
+            image_service = StudentImageService()
+            file_bytes = await image_service.download_image(image_key)
+            return await image_service.analyze_image(image_key, file_bytes)
         except Exception as e:
             logger.error(f"Vision analysis failed for {image_key}: {e}")
             return {
@@ -511,43 +406,6 @@ class SSEHandler:
             }
 
     @staticmethod
-    def _extract_pdf_text(file_bytes: bytes, image_key: str) -> dict[str, Any]:
-        """Extract text from a PDF file using pypdf."""
-        try:
-            from io import BytesIO
-            from pypdf import PdfReader
-
-            reader = PdfReader(BytesIO(file_bytes))
-            text_parts: list[str] = []
-            # Extract text from first 3 pages (exam papers often multi-page)
-            max_pages = min(len(reader.pages), 3)
-            for i in range(max_pages):
-                page_text = reader.pages[i].extract_text()
-                if page_text:
-                    text_parts.append(page_text.strip())
-
-            extracted = "\n\n".join(text_parts)
-            if not extracted:
-                return {
-                    "success": False,
-                    "question_text": None,
-                    "error": "PDF 中未检测到文字内容，可能是扫描版 PDF",
-                }
-
-            logger.info(f"Extracted {len(extracted)} chars from PDF {image_key}")
-            return {
-                "success": True,
-                "question_text": extracted,
-                "confidence": 0.85,
-            }
-        except Exception as e:
-            logger.error(f"PDF text extraction failed for {image_key}: {e}")
-            return {
-                "success": False,
-                "question_text": None,
-                "error": "PDF 文字提取失败",
-            }
-
     async def _update_question_text(
         self, student_question_id: int, question_text: str
     ) -> None:

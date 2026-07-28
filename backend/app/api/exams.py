@@ -41,7 +41,6 @@ async def create_exam(
     """Create a new exam. Session #77: P2."""
     service = ExamService(session)
     result = await service.create_exam(title=body.title)
-    await session.commit()
     return create_response(result, request)
 
 

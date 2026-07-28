@@ -82,6 +82,8 @@ class DocumentPipeline:
             await self._finalize_task(ctx)
         except Exception as e:
             await self._handle_task_error(ctx, e, task_data)
+        finally:
+            await self._cleanup_temp_files(ctx)
 
     # ── Phase 1: Init + metadata ───────────────────────────────────
 
@@ -569,14 +571,18 @@ class DocumentPipeline:
 
     # ── Phase 6: Finalize ──────────────────────────────────────────
 
-    async def _finalize_task(self, ctx: PipelineContext) -> None:
-        # Cleanup temp files
-        if ctx.is_pdf and ctx.page_images:
-            for img_path in ctx.page_images:
-                Path(img_path).unlink(missing_ok=True)
-        elif ctx.local_path:
-            Path(ctx.local_path).unlink(missing_ok=True)
+    async def _cleanup_temp_files(self, ctx: PipelineContext) -> None:
+        """Cleanup temp files — always runs in finally block (B2 fix)."""
+        try:
+            if ctx.is_pdf and ctx.page_images:
+                for img_path in ctx.page_images:
+                    Path(img_path).unlink(missing_ok=True)
+            elif ctx.local_path:
+                Path(ctx.local_path).unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("Temp file cleanup failed: %s", e)
 
+    async def _finalize_task(self, ctx: PipelineContext) -> None:
         # Update document status
         try:
             async with async_session_factory() as status_session:

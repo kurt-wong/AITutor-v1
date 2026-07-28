@@ -55,7 +55,6 @@ async def create_training_set(
         title=body.title,
         generation_type=body.generation_type,
     )
-    await session.commit()
     return create_response(result, request)
 
 

@@ -1,8 +1,10 @@
 # 代码评估报告全面验证结果
 
-> 验证日期: 2026-07-28 | 版本: 1.26.0
-> 验证方式: 5 个并行 Agent + 手动代码扫描
+> 验证日期: 2026-07-28 | 版本: 1.28.0
+> 验证方式: 5 个并行 Agent + 手动代码扫描 + TRAE 交叉验证
 > 评分修正: 核心管线 6.5→7.0（TRAE 建议折中）
+> 修复后扫描: 2026-07-28 Claude 4-Agent 全量复扫 + TRAE 逐项验证
+> Session #137g 修复: API commit → B2 finally → B13 sse_handler → B8 工具互调
 
 ---
 
@@ -54,7 +56,7 @@
 | B10 | 宽泛异常捕获 | 35处 | 全局 `except Exception` **254处**（报告严重低估） | ✅ 实际更多 |
 | B11 | JSON 解析 3 处独立实现 | MCP base / VisionHandler / SSEHandler | 实际 **5-6 处**（+VLOCRProvider, +VLClient, +llm_detector） | ✅ 实际更多 |
 | B12 | Ollama 2 处独立实现 | llm_server + gateway/router | 确认 2 处，且 model/temp/num_predict 已发散 | ✅ |
-| B13 | SSEHandler 越权 | MinIO/DB/Gateway 直连 | 直连 MinIO+Gateway+DB+VL-OCR+QuestionSplitter 共 **5 层** | ✅ |
+| B13 | SSEHandler 越权 | MinIO/DB/Gateway 直连 | `student/sse_handler.py` 直连 MinIO `download_file`(L26) + `QuestionSplitter`(L409/L446)，共 **2+ 层** | ✅ |
 | B14 | N+1 查询 | 部分 Repository 未优化 | `save_question_knowledge` 逐条查询是主要案例，严重度中等 | 🟡 部分准确 |
 
 ### 前端
@@ -133,3 +135,58 @@
 | B14 N+1 查询 | 数据量小无实际性能影响 |
 | F10 SSE admin key | 当前只调 student 端点，无运行时 bug |
 | P2 Legacy 英文 | 低优先，内部工具不面向用户 |
+
+---
+
+## 七、修复后扫描结果（2026-07-28）
+
+> 修复 commits: `da2bf90`(B1) · `b4ae330`(B3-B5) · `e47527b`(P1-1/P1-2) · `7add681`(B10-MCP) · `e2779f5`(B14) · `e52b350`(B7)
+
+### 已修复 ✅
+
+| 项 | 修复前 | 修复后 | commits |
+|----|--------|--------|---------|
+| B1 `_process_document_task` | 699 行 | 15 行 wrapper + `_document_pipeline.py` | `da2bf90` |
+| B3 API→DB (training) | `WrongQuestionRepository` 直连 | 走 `TrainingService` | `b4ae330` |
+| B4 API→DB (admin) | `select(QuestionKnowledge)` 直连 | 走 `AdminService` | `b4ae330` |
+| B5 API→MinIO | `download_file`/`upload_file` 直连 | 走 Service | `b4ae330` |
+| B7 MCP→Repository | 13 处 | **0 处** | `e52b350` |
+| B9 PIPELINE_DEBUG | 1 处 | **0 处** | `da2bf90` |
+| B10 MCP llm_server | 11 处 broad except | **0 处**（收窄为 `_LLM_ERRORS`） | `7add681` |
+| B14 N+1 查询 | 2 热点逐条查询 | batch `WHERE IN` 方法 | `e2779f5` |
+| F1 table XSS | HTML 直插 | `escapeHtml` 转义 | `e47527b` |
+| F2 SSE abort | 空操作 | `AbortController` 正常工作 | ✅ 非本次修复 |
+| P1-2 HTML table | KaTeX 不渲染 | pipe table 格式 | `e47527b` |
+| **B2** | page_images 清理不在 finally | `run()` 添加 `finally: _cleanup_temp_files()` | S#137g |
+| **B13** | sse_handler.py 越权 | 新建 `StudentImageService`，sse_handler 改为委托调用 | S#137g |
+| **API commit** | `training.py:58` + `exams.py:44` | commit 移入 `TrainingService.create_training_set()` + `ExamService.create_exam()` | S#137g |
+| **B8** | MCP 工具互调 | 提取 `_map_knowledge_impl()` 共享 helper | S#137g |
+
+### 仍存在问题
+
+| # | 问题 | 严重度 | 现状 | 备注 |
+|---|------|:------:|------|------|
+| B10 | MCP Server broad except | 🟡 | llm_server=0 ✅，其余 6 Server 共 31 处 | 安全网，非缺陷 |
+| B10 | Document pipeline broad except | 🟡 | **144 处/21 文件** | 安全网，非缺陷 |
+| F1 | KaTeX dangerouslySetInnerHTML | 🟡 | table 已转义，KaTeX 输出无 DOMPurify | 可接受 |
+| F3 | DocumentsPage raw fetch | 🟡 | 仍绕过 apiFetch | 改动小 |
+| F8 | 静默吞错误 | 🟡 | ~28 处 catch 块，6+ 处无用户反馈 | 低优先 |
+| F7 | any 使用 | 🟢 | 4 处（BatchUploadPage×3 + QuestionEditPage×1） | 低优先 |
+| F9 | ARIA 无障碍 | 🟢 | 0 属性 | 本地工具可接受 |
+
+### Claude 报告纠正（TRAE 验证）
+
+| Claude 声明 | 实际 | 来源 |
+|-------------|------|------|
+| B13 "SSEHandler 文件不存在" | ❌ **误判** — `student/sse_handler.py` 仍存在 | TRAE 代码验证 |
+| Document broad except 87 处/10 文件 | 实际 **144 处/21 文件** | TRAE grep 全目录 |
+| F8 静默吞错误 6 处 | 实际 **~28 处** catch 块 | TRAE 全前端扫描 |
+
+### 下一步建议（TRAE + Claude 共识）
+
+| 优先级 | 事项 | 时间 | 理由 | 状态 |
+|:------:|------|:----:|------|:----:|
+| 🔴 1 | API session.commit 移入 Service | 10min | 架构违规，改动极小 | ✅ 已修复 |
+| 🔴 2 | B2 page_images→finally | 15min | 资源泄漏 | ✅ 已修复 |
+| 🔴 3 | B13 sse_handler 走 Service | 30min | 越权直连 | ✅ 已修复 |
+| 🟡 4 | B8 工具互调重构 | 15min | 提取共享 helper | ✅ 已修复 |

@@ -66,12 +66,12 @@ class KnowledgeMCPServer(MCPServerBase):
     async def _classify_knowledge_points(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Classify a question into knowledge points from the predefined knowledge tree.
 
-        Delegates to _map_knowledge but uses the standard MIS tool name.
+        Uses shared _map_knowledge_impl helper (B8: no tool cross-call).
 
         Input: {"question_text": str, "subject": Optional[str]}
         Output: {"knowledge_points": [{"name": str, "code": str, "confidence": float}]}
         """
-        result = await self._map_knowledge(payload)
+        result = await self._map_knowledge_impl(payload)
         if result["success"] and result["data"]:
             nodes = result["data"].get("knowledge_nodes", [])
             result["data"] = {"knowledge_points": nodes}
@@ -102,6 +102,11 @@ class KnowledgeMCPServer(MCPServerBase):
             return success_response({"difficulty": 3, "reason": "API unavailable"})
 
     async def _map_knowledge(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """MCP tool: map question to knowledge tree nodes."""
+        return await self._map_knowledge_impl(payload)
+
+    async def _map_knowledge_impl(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Shared implementation for knowledge mapping (B8: avoids tool cross-call)."""
         question_text = payload.get("question_text")
         subject = payload.get("subject", "")
         if not question_text:

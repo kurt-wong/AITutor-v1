@@ -5,6 +5,48 @@
 
 ---
 
+## Session #137g — 2026-07-28: 4 项 HIGH/MEDIUM 优先级修复
+
+按 TRAE + Claude 共识优先级修复剩余架构违规。
+
+### 修复内容
+
+| # | 修复项 | 修改文件 | 说明 |
+|---|--------|---------|------|
+| 1 | API session.commit 越界 | `training/service.py`, `api/training.py`, `api/exams.py` | commit 从 API 层移入 Service 层 |
+| 2 | B2 page_images→finally | `_document_pipeline.py` | `run()` 添加 `finally: _cleanup_temp_files()` |
+| 3 | B13 sse_handler→Service | `student/image_service.py`(新), `student/sse_handler.py` | 新建 `StudentImageService`，sse_handler 改为委托调用 |
+| 4 | B8 工具互调 | `mcp/servers/knowledge_server.py` | 提取 `_map_knowledge_impl()` 共享 helper |
+
+### 架构合规
+
+- API 层不再直接调用 `session.commit()`
+- 临时文件在 `finally` 块中清理，异常时不再泄漏
+- sse_handler 不再直连 MinIO / QuestionSplitter
+- MCP 工具不再互调，共享逻辑提取为 helper
+
+---
+
+## Session #137f — 2026-07-28: 修复后全量扫描 + TRAE 交叉验证
+
+4-Agent 并行扫描（MCP/API/前端/Pipeline）+ TRAE 逐项验证，确认修复状态。
+
+### 已修复确认（11 项）
+
+B1/B3/B4/B5/B7(13→0)/B9/B10(llm_server 11→0)/B14/F1(table)/F2/P1-2
+
+### 新发现 & 纠正
+
+| 项 | 说明 |
+|----|------|
+| **API session.commit 越界** | `training.py:58` + `exams.py:44` — 架构违规，应封入 Service |
+| **B13 Claude 误判** | `sse_handler.py` 在 student 域（非 document 域），仍直连 MinIO + QuestionSplitter |
+| **B10 计数修正** | Document pipeline 实际 144 处/21 文件（非 87/10） |
+
+详见 `Docs/CODE_REVIEW_VERIFICATION.md` §七。
+
+---
+
 ## Session #137 — 2026-07-28: 代码评估验证 + 第一批安全/稳定性修复
 
 ### 背景
