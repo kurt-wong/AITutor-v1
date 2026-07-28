@@ -126,7 +126,7 @@ class StudentMCPServer(MCPServerBase):
                 d = int(parsed.get("difficulty", 3))
                 if 1 <= d <= 5:
                     difficulty = d
-            except Exception:
+            except (ValueError, json.JSONDecodeError):
                 pass
 
             return success_response({

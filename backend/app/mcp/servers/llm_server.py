@@ -10,13 +10,20 @@ Architecture: All LLM calls go through llm_gateway (SAD §5).
 Prompts loaded from YAML via PromptLoader (prompt.md §2 Rule 4).
 """
 
+import asyncio
+import json as _json
 import logging
 import re
 from typing import Any
 
+import httpx
+
 from app.mcp.base import MCPServerBase, MCPTool, success_response, error_response
 from app.gateway.router import llm_gateway
 from app.core.prompt_loader import get_system_prompt
+
+# B10: Narrow exception types for Gateway calls
+_LLM_ERRORS = (httpx.HTTPError, asyncio.TimeoutError, ValueError, RuntimeError)
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +277,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                 if not raw_text or len(raw_text) <= 10:
                     logger.warning("solve_question: empty/short response from Gateway")
                     result = None
-            except Exception as e:
+            except _LLM_ERRORS as e:
                 logger.warning(f"solve_question Gateway failed: {e}")
                 result = None
 
@@ -418,9 +425,8 @@ class LLMGatewayMCPServer(MCPServerBase):
                             extracted = m.group(1)
                             # Unescape JSON string escapes
                             try:
-                                import json as _json
                                 extracted = _json.loads(f'"{extracted}"')
-                            except Exception:
+                            except (ValueError, _json.JSONDecodeError):
                                 pass
                             if extracted and len(extracted.strip()) > 0:
                                 final_answer = extracted
@@ -438,7 +444,6 @@ class LLMGatewayMCPServer(MCPServerBase):
                         )
                         if steps_match:
                             try:
-                                import json as _json
                                 salvaged_steps = _json.loads(steps_match.group(1))
                                 if isinstance(salvaged_steps, list):
                                     solution_steps = [
@@ -448,7 +453,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                                         "P2 salvage: extracted %d solution_steps from raw JSON",
                                         len(solution_steps),
                                     )
-                            except Exception:
+                            except (ValueError, _json.JSONDecodeError):
                                 pass
 
                 if parsed:
@@ -466,7 +471,7 @@ class LLMGatewayMCPServer(MCPServerBase):
 
             # LLM Server does NOT persist — caller is responsible for saving the solution
             return success_response(solution)
-        except Exception as e:
+        except _LLM_ERRORS as e:
             return error_response("LLM_FAILURE", str(e))
 
     async def _review_solution(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -496,7 +501,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                 "feedback": result.get("response", ""),
                 "model_used": result.get("model", "unknown")
             })
-        except Exception as e:
+        except _LLM_ERRORS as e:
             return error_response("LLM_FAILURE", str(e))
 
     async def _generate_explanation(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -528,7 +533,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                 "explanation": result.get("response", ""),
                 "model_used": result.get("model", "unknown")
             })
-        except Exception as e:
+        except _LLM_ERRORS as e:
             return error_response("LLM_FAILURE", str(e))
 
     async def _compare_solutions(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -561,7 +566,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                 "comparison": result.get("response", ""),
                 "model_used": result.get("model", "unknown")
             })
-        except Exception as e:
+        except _LLM_ERRORS as e:
             return error_response("LLM_FAILURE", str(e))
 
     async def _evaluate_difficulty_v2(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -612,7 +617,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                 "reasoning": "Failed to parse LLM response, using default",
                 "model_used": result.get("model", "unknown"),
             })
-        except Exception as e:
+        except _LLM_ERRORS as e:
             return error_response("LLM_FAILURE", str(e))
 
     async def _generate_thinking_hint(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -663,7 +668,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                 "difficulty_hint": "medium",
                 "model_used": result.get("model", "unknown"),
             })
-        except Exception as e:
+        except _LLM_ERRORS as e:
             return error_response("LLM_FAILURE", str(e))
 
     async def _extract_visual_structure(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -717,7 +722,7 @@ class LLMGatewayMCPServer(MCPServerBase):
                 "knowledge_points": [],
                 "model_used": result.get("model", "unknown"),
             })
-        except Exception as e:
+        except _LLM_ERRORS as e:
             return error_response("LLM_FAILURE", str(e))
 
     async def _generate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -742,5 +747,5 @@ class LLMGatewayMCPServer(MCPServerBase):
             if result.get("error"):
                 return error_response("LLM_FAILURE", result.get("error"))
             return success_response(result)
-        except Exception as e:
+        except _LLM_ERRORS as e:
             return error_response("LLM_FAILURE", str(e))

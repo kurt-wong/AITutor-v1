@@ -96,7 +96,7 @@ class KnowledgeMCPServer(MCPServerBase):
             # Fallback if parsing fails
             logger.warning("Failed to parse evaluate_difficulty response, using fallback")
             return success_response({"difficulty": 3, "reason": "Unable to determine"})
-        except Exception as e:
+        except (httpx.HTTPError, asyncio.TimeoutError, ValueError, RuntimeError) as e:
             # Graceful fallback when LLM gateway is unavailable
             logger.warning(f"LLM gateway error in evaluate_difficulty: {e}, using fallback")
             return success_response({"difficulty": 3, "reason": "API unavailable"})
