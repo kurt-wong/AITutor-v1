@@ -252,41 +252,30 @@ class LLMGatewayMCPServer(MCPServerBase):
                 )
             full_prompt = f"{system_prompt}\n\nSubject: {subject}\nQuestion: {question_text}"
 
-            # Fallback chain: MIMO (fast) → DeepSeek (reasoning) → Ollama (local)
+            # Session #137: Use Gateway's built-in fallback chain
+            # (MIMO → DeepSeek → Ollama) instead of duplicating logic.
+            # The Gateway handles primary→fallback→Ollama internally,
+            # including cost tracking, retries, and logging.
             result = None
-            for mode in ["fast", "reasoning"]:
-                try:
-                    result = await llm_gateway.generate(mode=mode, prompt=full_prompt)
-                    raw_text = result.get("response", "").strip()
-                    # Session #98 P2-E: Strip <think>...</think> CoT tags
-                    # that MIMO sometimes leaks into the final response.
-                    raw_text = re.sub(
-                        r"<think>.*?</think>", "", raw_text,
-                        flags=re.DOTALL | re.IGNORECASE,
-                    ).strip()
-                    result["response"] = raw_text
-                    if raw_text and len(raw_text) > 10:
-                        break  # Got meaningful content, stop
-                    logger.warning(f"solve_question mode={mode} empty/short response, trying next")
+            try:
+                result = await llm_gateway.generate(mode="fast", prompt=full_prompt)
+                raw_text = result.get("response", "").strip()
+                # Session #98 P2-E: Strip <think>...</think> CoT tags
+                # that MIMO sometimes leaks into the final response.
+                raw_text = re.sub(
+                    r"<think>.*?</think>", "", raw_text,
+                    flags=re.DOTALL | re.IGNORECASE,
+                ).strip()
+                result["response"] = raw_text
+                if not raw_text or len(raw_text) <= 10:
+                    logger.warning("solve_question: empty/short response from Gateway")
                     result = None
-                except Exception as e:
-                    logger.warning(f"solve_question mode={mode} failed: {e}, trying next")
-                    result = None
-
-            # Last resort: local Ollama
-            if not result:
-                try:
-                    result = await self._call_ollama_solve(full_prompt)
-                    if result and result.get("response", "").strip():
-                        logger.info("solve_question: Ollama fallback succeeded")
-                    else:
-                        result = None
-                except Exception as e:
-                    logger.warning(f"solve_question Ollama fallback failed: {e}")
-                    result = None
+            except Exception as e:
+                logger.warning(f"solve_question Gateway failed: {e}")
+                result = None
 
             if not result:
-                return error_response("LLM_FAILURE", "All LLM providers failed (MIMO → DeepSeek → Ollama)")
+                return error_response("LLM_FAILURE", "All LLM providers failed (Gateway fallback chain exhausted)")
 
             # Parse LLM response
             parsed = self._parse_json_response(result)
@@ -479,43 +468,6 @@ class LLMGatewayMCPServer(MCPServerBase):
             return success_response(solution)
         except Exception as e:
             return error_response("LLM_FAILURE", str(e))
-
-    async def _call_ollama_solve(self, prompt: str) -> dict[str, Any] | None:
-        """Call local Ollama as last-resort fallback for solve_question."""
-        import httpx
-        from app.core.config import settings
-
-        ollama_url = getattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434")
-        model = getattr(settings, "VL_OCR_MODEL", "qwen3.6-plus")
-
-        try:
-            async with httpx.AsyncClient(
-                timeout=120.0,
-                trust_env=False,  # P1: bypass system proxy for localhost
-            ) as client:
-                response = await client.post(
-                    f"{ollama_url}/api/generate",
-                    json={
-                        "model": model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.2, "num_predict": 2048},
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-                content = data.get("response", "")
-                if content and len(content.strip()) > 10:
-                    return {
-                        "response": content,
-                        "model": f"ollama/{model}",
-                        "provider": "ollama",
-                        "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-                    }
-            return None
-        except Exception as e:
-            logger.warning(f"Ollama fallback error: {e}")
-            return None
 
     async def _review_solution(self, payload: dict[str, Any]) -> dict[str, Any]:
         question_text = payload.get("question_text")

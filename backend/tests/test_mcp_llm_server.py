@@ -58,14 +58,12 @@ class TestSolveQuestion:
 
     @pytest.mark.asyncio
     async def test_solve_question_llm_failure(self, server, mock_prompt):
-        """LLM 调用失败（所有 fallback 均失败）"""
+        """LLM 调用失败（Gateway fallback chain 均失败）"""
         with patch("app.mcp.servers.llm_server.llm_gateway") as mock:
             mock.generate = AsyncMock(side_effect=Exception("LLM error"))
-            # Also break the Ollama fallback so all providers fail
-            with patch.object(server, "_call_ollama_solve", AsyncMock(side_effect=Exception("Ollama error"))):
-                result = await server._solve_question({"question_text": "test"})
-                assert result["success"] is False
-                assert result["error"]["code"] == "LLM_FAILURE"
+            result = await server._solve_question({"question_text": "test"})
+            assert result["success"] is False
+            assert result["error"]["code"] == "LLM_FAILURE"
 
 
 class TestReviewSolution:

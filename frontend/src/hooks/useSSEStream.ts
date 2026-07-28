@@ -1,8 +1,8 @@
 /**
- * useSSEStream — SSE stream hook (fetch-based, no AbortController)
+ * useSSEStream — SSE stream hook (fetch-based with AbortController)
  */
 
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import type { SSEEvent } from "../types";
 
 interface UseSSEStreamOptions {
@@ -12,14 +12,22 @@ interface UseSSEStreamOptions {
 }
 
 export function useSSEStream() {
+  const controllerRef = useRef<AbortController | null>(null);
+
   const connect = useCallback(
     async (url: string, body: FormData | BodyInit | null, options: UseSSEStreamOptions) => {
       const { onEvent, onError, onDone } = options;
+
+      // Abort any previous connection
+      controllerRef.current?.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
 
       try {
         const init: RequestInit = {
           method: "POST",
           body,
+          signal: controller.signal,
         };
         if (!(body instanceof FormData) && body != null) {
           (init.headers as Record<string, string>) = { "Content-Type": "application/json" };
@@ -68,13 +76,22 @@ export function useSSEStream() {
         }
         onDone?.();
       } catch (err) {
+        // Don't report AbortError — user-initiated cancellation
+        if (err instanceof DOMException && err.name === "AbortError") return;
         onError?.(err instanceof Error ? err : new Error(String(err)));
+      } finally {
+        if (controllerRef.current === controller) {
+          controllerRef.current = null;
+        }
       }
     },
     []
   );
 
-  const abort = useCallback(() => {}, []);
+  const abort = useCallback(() => {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+  }, []);
 
   return { connect, abort };
 }

@@ -1,7 +1,7 @@
 # AI Tutors 系统重启提示词
 
 > **使用方式**：将此文件全部内容复制粘贴给新会话的 Claude/TRAE，即可快速恢复完整工作上下文。
-> **最后更新**: 2026-07-28 Session #136 | **版本**: 1.26.0
+> **最后更新**: 2026-07-28 Session #137 | **版本**: 1.26.0
 
 ---
 
@@ -246,12 +246,16 @@ Q2/Q8 选项缺失的根因是 LLM annotation 被 quality gate 静默丢弃，�
 
 ---
 
-## 八、待办任务（2026-07-28 S#136 后更新）
+## 八、待办任务（2026-07-28 S#137 后更新）
 
 ### ✅ P0-1 — LaTeX 前端渲染（S#133 完成）
 ### ✅ P0-2 — 图片管线（S#134 完成）— API `markdown.images` → 25 张 → question_images: 8
 ### ✅ P0-3 — 配图内联渲染（S#135 完成）— MathRenderer 支持 `![alt](url)` + whole-page guard
 ### ✅ P0-4 — 选项提取修复（S#136 完成）— OCR 预拆分 + 选项补全 + 阈值放松
+### ✅ P1-3 — Windows 僵尸进程（S#137 完成）— `backend/start.ps1` 启动脚本
+### ✅ F1 — XSS 修复（S#137 完成）— `escapeHtml()` 转义表格内容
+### ✅ F2 — SSE AbortController（S#137 完成）— `useSSEStream` 支持 abort
+### ✅ B6 — Gateway 统一（S#137 完成）— 删除 `_call_ollama_solve`，走 Gateway fallback
 
 ### 🟡 P1-1 — KaTeX 不支持的 LaTeX 命令
 
@@ -265,23 +269,10 @@ Q2/Q8 选项缺失的根因是 LLM annotation 被 quality gate 静默丢弃，�
 
 **排查方向**: MathRenderer 已支持 GFM pipe table（L117-127, L43-51），需验证 PP-StructureV3 输出的表格格式是否匹配 pipe table regex。
 
-### 🔴 P1-3 — Windows Python 僵尸进程（用户反馈）
+### ✅ P1-3 — Windows Python 僵尸进程（S#137 已修复）
 
-**问题**: 每次重启后端（uvicorn `--reload`），旧 Python 进程不会自动终止。最多积累 17 个进程。
-
-**根因**: Windows `multiprocessing.spawn` 子进程在父进程终止时不级联终止。
-
-**推荐方案**: 编写 `start.ps1` 启动脚本，启动前 `Stop-Process` 杀掉端口 8000 上的残留进程：
-```powershell
-# start.ps1 — 推荐实现
-Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue |
-  Select-Object -ExpandProperty OwningProcess -Unique |
-  ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
-Start-Sleep -Seconds 1
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-**状态**: 方案已设计，**待用户确认后实施**。
+**方案**: `backend/start.ps1` 启动脚本，启动前清理端口 8000 残留进程。
+**使用**: `cd backend && .\start.ps1`
 
 ### 🟡 P2 — Prompt 选项提取优化（讨论中，暂不实施）
 
@@ -300,6 +291,7 @@ S#136 已通过代码层面（OCR 预拆分 + 选项补全 + 阈值放松）解�
 
 | Session | 日期 | 内容 |
 |---------|------|------|
+| **#137** | **07-28** | **代码评估验证 + 第一批修复**: 5 个并行 Agent 验证评估报告(93%准确)。第一批 5 项: F1 XSS(escapeHtml) + P1-3(start.ps1) + F2(SSE AbortController) + B6(Gateway 统一，删除 _call_ollama_solve)。详见 `Docs/CODE_REVIEW_VERIFICATION.md`。 |
 | **#136** | **07-28** | **选项提取三层修复**: (1) `_split_inline_options()` 在 OCR pre-clean 中预拆分 (2) option supplement fallback 从 OCR 补全缺失选项 (3) stem_quality 阈值 0.5→0.3 放松。根因: quality gate 静默丢弃 → regex 管线绕过所有选项代码。 |
 | **#135** | **07-28** | **配图内联渲染 + whole-page guard**: MathRenderer 支持 `![alt](url)` Markdown 图片；`_clean_text_for_db` 转换 `<img>` → `![图](url)`；`_associated_keys` 提升外层作用域 + guard 防止重复整页截图。Q1-Q21 8 问题逐项核实。 |
 | **#134** | **07-27** | **图片管线贯通（决定性突破）**: API `markdown.images` 发现 → HTTP 下载 25 张 → MinIO → question_images 0→8。JSON strict、选项去重、通用清洗同步。 |

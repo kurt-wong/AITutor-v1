@@ -5,6 +5,37 @@
 
 ---
 
+## Session #137 — 2026-07-28: 代码评估验证 + 第一批安全/稳定性修复
+
+### 背景
+收到全面代码评估报告（6 P0 + 14 P1 + 8 P2），通过 5 个并行 Agent 逐项验证（准确度 93%），与 TRAE 讨论确定两批修复方案。
+
+### 第一批修复（5 项）
+
+| # | 事项 | 改动 | 文件 |
+|---|------|------|------|
+| 1 | commit S#130-136 | 31 files +3034/-415 | `1977f82` |
+| 2 | **F1 XSS** | `escapeHtml()` 转义表格内容 | `MathRenderer.tsx` |
+| 3 | **P1-3 start.ps1** | 端口清理 + uvicorn 启动 | `backend/start.ps1` (新建) |
+| 4 | **F2 SSE abort** | AbortController + signal | `useSSEStream.ts` |
+| 5 | **B6 Gateway** | 删除 `_call_ollama_solve`，走 Gateway fallback | `llm_server.py` |
+
+测试: 35/35 passed, TypeScript 无错误。详见 `Docs/CODE_REVIEW_VERIFICATION.md`。
+
+---
+
+## Session #136 — 2026-07-28: 选项提取三层修复
+
+根因: LLM annotation 被 quality gate 静默丢弃 → regex 管线绕过选项代码。
+
+| 修复 | 机制 | 行号 |
+|------|------|------|
+| OCR 预拆分 | `_split_inline_options()` 在 `_pre_clean_markdown()` 中预拆分 | L969-974 |
+| 选项补全 | OCR markdown 扫描补全缺失选项 | L3648-3652 |
+| 阈值放松 | stem_quality 0.5→0.3 | L3669 |
+
+---
+
 ## Session #135 — 2026-07-28: 诊断报告逐项核实 + 文档同步
 
 ### 背景

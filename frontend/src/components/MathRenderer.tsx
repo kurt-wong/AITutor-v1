@@ -207,6 +207,16 @@ function parseMathContent(content: string): MathPart[] {
 
 // ── Table converter ─────────────────────────────────────────────
 
+/** Escape HTML entities to prevent XSS in table cell content */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function convertTableToHtml(text: string): string {
   const lines = text
     .trim()
@@ -232,7 +242,7 @@ function convertTableToHtml(text: string): string {
     '<table style="border-collapse:collapse;width:100%;margin:0;font-size:14px">';
   html += "<thead><tr>";
   headers.forEach(
-    (h) => (html += `<th style="${thStyle}">${h}</th>`),
+    (h) => (html += `<th style="${thStyle}">${escapeHtml(h)}</th>`),
   );
   html += "</tr></thead><tbody>";
   bodyLines.forEach((line) => {
@@ -242,7 +252,7 @@ function convertTableToHtml(text: string): string {
       .map((c) => c.trim());
     html += "<tr>";
     cells.forEach(
-      (c) => (html += `<td style="${cellStyle}">${c}</td>`),
+      (c) => (html += `<td style="${cellStyle}">${escapeHtml(c)}</td>`),
     );
     html += "</tr>";
   });
