@@ -35,6 +35,15 @@ class KnowledgeRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_codes(self, codes: list[str]) -> dict[str, KnowledgeNode]:
+        """Batch lookup knowledge nodes by codes. Returns {code: node}."""
+        if not codes:
+            return {}
+        result = await self.session.execute(
+            select(KnowledgeNode).where(KnowledgeNode.code.in_(codes))
+        )
+        return {node.code: node for node in result.scalars().all()}
+
     async def list_by_subject(self, subject_id: int) -> list[KnowledgeNode]:
         """List all knowledge nodes for a subject."""
         result = await self.session.execute(
@@ -88,14 +97,18 @@ class KnowledgeRepository:
         if not knowledge_points:
             return 0
 
+        # B14: Batch-resolve all node codes in a single query (was N+1)
+        codes = [kp["node_code"] for kp in knowledge_points if kp.get("node_code")]
+        nodes_by_code = await self.get_by_codes(codes)
+
         saved = 0
         for kp in knowledge_points:
             node_code = kp.get("node_code", "")
             if not node_code:
                 continue
 
-            # Resolve code → node ID
-            node = await self.get_by_code(node_code)
+            # Resolve code → node ID (from pre-fetched batch)
+            node = nodes_by_code.get(node_code)
             if node is None:
                 logger.debug(
                     f"Knowledge node '{node_code}' not found in DB — "

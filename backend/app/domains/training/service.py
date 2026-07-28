@@ -8,6 +8,7 @@ Architecture rule: Service layer contains business logic, no direct DB access.
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.training.repository import TrainingRepository, ExamRepository
+from app.domains.wrong_question.models import WrongQuestion
 
 
 class TrainingService:
@@ -89,13 +90,23 @@ class TrainingService:
             return 0
 
         wq_repo = WrongQuestionRepository(self.session)
+
+        # B14: Batch-fetch existing records (was N+1: 2 queries per qid)
+        existing_map = await wq_repo.get_by_questions(wrong_qids)
+
         count = 0
         for qid in wrong_qids:
-            existing = await wq_repo.get_by_question(qid)
+            existing = existing_map.get(qid)
             if existing:
-                await wq_repo.increment_count(qid)
+                existing.wrong_count += 1
             else:
-                await wq_repo.create(question_id=qid, error_type=error_type)
+                wq_repo.session.add(
+                    WrongQuestion(
+                        question_id=qid,
+                        error_type=error_type,
+                        wrong_count=1,
+                    )
+                )
             count += 1
         await self.session.commit()
         return count

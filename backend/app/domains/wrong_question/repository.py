@@ -49,6 +49,15 @@ class WrongQuestionRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_questions(self, question_ids: list[int]) -> dict[int, WrongQuestion]:
+        """Batch lookup wrong questions by question IDs. Returns {question_id: wq}."""
+        if not question_ids:
+            return {}
+        result = await self.session.execute(
+            select(WrongQuestion).where(WrongQuestion.question_id.in_(question_ids))
+        )
+        return {wq.question_id: wq for wq in result.scalars().all()}
+
     async def list_all(self, skip: int = 0, limit: int = 100) -> list[WrongQuestion]:
         """List all wrong questions with pagination."""
         result = await self.session.execute(
