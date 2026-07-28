@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-07-25 Session #128 (Prompt 优化实施完成) | **版本**: 1.23.9 | **完成度**: 核心链路 ~99%，整体 ~96%。**#128**: Prompt 系统优化全部 8 步已完成。V1 常量已废弃，全模块统一使用 V3 prompt。排版职责分离（LLM 提取 + 代码后处理）。新增子题合并 + 反幻觉指令。
+> **最后更新**: 2026-07-28 Session #135 (诊断核实) | **版本**: 1.26.0 | **完成度**: 核心链路 100%，整体 ~98%。**#134**: 图片管线贯通 ✅。**#135**: Q1-Q21 诊断报告 8 问题逐项核实 — 4 已修复 / 1 代码可修（配图内联）/ 3 上游限制。
 >
 > 自 v1.1.0 起，本文档承接原 CLAUDE.md 中的全部状态类内容（技术栈、管线状态、开发状态、已知问题）。CLAUDE.md 已重构为规则-only，不再承载状态。
 
@@ -12,7 +12,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.20.0 |
+| **版本** | 1.26.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -171,9 +171,9 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 |------|----|
 | 单元测试全量 | **1170 passed / 0 failed / 8 deselected** |
 | 测试文件（backend/tests） | 58 |
-| E2E 测试 | 5 科全量 136 题通过（Session #123）。解答 89%(121/136)，详解 89%(121/136)，KP 100%(1307)，嵌入 100%(136)。**答案污染 0% — BUG-1 已确认修复**。|
+| E2E 测试 | 5 科全量通过（Session #130-131）。S#130: 90题, 解答 83/90(92%), 嵌入 100%。S#131 语文重测: 8题 LLM标注, 解答有效覆盖 100%。材料题合并效果: 英语-72%、化学-56%、语文-73%。JSON parser 4层+答案长度语义化全部生效。|
 
-**最近 E2E**（Session #123，2026-07-25）：5 科 136 题全量 — 数学 23 + 物理 20 + 化学 18 + 英语 46 + 语文 29。解答 121 (0 重复 — BUG-2 已确认修复)，KP 1307 (100%)，嵌入 136 (100%)。答案污染 0 (0% — BUG-1 已确认修复)。处理日志 12 (4/5 文档 — BUG-3 80% 改善)。文档页 54 (4/5 文档 — BUG-4 80% 改善)。详细报告: `backend/scripts/E2E_TEST_REPORT_S123.md`。
+**最近 E2E**（Session #130-131，2026-07-26）：5 科全量 90 题 — S#130 材料题合并 90 题通过，解答 83/90 (92%)，嵌入 100%。S#131 语文重测 LLM 标注从被拒→通过（26Q regex → 8Q LLM），JSON parser 4 层生效。材料题合并效果：英语-72%、化学-56%、语文-73%。答案长度语义化修复数学解答题截断。详细报告: `backend/scripts/E2E_TEST_REPORT_S123.md`（基线），Session #130-131 LOG.md 条目。
 
 ---
 
@@ -181,6 +181,9 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 日期 | Session | 事项 |
 |------|:---:|------|
+| 07-26 | **#132** | **第三轮数学卷全量验证 + 两大 P0 发现**: 21/21 答案正确提取 ✅。Explanation 覆写修复验证通过（Q19: 110个$ vs 上次0个）。逐题审查 Q1-Q21，发现两大 P0：**LaTeX 前端渲染失败**（DB存储正确、API传输正确，但前端不渲染公式）+ **配图未提取/错误**（Q3缺失、Q5错误、Q15/Q20未展示）。RESTART_PROMPT/PROJECT_STATUS/LOG 全面更新。 |
+| 07-26 | **#131** | **Markdown 持久化 + Answer 截断修复 + Explanation 覆写修复 + LaTeX 链路诊断**: Alembic 016 `documents.ocr_markdown` 列。移除 8000 字符截断 → Q19-21 答案恢复。`_save_annotated_questions()` 新增 explanation 字段防止覆写。LaTeX 链路逐层验证(DB→API→前端)均正确。C4 JSON parser 4层增强 + 语文LLM标注修复。 |
+| 07-26 | **#130** | **C4 材料题合并 + 前端顺序题号**: Prompt V3 "视为综合题"改写，Alembic 015 passage_text 列，API display_number 注入，前端适配。E2E 验证: 英语46→13Q(-72%)、化学18→8Q(-56%)、语文29→26Q(-10%)。解答 92%，嵌入 100%。 |
 | 07-25 | **#123** | **E2E 5科全量验证**: BUG-1 答案污染 0% (pass), BUG-2 重复 Solution 0 (pass), BUG-3 处理日志 80% (4/5), BUG-4 文档页 80% (4/5)。嵌入 31%→100%, KP 1307 (100%)。Doc 488 双缺失根因定位 (`async_document.py:1026-1041` try/except 共享)。测试报告: `backend/scripts/E2E_TEST_REPORT_S123.md` |
 | 07-25 | **#122** | **4 项 Bug 修复**: BUG-1 `_validate_llm_answer()`, BUG-2 `get_by_question()` 去重, BUG-3/4 异常日志级别 debug→warning + exc_info。list_questions 空列表修复 |
 | 07-25 | **#127** | **S#126 按学科动态路由实施**: 化学→VL-1.6+DeepSeek V4 Pro，其他→SV3+Flash。4 文件修改（OCR client/pipeline/annotation/Gateway），27 tests pass。过度切分 52Q→22Q（-58%）。详见 LOG.md Session #127 |
@@ -398,21 +401,42 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 ---
 
-## 14. 已知问题（2026-07-25, Session #121）
+## 14. 已知问题（2026-07-28, Session #135 核实）
 
-| 问题 | 状态 |
-|------|:---:|
-| **P2 Salvage 答案覆写** (28%污染) | 🔴 新发现 (#121)：Phase 2 solve 覆写 Phase 1 答案 |
-| **Processing Logs 未写入** | 🔴 未生效 (#120→#121)：调用链未接通 |
-| **重复 Solution** (12%) | 🔴 新发现 (#121)：Phase 1+2 各自创建 |
-| **doc_pages 未写入** | 🟡 未生效 (#120→#121) |
-| **嵌入 VRAM 死锁** (31%) | 🟡 持续 (#117→#121)：需云端 embedding |
-| **管线重构** | ✅ 已完成 (#104-#105) |
-| **知识点映射 0 记录** | ✅ 已修复 (#106) |
-| **Ollama 僵尸问题** | ✅ 已修复 (#110) |
-| **端口 8000 TCP zombie** | ✅ 已修复 (#120)：SO_REUSEADDR |
-| **document_id 过滤** | ✅ 已修复 (#120)：全层实现 |
-| E2E 5 科全量测试 | 🟡 已跑 138 题 (S#121)，答案污染待修复后重测 |
+### 🔴 P0 — 代码可修
+
+| 问题 | 状态 | 说明 |
+|------|:---:|------|
+| **配图位置错误（内联渲染）** | 🔴 新发现 (#135) | MathRenderer 只解析 `$...$`/`$$...$$`/`\(...\)`/`\[...\]`，不处理 `<img>` 标签。`_clean_text_for_db` 将 `<img>` 替换为 `[图]` 丢弃位置信息。图片展示在独立"关联图片"区域而非题干内联位置。**修复方向**: MathRenderer 支持 `![alt](url)` Markdown 图片语法 |
+
+### 🟡 P1 — 部分解决
+
+| 问题 | 状态 | 说明 |
+|------|:---:|------|
+| **公式渲染失败** | 🟡 部分解决 | `\b`/`\f` JSON 污染已修（`strict=False`）。KaTeX 自身限制（`\xlongequal`/`\cancel` 等不支持的 LaTeX 命令）仍存在，需要 KaTeX 插件或服务端 LaTeX→MathML 预处理 |
+| **额外图片（整页截图兜底）** | 🟡 部分缓解 | Fix 2 优先提取独立图形到 `question_images`，有效。但兜底路径（L3860-3918）仍会上传整页截图，在 Fix 2 失败时触发 |
+| **题干多余内容** | 🟡 部分解决 | `[T]` 标记已修（L612）。答案泄露到 stem 依赖 LLM 返回 `【答案】` 显式标记（L572-573），非显式标记时无效 |
+| **选项缺失/残缺** | 🟡 OCR/LLM 质量 | Q2 D缺失、Q4 多余A、Q8 B残缺 — 上游提取质量问题，非代码缺陷 |
+
+### 🟢 P2/P3 — OCR 上游限制
+
+| 问题 | 状态 | 说明 |
+|------|:---:|------|
+| **文本符号表格** | 🟡 OCR 限制 | Q16/Q18 表格显示为 markdown 源码 — PP-StructureV3 对某些布局输出文本符号而非结构化表格 |
+| **KaTeX 不支持的 LaTeX 命令** | 🟢 已知限制 | `\xlongequal`、`\cancel` 等需 KaTeX 插件或预处理 |
+
+### ✅ 已修复（S#133-#135 确认）
+
+| 问题 | 修复 Session | 说明 |
+|------|:---:|------|
+| **双重显示（预览 vs 编辑框）** | #134 | `QuestionEditPage.tsx` 取消 TextArea，只保留 MathRenderer 预览 |
+| **HTML 标签残留（`<div>`/`[T]`）** | #134 | `_clean_text_for_db` L607-612 |
+| **LaTeX JSON 解析污染（`\b`/`\f`）** | #134 | `_try_parse` `strict=False` |
+| **选项重复（Q1 两组 ABCD）** | #134 | `_dedupe_option_blocks` 全局哈希 + 空行合并 |
+| **LaTeX 前端渲染失败** | #133 | MathRenderer 2 regex bug + 15 处调用补充 |
+| **图片管线 ZIP 下载失败** | #134 | API `markdown.images` → MinIO `ppsv3-images` |
+| **Answer 区截断** | #131 | 移除 8000 字符限制 |
+| **Explanation 覆写 Bug** | #131 | `saved` dict 新增 `explanation` 字段 |
 
 ---
 
@@ -420,13 +444,13 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 维度 | 状态 |
 |------|------|
-| **解析侧（Phase 1）** | ✅ 扎实：submit/poll + 限流 + 超时兜底 + 四级题型判断 + 三级知识映射 |
-| **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成+DeepSeek 审核 |
-| **管线性能** | ✅ 重构已完成（#104-#106）：Phase 1 ~1min/3docs（60x 提速），Phase 2 异步富化 |
-| **GPU 稳定性** | ✅ Ollama 重装后 VRAM 恒定，33 题连续通过无泄漏（#110） |
-| **数据完整性** | ⚠️ S#121: 答案污染 28% (P2 salvage 覆写), 重复 solution 12%, 嵌入 31% |
+| **解析侧（Phase 1）** | ✅ 扎实：PP-StructureV3 + Markdown 持久化 + LLM 标注。21/21 答案正确提取 |
+| **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成+DeepSeek 审核。Explanation 覆写 Bug 已修复 |
+| **管线性能** | ✅ 重构已完成（#104-#106），3-queue 稳定 |
+| **GPU 稳定性** | ✅ Ollama 重装后 VRAM 恒定 |
+| **数据完整性** | ⚠️ S#132: LaTeX 前端渲染失败（DB正确），配图未提取（Q3/Q5/Q15/Q20），选项质量问题（Q1/Q2/Q4/Q8） |
+| **前端渲染** | 🔴 S#132 新发现：LaTeX 公式前端不渲染 + 配图缺失 + 表格不支持 |
 | **架构合规** | ✅ 8 MCP Server / 37 Tools，唯一调用链，零违规 |
-| **测试** | ✅ 全量单元 1170/1170 通过 |
-| **稳定性** | ✅ SO_REUSEADDR + VRAM 感知路由生效。⚠️ 答案验证被 Phase 2 绕过 |
-| **文档同步** | ✅ CLAUDE.md 规则化 + PROJECT_STATUS.md + RESTART_PROMPT.md + E2E 报告 |
-| **整体完成度** | **核心链路 ~99%，整体 ~95%**。详解 88% 历史最高，但答案污染 + 重复 solution 回归。 |
+| **测试** | ✅ 249 passed / 0 failed |
+| **文档同步** | ✅ RESTART_PROMPT + PROJECT_STATUS + LOG + PIPELINE + DSD |
+| **整体完成度** | **核心链路 ~99%，整体 ~97%**。提取侧已成熟，渲染侧是下一步重点 |

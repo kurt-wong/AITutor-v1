@@ -7,6 +7,7 @@ import { SearchOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { apiGet, apiGetParams } from "../../services/api";
 import { DIFFICULTY_LABELS, DIFFICULTY_COLORS } from "../../types";
+import MathRenderer from "../../components/MathRenderer";
 
 const { Title } = Typography;
 
@@ -111,7 +112,7 @@ export default function QuestionTreePage() {
         </a>
       ),
     },
-    { title: "题目内容", dataIndex: "content", ellipsis: true },
+    { title: "题目内容", dataIndex: "content", render: (text: string) => <MathRenderer content={text} /> },
     {
       title: "难度",
       dataIndex: "difficulty",

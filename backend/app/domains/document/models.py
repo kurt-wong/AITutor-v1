@@ -37,6 +37,10 @@ class Document(Base, IDMixin, TimestampMixin):
     school: Mapped[str | None] = mapped_column(String(100), nullable=True)
     district: Mapped[str | None] = mapped_column(String(100), nullable=True)
     exam_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Raw PP-StructureV3 OCR Markdown output — source of truth for
+    # downstream extraction.  Persisted for audit, re-processing, and
+    # debugging when LLM annotation produces questionable results.
+    ocr_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     pages: Mapped[list["DocumentPage"]] = relationship(

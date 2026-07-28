@@ -1,13 +1,4 @@
 {
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "sk-db8b3ff508ef40d182519b0a5b798958",
-    "ANTHROPIC_MODEL": "deepseek-v4-pro",
-    "ANTHROPIC_SMALL_FAST_MODEL": "deepseek-v4-flash",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash"
-  },
   "permissions": {
     "allow": [
       "mcp__filesystem__directory_tree",

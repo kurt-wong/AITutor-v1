@@ -77,6 +77,106 @@ _STAGE1_EXPLAIN_PROMPT = """\
 
 要求：语言通俗、逻辑清晰，让学生能独立理解。用中文回答。"""
 
+# ── Session #12x: Subject-Specific Explanation Instructions ──────────
+# Prepended to the Stage 1 explanation prompt based on subject_name
+# from the database query.  Provides domain-specific teaching guidance
+# for each of the 9 subjects.
+
+_SUBJECT_EXPLAIN_ADDITIONS: dict[str, str] = {
+    "数学": """## 数学讲解特别指令
+- 使用完整的公式推导和计算步骤，每一步都要写明
+- 数学符号使用 LaTeX 格式（$...$）
+- 先列出解题思路（为什么这样想），再逐步推导
+- 公式之间要有文字过渡说明，不要只堆公式
+- 注意定义域、值域、分类讨论等容易丢分的细节
+- 选择题可以采用排除法、特殊值法等方法讲解
+""",
+    "物理": """## 物理讲解特别指令
+- 从物理概念和原理出发，先分析题意（已知量、未知量、物理过程）
+- 受力分析/电路分析/运动分析是第一步，必须写清楚
+- 列出所用公式，代入数据前先说明每个量的物理意义
+- 注意单位统一（建议先换算为标准单位）
+- 实验题讲解要说明实验原理 → 操作要点 → 数据处理方法
+- 选择题可以结合物理直觉和排除法
+- 避免只给数值结果不写推导过程
+""",
+    "化学": """## 化学讲解特别指令
+- 化学方程式必须配平，反应条件写在箭头上方
+- 离子方程式和化学方程式要区分清楚
+- 计算题（物质的量、浓度、产率）要有完整的算式和单位
+- 推断题按"突破口 → 逐步推导 → 所有物质 → 验证"的逻辑讲解
+- 实验题讲解：装置作用 → 操作目的 → 现象原因 → 结论
+- 有机化学注重官能团转化和反应类型
+- 使用 LaTeX 写化学式时注意上下标的正确性
+""",
+    "生物": """## 生物讲解特别指令
+- 先阐述相关生物学概念和原理，再结合题目具体分析
+- 实验设计题按照"对照原则 → 单一变量 → 结果分析 → 结论"的逻辑讲解
+- 遗传题需要写遗传图解（文字描述即可）和概率计算过程
+- 代谢途径题按"反应物 → 途径 → 产物 → 影响因素"的框架讲解
+- 图表题先说明图表含义（横纵坐标、趋势），再分析数据
+- 原因分析题注意因果链条的完整性（从条件到结论每一步都要推理）
+- 专业术语必须使用准确，不能用口语化表达替代
+""",
+    "英语": """## 英语讲解特别指令
+- 完形填空：先通读全文理解大意，再逐空分析上下文线索和语法依据
+- 阅读理解：先定位题目对应的原文段落，再分析选项的正误原因
+- 语法填空：明确每个空考查的语法点（时态、语态、非谓语、词性转换等），给出规则依据
+- 写作题：提供范文思路、可用句式、段落结构建议
+- 七选五：分析空格前后的逻辑关系词（however、therefore、for example 等）
+- 讲解中保持英语术语准确（如"过去完成时"、"非限制性定语从句"、"虚拟语气"）
+- 选项分析和例句中的英语原文保持不翻译
+""",
+    "语文": """## 语文讲解特别指令
+- 阅读理解：先概括文章主旨和结构，再逐题分析考查点和答题思路
+- 文言文：先疏通文意（逐句翻译关键句），再分析考查点（实词、虚词、句式、内容理解）
+- 古诗词鉴赏：从意象 → 手法 → 情感 → 主旨四个层次展开讲解
+- 语言运用题：病句修改指出病因类型（搭配不当、成分残缺等），成语使用解释成语含义和适用语境
+- 作文题：提供审题思路、选材方向、结构建议
+- 主观题答案要有层次（如"①...②...③..."），讲清每个要点的依据
+""",
+    "政治": """## 政治讲解特别指令
+- 先定位题目涉及的教材知识模块（经济/政治/文化/哲学）
+- 选择题：分析每个选项与题干的关系（无关/错误/正确但不全面）
+- 主观题：按照"知识点 → 结合材料 → 分析论证"的三段论结构讲解
+- 哲学题注意原理名称的准确性（如"矛盾的普遍性与特殊性"不是"矛盾普遍特殊性"）
+- 时事政治题结合相关政策和背景知识补充说明
+- 避免主观评价，保持客观分析
+""",
+    "历史": """## 历史讲解特别指令
+- 先定位题目涉及的历史时期、事件和人物
+- 原因分析题：从经济、政治、文化、外部环境等多角度分析
+- 影响/意义题：从短期和长期、积极和消极、国内和国际等维度展开
+- 比较分析题：先列出相同点和不同点，再各自展开说明
+- 材料题：先解读材料背景和观点，再结合所学知识分析
+- 注意时序逻辑（因果关系的先后顺序不能颠倒）
+""",
+    "地理": """## 地理讲解特别指令
+- 自然地理：从地理原理（大气环流、洋流、地壳运动等）出发解释现象
+- 人文地理：从区位因素（自然+社会经济）分析产业布局和城市发展
+- 读图题：先说明图的类型和基本地理信息，再逐步提取关键数据
+- 计算题（比例尺、区时、太阳高度角）：写出完整的计算公式和步骤
+- 综合分析题：注意自然因素和人文因素的结合，避免单一维度分析
+- 使用地理术语（如"迎风坡"、"背风坡"、"向斜"、"背斜"、"郊区化"等）
+""",
+}
+
+
+def _get_subject_explain_addition(subject_name: str | None) -> str:
+    """Return subject-specific explanation instructions.
+
+    Args:
+        subject_name: Chinese subject name from DB query (e.g. "数学", "物理")
+
+    Returns:
+        Additional prompt text prepended to the Stage 1 explain prompt,
+        or "" if no subject-specific instructions.
+    """
+    if not subject_name:
+        return ""
+    return _SUBJECT_EXPLAIN_ADDITIONS.get(subject_name, "")
+
+
 _MIMO_VALIDATE_PROMPT = """\
 你是一位严格的审题人。请验证下面这道题的解答是否正确。
 
@@ -834,6 +934,11 @@ class AsyncPipeline(_DocumentProcessing):
             stem=stem, options_text=options_text, answer=answer,
             question_type=question_type or "未知",
         )
+
+        # ── Session #12x: Prepend subject-specific instructions ──
+        subject_explain_add = _get_subject_explain_addition(subject_name)
+        if subject_explain_add:
+            stage1_prompt = subject_explain_add + "\n" + stage1_prompt
 
         # ── Session #117: VRAM-aware local LLM check ─────────
         # Before routing to local qwen3.5:4b, check if GPU is free.

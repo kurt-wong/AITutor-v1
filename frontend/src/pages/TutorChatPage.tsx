@@ -3,6 +3,7 @@ import { Input, Button, Card, Typography, Space, Select, Tag } from "antd";
 import { SendOutlined, RobotOutlined, UserOutlined } from "@ant-design/icons";
 import { useSSEStream } from "../hooks/useSSEStream";
 import type { SSEEvent } from "../types";
+import MathRenderer from "../components/MathRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -115,7 +116,7 @@ export default function TutorChatPage() {
                     whiteSpace: "pre-wrap",
                   }}
                 >
-                  {msg.content}
+                  <MathRenderer content={msg.content} />
                 </Paragraph>
               </Space>
             </Card>

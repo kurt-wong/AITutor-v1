@@ -39,6 +39,10 @@ class Question(Base, IDMixin, TimestampMixin):
     text_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_enhanced_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
     difficulty_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Session #130: Shared reading/experiment passage text for merged
+    # material-based question groups (reading comprehension, cloze,
+    # process-flow experiments, etc.)
+    passage_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     document: Mapped["Document | None"] = relationship(back_populates="questions")

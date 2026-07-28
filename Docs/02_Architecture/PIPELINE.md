@@ -33,6 +33,7 @@
 用户上传 PDF
   → MinIO 存储
   → PP-StructureV3 /layout-parsing（同步，Markdown + 图片输出）
+  → **Markdown 持久化到 documents.ocr_markdown（S#131，source of truth）**
   → DeepSeek reasoning 一次性提取（完整 stem + type + answer + KP + difficulty）
   → 直接入库（一次事务）
   → 异步富化（solve + difficulty + embed + explain）

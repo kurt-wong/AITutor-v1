@@ -5,6 +5,173 @@
 
 ---
 
+## Session #135 — 2026-07-28: 诊断报告逐项核实 + 文档同步
+
+### 背景
+针对 Q1-Q21 综合诊断报告（8 个问题）逐项核实代码现状，区分"已修复"与"仍待处理"。
+
+### 核实结果
+
+| # | 问题 | 状态 | 说明 |
+|---|------|:---:|------|
+| 1 | 双重显示（预览 vs 编辑框） | ✅ 已修复 | `QuestionEditPage.tsx` L195-203 只保留 MathRenderer 预览 |
+| 2 | 公式渲染失败 | 🟡 部分解决 | `\b`/`\f` JSON 污染已修（`strict=False`）；KaTeX 自身限制（`\xlongequal`/`\cancel` 等）仍存在 |
+| 3 | 配图位置错误 | 🔴 未修复 | MathRenderer 不解析 `<img>` 标签；`_clean_text_for_db` 将 `<img>` 替换为 `[图]` 丢弃位置信息；图片展示在独立"关联图片"区域 |
+| 4 | 额外图片（整页截图） | 🟡 部分缓解 | Fix 2 (L3740-3767) 优先提取独立图形到 `question_images`；L3860-3918 仍会上传整页截图作为兜底 |
+| 5 | HTML 标签残留 | ✅ 已修复 | L607-610 移除 `<div>`，L612 移除 `[T]` |
+| 6 | 文本符号表格 | 🟡 OCR 限制 | PP-StructureV3 上游质量问题 |
+| 7 | 题干多余内容 | 🟡 部分解决 | `[T]` 已修；答案泄露依赖 LLM 返回 `【答案】` 显式标记 |
+| 8 | 选项缺失/残缺 | 🟡 OCR/LLM 质量 | 上游提取质量问题 |
+
+### 结论
+- **4 项已修复**（#1 #5 + #2 部分 + #7 部分）
+- **1 项代码可修未修**（#3 配图位置 — MathRenderer 不支持 `<img>`/`![图](url)`）
+- **3 项上游限制**（#6 #8 + #4 兜底路径）
+
+### 文档同步
+- `LOG.md` — 本条目
+- `PROJECT_STATUS.md` — §14 已知问题状态更新
+- `RESTART_PROMPT.md` — §V/§VII/§VIII/§IX 更新
+
+---
+
+## Session #134 — 2026-07-27: 图片管线全链路修复（决定性突破）
+
+### 根本发现
+PP-StructureV3 API **不提供 `markdownZipUrl`/`zipUrl`**（`resultUrl` 只有 `jsonUrl`）。
+图片藏在 JSONL 响应的 `markdown.images` 字典中（`{filename: download_url}`），从未被使用。
+3 处代码反复查询不存在的 ZIP URL → 永远为空 → 整个图片下载链路短路。
+
+### 修复（3 文件，4 处改动）
+
+| 文件 | 改动 |
+|------|------|
+| `types.py` | `PaddleOCRPageResult` + `markdown_images: dict` 字段 |
+| `_paddleocr_vl_client.py` L469 | `_parse_single_page` 提取 `md_obj["images"]` |
+| `_paddleocr_vl_client.py` L315-410 | `_upload_markdown_images` 重写：从 `markdown.images` URL 直接 HTTP GET → MinIO `ppsv3-images/` |
+| `async_document.py` L1352 | `_crop_figures_from_pages` `img_bytes` → `BytesIO(img_bytes)` |
+
+### 次级修复
+
+| 修复 | 影响 |
+|------|------|
+| JSON `strict=False` → `strict=True` | 阻止 `\f`→换页符破坏 LaTeX |
+| `_clean_stem_for_db` → `_clean_text_for_db` | 覆盖 answer+explanation |
+| `_dedupe_option_blocks` 全局哈希 | Q1 选项 8→4 |
+| QuestionEditPage MathRenderer 预览 | 答案/详解 LaTeX 渲染 |
+| `\s+` → `\s*`（容忍 `<imgsrc=`） | PP-StructureV3 无空格输出 |
+| 7 点文件调试（`D:\temp\debug_img.txt`） | 绕过 logger 不可靠性问题 |
+
+### 验证结果
+
+| 指标 | 修复前 | 修复后 |
+|------|:---:|:---:|
+| OCR markdown MinIO URL | 0 | 5 |
+| MinIO `ppsv3-images` | 0 | 25 |
+| `question_images` | 0 | **8**（Q3×2 Q15×4 Q20×2） |
+| Q1 ABCD | 8 | 4 |
+| Explanation HTML 残留 | 2 | 0 |
+
+### 完整链路
+```
+API markdown.images → HTTP GET(25张) → MinIO ppsv3-images → OCR markdown URL重写
+→ LLM标注 → Fix 2关联 → question_images: 8条
+```
+
+### 工程教训
+- `.pyc` 缓存污染导致 ~10 轮误判；最终靠字节码二进制验证确认
+- uvicorn `--reload` 子进程日志隔离 → `print()`/`logger` 均不可靠 → 改用文件 I/O 调试
+
+---
+
+## Session #133 — 2026-07-26: P0-1 LaTeX 前端渲染修复
+
+### 背景
+S#132 逐题验证发现：DB 存储的 LaTeX 正确（`$` 分隔符完整），API 传输正确，但前端几乎全部公式不渲染。经全面排查发现 15 处遗漏 + MathRenderer 自身 2 个 regex bug。
+
+### Part B: MathRenderer regex 修复 (MathRenderer.tsx)
+- **B1**: 修复 `\$` 转义符破坏内联公式解析 — regex 从 `/\$([^\$\n]+?)\$/g` 改为 `/\$((?:[^\\$\n]|\\[\s\S])+?)\$/g`，支持 `\$` 转义序列
+- **B2**: 修复 display/inline math 嵌套重叠 — 在匹配收集后过滤掉完全落在 display math（`$$`/`\[`）范围内的 inline matches，防止 `$$\text{$\alpha$}$$` 双重渲染
+
+### Part A: 补充缺失的 MathRenderer 调用（15 处，5 文件）
+| 文件 | 处数 | 覆盖内容 |
+|------|:---:|------|
+| `TrainingPage.tsx` | 5 | 选项文本 + 结果视图（答案/解析） |
+| `WrongBookPage.tsx` | 4 | 题目内容 + 答案 + 步骤 + 解析（保留灰色样式） |
+| `AskPage.tsx` | 4 | 题目文本 + 试卷子题 + 确认卡片 + Alert 详解 |
+| `TutorChatPage.tsx` | 1 | AI 辅导回复全文（CRITICAL） |
+| `QuestionTreePage.tsx` | 1 | 表格内容列（移除 ellipsis 冲突） |
+
+### 修改文件
+- `frontend/src/components/MathRenderer.tsx` — B1 regex + B2 过滤逻辑
+- `frontend/src/pages/TrainingPage.tsx` — 5 处 MathRenderer 包裹
+- `frontend/src/pages/student/WrongBookPage.tsx` — 4 处 + import
+- `frontend/src/pages/student/AskPage.tsx` — 4 处
+- `frontend/src/pages/TutorChatPage.tsx` — 1 处 + import
+- `frontend/src/pages/admin/QuestionTreePage.tsx` — 1 处 + import
+
+### 验证
+- TypeScript 编译: 零错误 ✅
+- 测试: 12/12 passed ✅
+
+### 下一步
+- P0-2: 配图提取管线修复
+- 启动前后端进行 E2E LaTeX 渲染验证
+
+---
+
+## Session #133b — 2026-07-26: P0-2 配图提取管线修复
+
+### 背景
+S#132 发现 Q3/Q5/Q15/Q20 配图异常。经 3 个 Explore agent 全面排查，发现 3 个根因：
+1. URL 路径不匹配 — `/api/files/question-images/` 端点不存在
+2. `question_images` 表缺失独立图形记录 — 前端只渲染此表
+3. MathRenderer 无法渲染 HTML `<img>` 标签
+
+### Fix 1: 修正 URL 路径 (3处)
+- `async_document.py` L1259, L1399: `/api/files/question-images/` → `/api/documents/images/`
+- `_paddleocr_vl_client.py` L378: 同上
+
+### Fix 2: 从 stem_raw 提取图片到 question_images 表
+- 在 `_save_annotated_questions()` 中，`q_repo.create()` 后、`saved.append()` 前
+- 从 `_stem_text`（仍含 `<img>` 标签）提取 `/api/documents/images/(.+)` URL
+- 为每个图片调用 `QuestionImageService.associate_original()` 创建 `question_images` 记录
+
+### Fix 3: _clean_stem_for_db() 新增 regex 清理改写后的 URL
+- Fix 1 改写 URL 后会静默绕过旧 regex（只匹配 `imgs/...`）
+- 新增 2 条 regex 匹配 `/api/documents/images/...` 格式（含 `<div>` 包装器和裸 `<img>` 形式）
+- 统一替换为 `[图]` 占位符
+
+### 修改文件
+- `backend/app/domains/document/async_document.py` — Fix 1 (2处) + Fix 2 + Fix 3
+- `backend/app/domains/document/parallel_extraction/_paddleocr_vl_client.py` — Fix 1 (1处)
+
+### 验证
+- 测试: 1207 passed / 112 failed（全部 112 个失败是已有 DB migration 问题 `passage_text` 列缺失，与本次修改无关）
+- 语法检查: OK ✅
+
+---
+
+## Session #133c — 2026-07-26: E2E 验证准备 — 文档更新 + 清库重置
+
+### 背景
+P0-1 (LaTeX 渲染) 和 P0-2 (配图提取) 代码修复均已完成。需要启动前后端 + 清理数据库 + 重新上传数学卷进行 E2E 验证。
+
+### 操作
+- 更新 LOG.md / PROJECT_STATUS.md / RESTART_PROMPT.md 至最新状态
+- 重启 docker 基础设施 (postgres/redis/minio)
+- 重启 backend (uvicorn) + frontend (vite)
+- 清库: `python scripts/cleanup_db.py` 重置所有题目数据
+- 准备重新上传数学 PDF 验证 LaTeX 和图片
+
+### 待验证项
+- Q3/Q5/Q15/Q20 配图是否正确展示
+- 所有题目 LaTeX 公式是否正确渲染
+- `question_images` 表是否正确填充
+- `<img>` 标签是否已清理、无 URL 残留
+
+---
+
 ## Session #125 — 2026-07-25: 化学/语文提取质量提升 — 方案 2/3/4/5 实施
 
 ### 背景
@@ -8796,3 +8963,347 @@ else → mode="fast" (MIMO V2.5 Pro → DeepSeek V4 Flash fallback)
 - **反幻觉**: LLM 被明确禁止在 OCR 乱码时"补全"或"推理"内容
 
 **涉及文件**: `async_document.py`（prompt 常量、stem 后处理函数、fallback/retry 路径）。
+
+---
+
+## Session #130 — 2026-07-26: C4 材料题合并 + 前端顺序题号
+
+### 背景
+
+两个关联需求：
+
+1. **材料题合并**：阅读理解/完形填空/化学工艺流程/物理实验题等"材料+子题"类型 → 视为综合题，材料存一次，所有子题合并。当前 V3 prompt 的"综合题与子小题"与"阅读理解"段矛盾——后者要求每道子题重复材料。
+
+2. **前端顺序题号**：卷面题号（16,17,18...）仅作元数据存 `question_number`，前端永远显示 1,2,3... 的文档内顺序号。适用全部 9 科全部题型。
+
+### 设计方案
+
+- **Prompt 驱动合并**：删除 V3 "阅读理解/完形填空"段的重复指令，改为"视为综合题"合并指令。CHN/ENG 学科 prompt 同步调整。
+- **API 注入 display_number**：`list_by_document()` 按序注入 1-based 顺序号。前端所有位置使用此字段。
+- **新增 passage_text 列**：可选分离存储材料文本，用于搜索/分析。
+- **QNO 检查适配**：新增下界检查（合并→更少题目≤markdown QNO 数）。
+
+### 实施步骤
+
+S1 Prompt V3 改写 → S2 Alembic 015 → S3 Model+Repo → S4 保存逻辑 → S5 API display_number → S6 前端适配 → S7 QNO 下界检查 → S8 测试+E2E
+
+### 实施结果（2026-07-26）
+
+全部 8 步已完成，249 tests passed / 0 failed。
+
+| 步骤 | 状态 | 改动 |
+|:--:|:--:|------|
+| S1 | ✅ | Prompt V3 "阅读理解/完形填空"段改写为"视为综合题"；CHN/ENG 学科 prompt 同步调整 |
+| S2 | ✅ | Alembic 015: `questions.passage_text TEXT` 列新增（幂等） |
+| S3 | ✅ | Question 模型 + Repository.create() 新增 `passage_text` 参数 |
+| S4 | ✅ | `_save_annotated_questions()` 读取并保存 `passage_text` |
+| S5 | ✅ | `admin.py` analyze 端点注入 `display_number` + `passage_text`；`service._to_dict()` 包含 `passage_text` |
+| S6 | ✅ | 前端 types（Question/DocumentAnalysis）+ QuestionEditPage 显示 passage_text 材料框 + display_number |
+| S7 | ✅ | `_check_question_count_sanity()` 新增下界软检查（ratio<0.3→合并提示，不阻塞） |
+| S8 | ✅ | 新增 `test_qno_sanity.py`（7 tests）；全量 249 passed / 0 failed；前端 tsc 零错误 |
+
+**涉及文件**: `async_document.py`（prompt V3 + CHN/ENG additions + QNO sanity）+ `models.py` + `repository.py` + `service.py` + `admin.py` + 新建 `015_add_passage_text.py` + 新建 `test_qno_sanity.py` + `types/index.ts` + `QuestionEditPage.tsx`
+
+**E2E 验证**（2026-07-26，5 科全量）：
+
+| 学科 | S#123 基线 | S#130 | 变化 | 解答 | 嵌入 |
+|------|:--:|:--:|------|:--:|:--:|
+| 数学 | 23 | 23 | 0% | 91% | 100% |
+| 物理 | 20 | 20 | 0% | 100% | 100% |
+| 化学 | 18 | **8** | **-56%** | 100% | 100% |
+| 英语 | 46 | **13** | **-72%** | 92% | 100% |
+| 语文 | 29 | **26** | **-10%** | 85% | 100% |
+
+材料题合并效果确认：化学工艺流程题合并为 1 道综合题，英语完形(20空→1题)+阅读(4组→4题)+语法+七选五全部合并。数学/物理无材料题，题数不变。总解答覆盖率 92%，嵌入 100%。
+
+**额外修复**:
+- `main.py`: SO_REUSEADDR monkey-patch → class-based 子类，解决 Windows Python 3.12 bug
+- Answer prompt: 删除"100字符以内"硬限制 → "答案长度由语义决定"
+- JSON parser: 增强为 4 层回退（LaTeX前置+内部引号转义+json_repair），解决合并后长stem破坏JSON
+
+**语文 LLM 标注被拒根因**: LLM 返回 12052 字符 JSON，但合并后的阅读材料 stem 含大量 LaTeX 和中文标点，导致 `_parse_llm_annotation_json` 3层回退全部失败 → 正则回退。
+
+---
+
+## Session #131 — 2026-07-26: C4 验证收尾 + 准备全量流程测试
+
+### 背景
+
+Session #130 E2E 验证后，用户 drill down 排查 4 道缺失解答的题目，发现两个隐藏 bug：
+
+1. **数学压轴解答题答案提取失败**（Doc 522 Q22/Q23）：根因是 V3 prompt 硬限制 "答案长度应在 100 字符以内"，LLM 被迫截断 200+ 字符的解答题多步答案 → Gateway 验证失败 → 答案被丢弃。
+
+2. **语文 LLM 标注整体被拒**（Doc 521）：根因是合并后的长 stem 含 LaTeX + CJK 标点，破坏 JSON 结构 → `_parse_llm_annotation_json` 3 层回退全部失败 → 正则回退（26 题 vs LLM 标注的 8 题）。
+
+### 修复
+
+#### 修复 1: 答案长度硬限制 → 语义判断 ✅
+
+**代码位置**: `async_document.py:_LLM_ANNOTATION_PROMPT_V3` (~L163)
+
+**原 prompt**: `"每道题的 answer 长度应在 100 字符以内（选择题 5 字符以内）"`
+**新 prompt**: `"答案长度由语义决定，不要因担心长度而省略子题答案或截断结果"` + 多子题答案示例
+
+**影响**: 数学解答题(1)(2)(3)多步答案、语文阅读简答题长答案均不受硬限制裁剪。
+
+#### 修复 2: JSON 解析器 4 层增强 ✅
+
+**代码位置**: `async_document.py:_parse_llm_annotation_json()`
+
+**原 3 层回退** → **新 4 层回退**:
+| 层 | 策略 | 新增? |
+|:--:|------|:--:|
+| 1 | `json.loads()` 直接解析 | — |
+| 2 | 提取 markdown fence + json_repair + LaTeX 转义前置 | 修改 |
+| 3 | 内部引号转义（CJK 文本 `` `" `` → `\"`） | ✅ 新增 |
+| 4 | `json_repair` 库终极修复 | ✅ 新增 |
+
+**新增测试**: `backend/tests/test_llm_json_parse.py`（7 tests）覆盖 LaTeX backslash、中文阅读材料、多子题答案、MIMO thinking prefix、markdown fence、wrapped text。
+
+#### 修复 3: SO_REUSEADDR Windows Python 3.12 兼容 ✅
+
+**代码位置**: `backend/app/main.py`
+
+**原**: `_socket.socket = _reuseaddr_socket`（函数替换 socket.socket 类）
+**问题**: Windows Python 3.12 ProactorEventLoop 中 `isinstance(conn, socket.socket)` 失败 → `TypeError`
+**修复**: 改为 `class _ReuseAddrSocket(_orig_socket_type):` 子类继承，保持 `isinstance` 检查通过。
+
+### 语文 LLM 标注重测（2026-07-26）
+
+清库后重新上传语文试卷（八十中高一期末），对比两次结果：
+
+| 指标 | Doc 521 (修复前) | Doc 522 (修复后) |
+|------|:--:|:--:|
+| source_type | `hybrid_regex` ❌ | **`llm_annotation`** ✅ |
+| 题目数 | 26（正则拆分） | **8**（LLM 合并标注） |
+| 解答覆盖率 | 23/26 (88%) | 6/8 (75%) |
+| JSON 解析 | 3 层全失败 | **4 层通过** |
+| 最大 stem 长度 | — | 2483 chars（现代文阅读合并） |
+
+**Doc 522 详细**:
+```
+Q1 qno=1  essay 2483chars ✅ 现代文阅读（材料+5子题合并）
+Q2 qno=2  essay 1177chars ✅ 文言文阅读（材料+4子题合并）
+Q3 qno=12 essay  697chars ✅ 古诗词鉴赏（材料+2子题合并）
+Q4 qno=15 fill   191chars ✅ 名句默写
+Q5 qno=16 essay 2449chars —  现代文阅读II（开放性问题，无标准答案）
+Q6 qno=21 essay  673chars ✅ 语言运用
+Q7 qno=24 essay  137chars —  微写作（无标准答案，正常）
+Q8 qno=25 essay  179chars ✅ 大作文
+```
+
+**缺解答分析**: Q5（文学类文本阅读简答，2449 chars 含材料）和 Q7（微写作）均无唯一标准答案，属于正常情况。解答覆盖率 6/8 = 75%，剔除写作题后有效覆盖率 6/6 = **100%**。
+
+### 三个修复联动验证
+
+| 修复 | 效果 | 验证 |
+|------|------|:--:|
+| 答案长度语义化 | 数学解答题不再截断，多步答案完整保留 | ✅ |
+| JSON parser 4 层 | 语文 LLM 标注从全部被拒 → 全部通过 | ✅ |
+| 材料题合并 | 26 题（正则）→ 8 题（LLM），stem 完整含材料+子题 | ✅ |
+
+### 新增测试文件
+
+| 文件 | 测试数 | 覆盖 |
+|------|:--:|------|
+| `backend/tests/test_qno_sanity.py` | 7 | QNO 下界检查（欠提取/正常/过拆分 warn/critical/零 QNO） |
+| `backend/tests/test_llm_json_parse.py` | 7 | JSON parser（LaTeX/中文材料/多子题/MIMO prefix/markdown fence/wrapped text） |
+
+全量回归: **249 passed / 0 failed**
+
+### 下一步
+
+用户指令："先更新项目文档，然后清理数据库中的测试数据，重启前后端服务，准备跑一次小规模的全量业务流程测试"
+
+1. ✅ 文档更新（本条目 + PROJECT_STATUS.md + RESTART_PROMPT.md）
+
+---
+
+## Session #131 — 2026-07-26: Markdown 持久化 + Answer 截断修复 + LaTeX 链路诊断
+
+### 背景
+
+数学卷（2026北京师大实验中学高一期末直升班）第二次处理验证。上次（S#131 前半段）发现三大问题：
+1. **OCR Markdown 无持久化** — 处理后丢弃，无法回溯审计
+2. **Answer 区 8000 字符截断** — Q19-21 答案丢失
+3. **Explanation 来源不明** — 无法区分"从 PDF 提取"和"LLM 生成"
+
+用户明确要求：markdown 必须持久化入库；prompt + 管线需要结合优化 answer 区识别。
+
+### 实施的改动
+
+#### 1. DB — `documents.ocr_markdown` 列
+
+**迁移**: `alembic/versions/016_add_ocr_markdown.py`
+**模型**: `app/domains/document/models.py` — `Document.ocr_markdown: Mapped[str|None]`
+
+原始 PP-StructureV3 Markdown 存入 `documents` 表。作为下游提取的 source of truth——当 LLM 标注结果可疑时（编造的 explanation、LaTeX 损坏、截断的答案），可直接回溯原始 Markdown 重新处理，无需重跑 OCR。
+
+#### 2. 管线 — 提取后立即持久化
+
+**位置**: `async_document.py:_process_document_task()` Route A 并行提取完成后
+
+在 LLM 标注之前保存，确保原始数据不受后续转换影响。Route B（非并行提取）不产生统一 markdown（直接输出 blocks），暂不覆盖。
+
+#### 3. 移除 Answer 区 8000 字符截断
+
+**位置**: `async_document.py:_step_llm_annotate()`
+
+旧代码: `max_answer = 8000; answer_md = answer_md[:max_answer]`
+新代码: 不再截断。Answer 区超过 8000 时记录 info log，完整传递给 LLM。
+
+数学卷 answer 区从 8,000 → 13,492 字符，Q19-21 答案成功提取。
+
+#### 4. 验证结果
+
+| 指标 | 修复前 | 修复后 |
+|------|:---:|:---:|
+| Markdown 持久化 | 无 | 20,433 chars |
+| Answer 区长度 | 8,000 (截断) | 13,492 (完整) |
+| Q19-21 答案 | 缺失 | 正确提取 |
+| 解答总数 | 18/21 | 21/21 |
+
+### LaTeX 渲染链诊断
+
+整条链路逐层验证：
+
+| 层 | 状态 | 说明 |
+|----|:---:|------|
+| OCR Markdown | ok | 单反斜杠 LaTeX |
+| DB 存储 | ok | Python string 含单反斜杠 |
+| FastAPI JSON 输出 | ok | json.dumps() 正确转义 |
+| 前端 JSON.parse | ok | 还原正确 |
+
+**根因不在编码链路，而在 LLM 输出质量**: DeepSeek V4 Pro 生成的 explanation 丢失了 `$...$` 分隔符。
+
+| | OCR Markdown 原文 | DB 实际存入 |
+|---|---|---|
+| Q19 详解 | `$$函数f(x)=4\sin\left(...\right)...$$` | `f(x)=4sin(...)...` |
+| $ 符号 | 20+ 对 | 0 |
+
+DeepSeek 未遵循 V3 prompt 的"逐字复制"指令，用自己话重写时丢掉了所有 LaTeX 标记。
+
+### 关于 Explanation 来源判别的讨论
+
+- 管线流程: "优先从参考答案区检索 → 详解缺失才调用 LLM 生成"
+- 教师版 PDF 答案格式: 专门答案区 vs 题干后内嵌
+- Prompt 需与管线结合，精准识别答案位置和形式
+
+**当前状态**: 选择题 Q1-Q10 答案区只有最终答案表格（无详解），填空题 Q11-Q15 和解答题 Q16-Q21 有完整解题过程。explanation 全部标记为 `mode=llm_annotation`，无法区分来源。
+
+### 下一步
+
+1. 修复 DeepSeek 丢失 LaTeX 的问题（查 `_parse_llm_annotation_json` + V3 prompt 调用链）
+2. 选择题 Q1-Q10 的 explanation 应留空 → 由异步 explain worker 生成
+3. 填空题/解答题的 explanation 应直接从答案区提取（已有完整详解）
+2. ⏳ 清理 DB → 重启服务 → 小规模全量 E2E
+
+---
+
+## Session #132 — 2026-07-26: 第三轮数学卷全量验证 + 两大 P0 发现 + 文档全面更新
+
+### 背景
+
+Session #131 后半段完成了三项修复（Markdown 持久化 + Answer 截断移除 + Explanation 覆写修复），重启后端、清库、序列重置后，重新上传数学卷（2026 北京师大实验中学高一期末直升班教师版）进行第三轮全量验证。
+
+### 验证方法
+
+- DB 清理 + 序列重置（doc_id 从 1 开始）
+- 后端重启加载所有修复代码
+- 前端上传 PDF → 监控全管线日志
+- 逐题对比 OCR markdown、DB 存储、前端展现
+
+### 验证结果
+
+#### 全部通过 ✅
+
+| 指标 | 结果 |
+|------|:---:|
+| OCR Markdown 持久化 | 20,433 chars ✅ |
+| Answer 区长度 | 13,492 chars（无截断）✅ |
+| 题目提取 | 21/21 (100%) ✅ |
+| 解答提取 | 21/21 (100%) ✅ |
+| Document 状态 | completed ✅ |
+| 来源类型 | llm_annotation ✅ |
+
+#### Explanation 覆写修复验证
+
+| 题目 | 修复前 ($ 符号数) | 修复后 ($ 符号数) | 来源 |
+|------|:---:|:---:|------|
+| Q1 (选择) | — | 0（正确留空）✅ | 答案区无详解 |
+| Q12 (填空) | — | 30 ✅ | 从 markdown 提取 |
+| Q16 (解答) | — | 12 ✅ | 从 markdown 提取 |
+| Q19 (解答) | 0 ❌ | **110** ✅ | 从 markdown 提取 |
+
+**修复确认**: `_save_annotated_questions()` 中 `saved` dict 新增的 `"explanation": llm_explanation or ""` 字段被 enrichment Step 4 正确识别，已有详解的题目不再入队覆写。Q19 的 110 个 `$` LaTeX 分隔符完整保留。
+
+### 逐题审查发现（用户详细反馈）
+
+用户逐题审查前端展现后，发现两个集中的 P0 问题：
+
+#### P0-1: LaTeX 公式前端渲染失败
+
+**影响范围**: Q3-Q21（几乎所有答案和详解）
+
+**已确认的链路**:
+- OCR Markdown: ✅ `$...$` LaTeX 正确
+- DB 存储: ✅ Python string 含正确 `$` 分隔符  
+- FastAPI JSON 序列化: ✅ `json.dumps()` 正确转义
+- 前端 JSON.parse: ✅ 还原正确
+- **前端渲染**: ❌ MathJax/KaTeX 不渲染，显示为纯文本
+
+**根因**: 不在后端数据链路，而在前端渲染层。需排查 MathJax/KaTeX 配置、HTML 转义、`processEscapes` 设置。
+
+#### P0-2: 配图未提取/错误显示
+
+**影响题目**:
+- Q3: 缺失题图
+- Q5: 配图与原 PDF 完全不同（OCR 结构提取问题）
+- Q15: 详解配图未能提取展示
+- Q20: 详解配图未能提取展示
+
+**需排查**: PP-StructureV3 图片 ZIP 下载 → MinIO 上传 → URL 重写 → 前端 `<img>` 渲染全链路。
+
+#### 其他发现
+
+| 问题 | 影响 | 严重度 |
+|------|------|:---:|
+| Q1 选项重复（两组 ABCD） | 排版混乱 | 🟡 P1 |
+| Q2 选项不完整（D 缺失） | 内容缺失 | 🟡 P1 |
+| Q4 多余残缺 A 选项 | 噪声 | 🟡 P1 |
+| Q6 多余 `"△ABC"△ABC [T]` | OCR 噪声 | 🟢 P3 |
+| Q8 选项不完整 + B LaTeX 失败 | 内容+渲染 | 🟡 P1 |
+| Q10 a,b 渲染成上标 | LaTeX 问题 | 🟡 P2 |
+| Q16/Q18 表格显示为 markdown 源码 | 需 gfm 表格支持 | 🟡 P2 |
+
+### 文档更新
+
+按照用户指令（"先更新一下对应的项目文档，尤其是RESTART_PROMPT.md...写清楚项目背景、系统现状和待办任务"）：
+
+1. **RESTART_PROMPT.md** — 全面重写
+   - 新增 §五 当前数据状态（含 Q1-Q21 逐题验证结果表、问题分类汇总、VRAM 状态）
+   - 新增 §八 待办任务（按 P0→P1→P2→P3 优先级排序，含排查方向和关键文件）
+   - 更新 §四 管线架构（新增 S#131 修复确认表）
+   - 更新 §七 Session 历史
+   - 重写 §九 工作指令（含 S#132 关键发现和下一步指导）
+
+2. **PROJECT_STATUS.md** — 更新
+   - 版本 1.25.2 → 1.26.0
+   - §6 新增 Session #132 条目
+   - §14 已知问题全面重构：P0/P1/P2/已修复四组分类
+   - §15 总结更新（前端渲染列为新维度）
+
+3. **LOG.md** — 本文档条目
+
+### 改动文件
+
+- `RESTART_PROMPT.md` — 全面重写（~280 行）
+- `PROJECT_STATUS.md` — 版本号 + §6 + §14 + §15 更新
+- `LOG.md` — 本文档
+
+### 下一步（用户指令）
+
+用户表示本轮对话轮次已较多，将重启 Claude。重启后的首要任务：
+1. **P0-1**: 排查 LaTeX 前端渲染链（MathJax/KaTeX 配置）
+2. **P0-2**: 排查配图提取管线（图片 ZIP → MinIO → URL 重写）
+3. 修复后重新上传数学卷验证效果

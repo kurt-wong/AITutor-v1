@@ -80,7 +80,13 @@ class QuestionService:
             limit=limit,
             exclude_generated=True,
         )
-        total = await self.repo.count_all(exclude_generated=True)
+        total = await self.repo.count_all(
+            exclude_generated=True,
+            subject_id=subject_id,
+            difficulty=difficulty,
+            document_id=document_id,
+            query=keyword or "",
+        )
         return {
             "questions": [self._to_dict(q) for q in questions],
             "total": total,
@@ -138,4 +144,6 @@ class QuestionService:
             "difficulty": q.difficulty,
             "source_type": q.source_type,
             "created_at": q.created_at.isoformat(),
+            # Session #130: Expose passage_text for material-based groups
+            "passage_text": getattr(q, "passage_text", None),
         }

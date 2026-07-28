@@ -25,6 +25,8 @@ interface QuestionDetail {
   subject_id: number | null;
   subject_name: string | null;
   question_number: string | null;
+  display_number?: number;  // Session #130
+  passage_text?: string | null;  // Session #130
   content: string;
   difficulty: number | null;
   source_type: string | null;
@@ -144,7 +146,22 @@ export default function QuestionEditPage() {
       <Spin spinning={loading}>
         {question ? (
           <Card>
-            <Tag color="blue">#{question.id}</Tag>
+            <Space style={{ marginBottom: 8 }}>
+              <Tag color="blue">#{question.display_number || question.id}</Tag>
+              {question.question_number && (
+                <Tag color="default">卷面题号: {question.question_number}</Tag>
+              )}
+            </Space>
+            {question.passage_text && (
+              <Paragraph style={{
+                marginTop: 8, padding: 12, whiteSpace: "pre-wrap",
+                background: "#f5f5f5", borderRadius: 6, borderLeft: "3px solid #1890ff",
+              }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>📖 阅读材料</Text>
+                <br />
+                <MathRenderer content={question.passage_text} />
+              </Paragraph>
+            )}
             <Paragraph style={{ marginTop: 8, whiteSpace: "pre-wrap" }}><MathRenderer content={question.content || ""} /></Paragraph>
             {question.subject_name && <Tag>{question.subject_name}</Tag>}
             {question.images && question.images.length > 0 && (
@@ -177,11 +194,13 @@ export default function QuestionEditPage() {
             <Divider />
             <Title level={5}>解答</Title>
             <Text strong>答案:</Text>
-            <TextArea value={editAnswer} onChange={(e) => setEditAnswer(e.target.value)} rows={2} style={{ marginBottom: 8 }} />
-            <Text strong>步骤 (JSON):</Text>
-            <TextArea value={editSteps} onChange={(e) => setEditSteps(e.target.value)} rows={4} style={{ marginBottom: 8 }} />
+            <Paragraph style={{ background: "#fafafa", padding: 8, borderRadius: 4, minHeight: 32, whiteSpace: "pre-wrap" }}>
+              <MathRenderer content={editAnswer || (question?.solution?.final_answer || "")} />
+            </Paragraph>
             <Text strong>讲解:</Text>
-            <TextArea value={editExplanation} onChange={(e) => setEditExplanation(e.target.value)} rows={3} style={{ marginBottom: 8 }} />
+            <Paragraph style={{ background: "#fafafa", padding: 8, borderRadius: 4, minHeight: 32, whiteSpace: "pre-wrap" }}>
+              <MathRenderer content={editExplanation || (question?.solution?.explanation || "")} />
+            </Paragraph>
             <Space>
               <Button type="primary" icon={<SaveOutlined />} onClick={handleSaveSolution} loading={saving}>保存解答</Button>
               <Button danger icon={<DeleteOutlined />} onClick={handleDelete}>删除题目</Button>

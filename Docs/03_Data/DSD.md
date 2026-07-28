@@ -775,6 +775,8 @@ ALTER TABLE documents ADD COLUMN year INTEGER;
 ALTER TABLE documents ADD COLUMN school VARCHAR(100);
 ALTER TABLE documents ADD COLUMN district VARCHAR(100);
 ALTER TABLE documents ADD COLUMN exam_type VARCHAR(50);
+-- Session #131: Raw PP-StructureV3 OCR Markdown — source of truth for downstream extraction
+ALTER TABLE documents ADD COLUMN ocr_markdown TEXT;
 ```
 
 ---

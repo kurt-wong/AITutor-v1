@@ -443,9 +443,9 @@ class LLMGatewayMCPServer(MCPServerBase):
 
                     # Also try to salvage solution_steps from raw JSON
                     if not solution_steps:
-                        steps_match = _re.search(
+                        steps_match = re.search(
                             r'"(?:solution_steps|教学步骤|解题步骤|步骤|steps)"\s*:\s*(\[[^\]]*\])',
-                            raw_response, _re.DOTALL,
+                            raw_response, re.DOTALL,
                         )
                         if steps_match:
                             try:

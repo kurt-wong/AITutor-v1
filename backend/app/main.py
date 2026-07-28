@@ -23,26 +23,46 @@ from app.core.logging import get_logger, setup_logging
 
 logger = get_logger("app.main")
 
-# ── Session #120: Windows TCP port zombie mitigation ──────────────────
+# ── Session #120/130/131: Windows TCP port zombie mitigation ──────────
 # On Windows, when a process crashes the TCP port may remain in TIME_WAIT
 # for up to 120s (TcpTimedWaitDelay default).  Setting SO_REUSEADDR on
 # the server socket before uvicorn binds allows immediate rebinding.
-# This monkey-patch modifies the default server socket creation to include
-# SO_REUSEADDR, which is safe in single-process deployment scenarios.
+#
+# Approach (S#131): metaclass + __new__ that returns a real socket.socket
+# instance.  This satisfies three constraints simultaneously:
+#   1. _socket.socket is a type (not a function) → isinstance() works
+#   2. The returned object IS a real socket.socket → pickling works
+#      (uvicorn StatReload uses spawn on Windows, which pickles args)
+#   3. SO_REUSEADDR is set on every socket created through this path
+# Prior approaches failed: plain function broke isinstance (S#120),
+# socket subclass broke pickle on Windows spawn (S#130).
 
-_orig_socket_create = _socket.socket
-
-
-def _reuseaddr_socket(*args, **kwargs):
-    sock = _orig_socket_create(*args, **kwargs)
-    try:
-        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    except OSError:
-        pass
-    return sock
+_orig_socket_type = _socket.socket
 
 
-_socket.socket = _reuseaddr_socket
+class _ReuseAddrSocketMeta(type):
+    """Metaclass: isinstance(sock, _ReuseAddrSocket) → isinstance(sock, socket.socket)."""
+    def __instancecheck__(cls, instance):
+        return isinstance(instance, _orig_socket_type)
+
+
+class _ReuseAddrSocket(metaclass=_ReuseAddrSocketMeta):
+    """Callable type that creates real socket.socket objects with SO_REUSEADDR.
+
+    __new__ returns a genuine socket.socket (not an instance of this class),
+    so the returned objects pickle identically to unpatched sockets.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        sock = _orig_socket_type(*args, **kwargs)
+        try:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        except OSError:
+            pass
+        return sock
+
+
+_socket.socket = _ReuseAddrSocket
 
 
 @asynccontextmanager

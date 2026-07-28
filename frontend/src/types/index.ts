@@ -79,6 +79,10 @@ export interface DocumentAnalysis {
     difficulty: number | null;
     question_number: number | null;
     source_type: string;
+    /** Session #130: 1-based sequential display number within document */
+    display_number?: number;
+    /** Session #130: shared reading/experiment passage text */
+    passage_text?: string | null;
   }[];
   questions_count: number;
   difficulty_distribution: Record<number, number>;
@@ -98,6 +102,10 @@ export interface Question {
   difficulty: number | null;
   source_type: string;
   created_at: string;
+  /** Session #130: 1-based sequential display number within document */
+  display_number?: number;
+  /** Session #130: shared reading/experiment passage text */
+  passage_text?: string | null;
 }
 
 export interface QuestionRow {

@@ -386,7 +386,7 @@ export default function AskPage() {
           <Card key={q.id} id={`question-card-${q.id}`} className="card-hover-lift" style={{ marginBottom: 12 }}>
             <div style={{ marginBottom: 12 }}>
               <Tag color="blue">我的提问</Tag>
-              <Paragraph style={{ marginTop: 4 }}>{q.text || "（图片题目）"}</Paragraph>
+              <Paragraph style={{ marginTop: 4 }}><MathRenderer content={q.text || "（图片题目）"} /></Paragraph>
               {q.image && <Tag icon={<CameraOutlined />}>{q.image}</Tag>}
               {q.images && q.images.length > 0 && (
                 <div style={{ marginTop: 8 }}>
@@ -465,7 +465,7 @@ export default function AskPage() {
                               </Checkbox>
                             }
                           >
-                            <Paragraph style={{ margin: 0 }}>{eq.text}</Paragraph>
+                            <Paragraph style={{ margin: 0 }}><MathRenderer content={eq.text} /></Paragraph>
                             {eq.images && eq.images.length > 0 && (
                               <div style={{ marginTop: 8 }}>
                                 <Image.PreviewGroup>
@@ -505,7 +505,7 @@ export default function AskPage() {
                             whiteSpace: "pre-wrap",
                           }}
                         >
-                          {q.text || "（未能识别题目文字，请手动输入）"}
+                          <MathRenderer content={q.text || "（未能识别题目文字，请手动输入）"} />
                         </Paragraph>
                         {q.images && q.images.length > 0 && (
                           <div style={{ marginTop: 8 }}>
@@ -621,7 +621,7 @@ export default function AskPage() {
                 {q.solution.explanation && (
                   <Alert
                     message="总结"
-                    description={q.solution.explanation}
+                    description={<MathRenderer content={q.solution.explanation || ""} />}
                     type="success"
                     style={{ marginTop: 12 }}
                   />

@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.domains.question.structurer import _strip_page_markers
@@ -55,6 +56,12 @@ _LLM_ANNOTATION_PROMPT_V3 = """\
 
 请提取所有题目信息，返回严格的 JSON。请完整输出所有题目，不要省略任何内容。输出可以很长（最多 80000 字符），优先保证每道题目的 stem、options 内容完整性。宁可输出更长，也不能截断题目。
 
+**⚠️ LaTeX JSON 转义规则（必读）**：stem/answer/explanation 中的 LaTeX 公式会出现在 JSON 字符串内。JSON 字符串中反斜杠必须写为双反斜杠。例如：
+- 原文中的 $f(x)=\\frac{1}{x}$（单反斜杠）→ JSON 中必须写为 "$f(x)=\\\\frac{1}{x}$"（双反斜杠）
+- 原文中的 $\\mathbf{F}=m\\mathbf{a}$ → JSON 中必须写为 "$\\\\mathbf{F}=m\\\\mathbf{a}$"
+- 原文中的 $$\\begin{array}{cc}...$$ → JSON 中必须写为 "$$\\\\begin{array}{cc}...$$"
+**所有 LaTeX 反斜杠必须在 JSON 中双写**。这是 JSON 格式的硬性要求，不双写将导致整个 JSON 解析失败。
+
 ## 输出格式
 
 {
@@ -83,15 +90,33 @@ _LLM_ANNOTATION_PROMPT_V3 = """\
 - 从该题 QNO 开始，到下一题 QNO 之前（或文档结束）的所有内容
 - 必须保留所有 LaTeX（$...$、$$...$$）、图片引用（![...](...)）、HTML 表格、换行、缩进
 - stem 中移除【答案】和【详解】标记及其后的内容（放入 answer/explanation 字段）
-- 选择题：stem 必须包含 A/B/C/D 四个选项的完整文本（保持原始排版，不要重新格式化）
 - 解答题/填空题：stem 包含题目完整叙述和各小题编号
 
-### 阅读理解/完形填空 — 材料文本必须包含在 stem 中
-- 对于阅读理解题（如语文、英语），一组题目前通常有一段或多段**材料/文章**，之后是若干基于该材料的问题
-- **必须**将材料文本包含在**该组第一道题的 stem 开头**（所有依赖该材料的题目都要能看到完整材料）
-- 每道依赖材料的题的 stem = 材料文本 + 该题的具体问题
-- 例如：一篇文章后跟 3 道题 → Q1 stem 以文章全文开头，再跟 Q1 具体问题；Q2 stem 同样以文章全文开头，再跟 Q2 问题；以此类推
-- 不要只提取问题而省略材料——没有材料，单独的问题无法作答
+### 选项提取规则（选择题专用）
+
+- **每个选择题的 stem 必须包含全部 4 个选项（A/B/C/D），一个都不能少**
+- 即使某个选项在 OCR 中跨行、截断、或含噪声字符，也必须提取该选项的完整文本
+- **禁止省略任何选项** — 这是硬性要求，选项不完整视为提取失败
+- 跨行选项合并规则：如果某选项文本被换行打断（如 "A.第一行内容\\n第二行内容"），将其合并为 "A.第一行内容第二行内容"
+- OCR 噪声处理：选项中的孤立 `|` 字符属于 OCR 换行伪影，可直接删除
+- **禁止选项重复**：如果 OCR 输出中同一选项因换行被重复输出（如一个残缺 A + 一个完整 A），只保留完整的版本；如遇内容不同的重复选项，保留与题干语境最匹配的版本，无法判断时保留较长的版本
+
+### 阅读理解/完形填空/材料题 — 视为综合题（重要 — S#130 新增）
+
+对于阅读材料后跟若干子题的题目组，**必须将整组视为一道综合题**，不要拆成独立题目。这包括但不限于：
+- 语文：现代文阅读、文言文阅读、古诗词鉴赏、信息类文本、文学类文本
+- 英语：阅读理解、完形填空、语法填空、七选五、读后续写（故事材料部分）
+- 化学：工艺流程题（材料描述+若干子题）、综合实验题
+- 物理：综合实验题（实验目的+器材+步骤+数据+若干子题）
+- 生物：实验设计题（实验目的+材料+分组+变量+若干子题）
+- 判断方法：如果多道题共享同一段材料/文章/实验描述，它们属于同一道综合题
+
+**合并规则**：
+- qno = 该组第一道题的大题号
+- stem = **材料全文** + 所有子题题干（逐字复制，包括子编号 (1)(2)(3)、①②③、a)b)c) 等）
+- answer = 所有子题的答案（用子题编号标注，如 "(1) B (2) C (3) 0.5 mol/L"）
+- explanation = 所有子题的详解（用子题编号标注）
+- type = "essay"（阅读/材料类综合题统一使用此类型）
 
 ### 综合题与子小题（重要 — 防止过度拆分）
 - 文档中可能包含**综合大题**（推断题、实验题、流程题、综合计算题等），一个大题号下设若干子问题
@@ -136,7 +161,7 @@ OCR 输出的 Markdown 可能会存在乱码、缺字、公式扭曲等问题。
 4. **禁止将解答题的 answer 留空**（除非参考答案区确实没有该题号）
 5. **禁止填写**"参考答案"、"略"、"见解析"、"详见解析"
 
-### answer 字段（关键 — 必须准确、简短、仅含最终结果）
+### answer 字段（关键 — 必须准确、仅含最终结果，但不要因长度限制而截断）
 
 **严格禁止以下行为（会导致答案被拒绝）**：
 - ❌ 将整个「参考答案」区的文本复制到一个题目的 answer 中（每道题只需自己的答案）
@@ -148,9 +173,9 @@ OCR 输出的 Markdown 可能会存在乱码、缺字、公式扭曲等问题。
 **正确格式**：
 - 选择题：严格单个字母（A 或 B 或 C 或 D），仅此而已。例如："B"（不是 "B.选项内容"）
 - 填空题：最终数值/表达式/短语。例如："-2"、"(-∞, 2]"、"2"、"m=-1"
-- 解答题：仅提取最终结果。例如："最小正周期为π"、"a的取值范围为(-∞,2]"
+- 解答题：提取该题号的**全部最终结果**。如果题目有多个子题（如 (1)(2)(3)），每个子题的答案都要包含，用子编号标注。例如："(1) a=1 (2) m 的取值范围为 [-1,3] (3) k=2 或 k=-1"
 - 如果确实找不到答案，填 ""（但必须在参考答案区仔细逐题查找后才可填 ""）
-- **每道题的 answer 长度应在 100 字符以内（选择题 5 字符以内）**
+- **答案长度由语义决定，不要因担心长度而省略子题答案或截断结果**。选择题通常 1 个字母，填空题通常 1 行，但多子题解答题的答案可能数十字——这是完全正常的
 
 ### explanation 字段（重要 — 本次改进）
 解释/详解有两个可能来源：
@@ -237,8 +262,8 @@ _SUBJECT_PROMPT_ADDITIONS: dict[str, str] = {
 ## 语文学科特别指令
 
 ### 阅读理解 — 材料处理（最高优先级）
-- 语文阅读理解的材料（文章、散文、小说节选）通常篇幅很长（500-2000 字），必须完整包含在依赖该材料的每道题 stem 开头
-- 如果多道题共享同一篇材料，每道题的 stem = 材料全文 + 该题具体问题
+- 语文阅读理解的材料（文章、散文、小说节选）通常篇幅很长（500-2000 字），**将整组视为一道综合题**
+- stem = 材料全文 + 所有子题题干（逐字复制）——不要将各子题拆成独立题目
 - 材料中可能包含 OCR 断行（段落中断、换行错位），请尽量修复段落结构，但不要改动文字内容
 
 ### 文言文阅读
@@ -258,12 +283,122 @@ _SUBJECT_PROMPT_ADDITIONS: dict[str, str] = {
 - 语文主观题（简答、鉴赏、论述）的 answer 可以是关键词/要点，也可以是原文中的关键句——从参考答案区提取
 - 发散性题目（如"谈谈你的理解"）答案可能以要点形式给出（"①... ②... ③..."），完整保留
 - 作文题没有标准答案，answer 设为 ""，但 stem 必须包含完整的写作要求""",
+
+    # ── Session #12x: Physics / Biology / English additions ──────────
+
+    "PHYS": """## 物理学科特别指令
+
+### 物理公式与符号
+- 物理公式中的 LaTeX 表示（如 $F=ma$、$E=mc^2$、$U=IR$）是题目的核心内容，必须在 stem 中完整保留，不要转写为普通文本
+- 希腊字母（α、β、γ、θ、μ、Δ、Σ、Ω 等）在 OCR 中可能转为普通字母（alpha、beta、gamma 等），保持原文不做修正
+- 矢量符号（如 $\\vec{v}$、$\\vec{F}$、$\\vec{B}$）和单位（如 m/s、N、Pa、J、W、V、Ω）是物理量的组成部分，必须保留
+- 上下标（如 v₀、t²、x₁）即使 OCR 转为普通字符也保持原样
+- 物理常数（g=10 m/s²、k=9×10⁹ N·m²/C²、e=1.6×10⁻¹⁹ C 等）如在题目中出现则保留
+
+### 实验题处理
+- 物理实验题的 stem 通常包含：实验目的 + 实验器材列表 + 实验步骤 + 数据记录表格 + 数据分析问题
+- 实验器材列表（如"打点计时器、小车、砝码、纸带"）和实验电路图描述是 stem 的组成部分，必须完整保留
+- 实验数据表格（如测量值、次数、物理量）在 OCR 中可能转为 HTML <table> 或纯文本——无论哪种形式，必须逐字复制到 stem 中
+- 数据处理公式（如逐差法 $\\Delta x = aT^2$）和误差分析属于对应题目的 stem
+
+### 图表与受力分析
+- 受力分析图、电路图、光路图、运动图像（v-t、x-t 图）在 OCR 中可能以 ![](image) 引用或文字描述形式出现，必须保留在 stem 中
+- 图像描述（如"如图甲所示"、"如图 2 所示"）是题目定位的关键信息，不要删除
+- 坐标系、标度、图例文字即使在 OCR 中破碎也要保留
+
+### 计算题特征
+- 物理计算题通常需要多步推理（受力分析 → 列方程 → 代数值 → 计算结果），每步涉及的公式和推导都对应一个子问题
+- 注意单位换算（如 km→m、km/h→m/s、cm→m、g→kg、mA→A），这些可能出现在题目条件中
+- 计算题的答案通常是数值+单位（如"2 m/s"、"10 N"、"5 Ω"），放在 answer 字段
+
+### 多选题特征
+- 物理多选题（multi_choice）的选项通常有 4-6 个（A-F），可能使用"全部正确"或"全部错误"等综合选项
+- 多选题的 answer 应包含所有正确选项字母（如"ABD"），不要遗漏
+- 选项数量多于 4 个时（A/B/C/D/E/F），全部保留""",
+
+    "BIO": """## 生物学科特别指令
+
+### 生物学术语精确度
+- 生物学术语（如"有丝分裂"、"减数分裂"、"光合作用"、"呼吸作用"、"基因突变"、"染色体变异"）是学科核心词汇，必须在 stem 中逐字保留，不可用白话改写
+- 物种名称（如"大肠杆菌"、"酵母菌"、"果蝇"、"拟南芥"）和器官/结构名称（如"线粒体"、"叶绿体"、"内质网"、"核糖体"）保持 OCR 原文
+- 基因符号（如 Aa、Bb、XᴬXᵃ、Yᴿ）在 OCR 中可能出现变形，保持原文不要修正
+- 拉丁学名（如 Escherichia coli、Saccharomyces cerevisiae）如出现则保留
+
+### 实验设计题
+- 生物实验设计题的 stem 结构：实验目的 → 实验材料 → 分组设计（对照组/实验组）→ 变量控制 → 预期结果 → 结论
+- 对照组（如"空白对照"、"阳性对照"、"阴性对照"）的设置是实验设计的核心，必须完整保留
+- 自变量、因变量、无关变量的描述是答题关键信息
+- 实验步骤的编号（如"①...②...③..."）清晰体现了操作的先后顺序，保留原文排版
+
+### 代谢途径与遗传图解
+- 代谢途径流程图（如光合作用光反应/暗反应、细胞呼吸三阶段）在 OCR 中可能转为文字描述——保持原文，完整复制
+- 遗传系谱图（家系图）中的符号（□男、○女、■患病男、●患病女）及其标注需尽量保留
+- 遗传题中的杂交组合（如"P: AABB × aabb → F₁: AaBb"）和配子类型列出不可遗漏
+- 减数分裂/有丝分裂各时期特点（前期 I、中期 I 等）的表格或文字描述完整保留
+
+### 图表与结构图
+- 细胞结构示意图、遗传系谱图、食物链/食物网图、生态系统能量金字塔在 OCR 中可能以 ![](image) 引用出现，保留引用标记
+- 数据图表（如种群增长曲线、酶活性曲线、光合速率曲线）中的坐标轴标签和趋势描述是 stem 的一部分
+- 表格数据（如实验数据记录表、遗传性状统计表）即使破碎也逐字保留
+
+### 简答题特征
+- 生物简答题通常要求"分析原因"、"说明原理"、"解释现象"——这些都属于 stem 的问题部分
+- 原因-结果链（如"光照强度减弱 → ATP 和 NADPH 合成减少 → C₃ 还原受阻 → C₃ 积累"）是生物推理的典型结构
+- 简答题的 answer 从参考答案区提取，可能是关键词或要点形式""",
+
+    "ENG": """## 英语学科特别指令
+
+### 英语文本保留（最高优先级）
+- **不要翻译英语文本**：stem 中的所有英语文本（文章、题干、选项、标题）必须保持英文原样，绝不要翻译成中文
+- 英语单词之间的空格、标点符号（尤其是英文单引号 ' 和双引号 "）保持 OCR 原文
+- 英文专有名词、人名、地名、机构名（如 United Nations、Harvard University）逐字保留
+
+### 完形填空格式
+- 完形填空（cloze）的典型格式：一篇短文，其中有编号的空格（如"__21__"、"(21)"、"21.____"），文后有选项（A/B/C/D）
+- **将整篇完形填空视为一道综合题**：stem = 短文全文 + 所有空格编号 + 所有选项（A/B/C/D），不要将每个空格拆成独立题目
+- 空格编号是题目标识（21-35 或 36-50 不等），必须保留编号
+
+### 阅读理解格式
+- 阅读理解（reading）的典型格式：一篇或多篇文章 → 后面紧跟若干基于该文章的选择题
+- **将整组视为一道综合题**：stem = 文章全文 + 所有子题题干和选项，不要将各子题拆成独立题目
+- 文章可能较长（200-500 词），但这是阅读理解题目的必要组成部分，不可省略
+- 阅读题目的选项通常为 A/B/C/D，各选项在不同行或同行以空格分隔
+
+### 语法填空格式
+- 语法填空（grammar_fill）的典型格式：一篇短文中若干空格，**没有选项**，要求根据上下文填入正确的词或词形变化
+- 空格处以"___"、"(   )"或下划线表示，不能有 A/B/C/D 选项
+- 词形变化（如动词时态、名词单复数、形容词比较级）是这类题的核心考点——空格处保留原文的空格标记即可
+
+### 选词填空/方框填空格式（S#131 新增）
+- 选词填空的典型格式：题头有一个方框（word bank），内含若干单词或短语（通常8-12个）→ 下方有若干（通常5-6句）不完整的句子，要求从方框中选词并用适当形式填空
+- **将整组视为一道综合题**：stem = 方框中的全部单词 + 所有填空句子（逐句保留，编号如 21-25），不要将每个句子拆成独立题目
+- 方框中的单词必须全部列在 stem 开头，因为作答依赖方框内容
+- answer 中按句子编号标注正确答案（含词形变化后的形式）
+- 识别标志：题头有一个方框/表格列出多个单词，下方有若干以"___"或"( )"标记的句子
+
+### 写作题格式
+- 写作题（practical_writing / continuation_writing）的 stem 包含：写作提示（prompt）+ 内容要求 + 字数限制 + 格式要求
+- 写作题没有标准答案（answer 设为 ""），但 stem 必须包含完整的写作要求
+- 读后续写（continuation_writing）的 stem 包含一段开头故事 + 续写要求
+
+### 七选五格式
+- 七选五（seven_to_five）的典型格式：一篇短文有 5 个空格 → 文后给出 7 个选项（A-G）→ 选出 5 个正确的填入
+- 短文（含空格标记）和 7 个选项必须全部包含在 stem 中
+- 空格处通常标有"__1__"、"__2__"等编号
+
+### 选项格式
+- 英语选择题的选项标记为 A. B. C. D. 或 A) B) C) D)，可能在同一行或分行排列
+- 选项文本可能是单词、短语或完整句子——保持原文不要改写
+- 选项之间用空格、换行、或连在一起（如"A. option1 B. option2"），都由 _split_inline_options() 自动处理""",
 }
 
 # Map Chinese subject names to codes for prompt lookup
 _SUBJECT_CN_TO_PROMPT_KEY: dict[str, str] = {
     "化学": "CHEM",
     "语文": "CHN",
+    "物理": "PHYS",
+    "生物": "BIO",
+    "英语": "ENG",
 }
 
 
@@ -307,7 +442,8 @@ def _split_inline_options(stem: str) -> str:
     result: list[str] = []
     for line in lines:
         markers = list(_INLINE_OPTION_MARKER_RE.finditer(line))
-        if len(markers) < 3:
+        # S#134: threshold 3→2 — also splits compact "A.xx B.xx" lines
+        if len(markers) < 2:
             result.append(line)
             continue
         # Extract prefix text before the first option marker
@@ -324,30 +460,176 @@ def _split_inline_options(stem: str) -> str:
     return '\n'.join(result)
 
 
-def _clean_stem_for_db(stem: str) -> str:
-    """Post-process LLM-returned stem before DB insert.
+# Pattern: option lines like "A. xxx" or "A．xxx" or "A) xxx"
+_OPTION_LINE_RE = re.compile(r'^[A-H][.．、)]\s*[^\s]')
 
-    Removes residual annotation markers, question numbers, and
-    formatting artifacts that the LLM may have left in the stem.
+
+def _dedupe_option_blocks(stem: str) -> str:
+    """Remove duplicate option blocks at the end of a stem.
+
+    When OCR produces both compact (A.x B.y C.z D.w) and spaced
+    (A. x B. y C. z D. w) versions, the LLM may copy both.
+    Detects repeated groups of A/B/C/D lines and keeps the first.
     """
-    # -1. Split inline options (S#128): A.xx B.xx C.xx D.xx → one per line
-    stem = _split_inline_options(stem)
-    # 0. Strip leading question number (e.g. "1.", "12．", "3、")
-    #    The QNO is stored in question_number; display stem without it.
-    stem = re.sub(
-        r'^\s*(?:[（(]\s*)?\d{1,3}\s*[.．、)\s）]\s*',
-        '', stem, count=1,
-    )
-    # 1. Remove residual 【答案】...【详解】... markers
-    stem = re.sub(r'【答案】.*?(?:【详解】|$)', '', stem, flags=re.DOTALL)
-    stem = re.sub(r'【详解】.*$', '', stem, flags=re.DOTALL)
+    lines = stem.split('\n')
+
+    # Find all option-line groups (contiguous runs of A-H. lines).
+    # When two groups are adjacent (no non-option separator), detect
+    # the boundary by the option letter cycling back (e.g. D → A).
+    groups: list[tuple[int, int, list[str]]] = []  # (start, end, normalized)
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if _OPTION_LINE_RE.match(stripped):
+            start = i
+            group_opts: list[str] = []
+            prev_letter = ''
+            while i < len(lines) and _OPTION_LINE_RE.match(lines[i].strip()):
+                raw = lines[i].strip()
+                # Detect group boundary: letter cycles back (D → A, C → A, etc.)
+                cur_letter = raw[0].upper()
+                if prev_letter and cur_letter <= prev_letter and cur_letter <= 'C':
+                    # Letter reset → new group starts here
+                    break
+                prev_letter = cur_letter
+                # Normalise: strip option marker (letter + delimiter + space)
+                # _OPTION_LINE_RE matches marker+first char, so use simple
+                # slicing: "A.xxx" → "xxx", "A. xxx" → "xxx"
+                content = raw[2:].lstrip() if len(raw) > 2 else ''
+                group_opts.append(content)
+                i += 1
+            groups.append((start, i, group_opts))
+        else:
+            i += 1
+
+    if len(groups) < 2:
+        return stem
+
+    # S#134: Merge adjacent option groups split by blank lines.
+    # When the LLM outputs A,B + blank + C,D + blank + A,B,C,D,
+    # the blank line breaks the first group into two fragments.
+    # Merge consecutive groups where the letter sequence continues.
+    merged_groups: list[tuple[int, int, list[str]]] = []
+    for g_start, g_end, g_opts in groups:
+        if merged_groups:
+            prev_start, prev_end, prev_opts = merged_groups[-1]
+            # Check if letters continue (e.g. prev ends with B, this starts with C)
+            prev_len = len(prev_opts)
+            this_len = len(g_opts)
+            if prev_len + this_len <= 4 and prev_len < 4 and this_len < 4:
+                # Likely a continuation — merge
+                merged_groups[-1] = (prev_start, g_end, prev_opts + g_opts)
+                continue
+        merged_groups.append((g_start, g_end, g_opts))
+    groups = merged_groups
+
+    if len(groups) < 2:
+        return stem
+
+    # S#134: Global hash-based dedup — catches duplicates even when
+    # separated by non-option text (e.g. LLM extracts the same ABCD
+    # block from both the question body and the answer section).
+    seen: set[tuple[str, ...]] = set()
+    keep_groups: list[tuple[int, int, list[str]]] = []
+    removed_groups: list[tuple[int, int, list[str]]] = []
+    for g_start, g_end, g_opts in groups:
+        key = tuple(g_opts)
+        if key in seen:
+            removed_groups.append((g_start, g_end, g_opts))
+            continue
+        seen.add(key)
+        keep_groups.append((g_start, g_end, g_opts))
+
+    if not removed_groups:
+        return stem  # No duplicates removed
+
+    # Rebuild: keep lines before the first removed group, preserve
+    # the first (kept) group, and trailing content after last group.
+    min_removed_start = min(g[0] for g in removed_groups)
+    result_lines = lines[:min_removed_start]
+    for g_start, g_end, g_opts in keep_groups[1:]:
+        result_lines.extend([''] + lines[g_start:g_end])
+    last_end = groups[-1][1]
+    if last_end < len(lines):
+        result_lines.extend(lines[last_end:])
+    return '\n'.join(result_lines)
+
+
+def _clean_text_for_db(text: str, *, is_stem: bool = True) -> str:
+    """Post-process LLM-returned text before DB insert.
+
+    Applies cleaning rules to stem, answer, and explanation text.
+    Stem-specific rules (QNO stripping, option formatting, annotation
+    markers) are only applied when ``is_stem=True``.
+
+    Common rules (score annotations, page markers, newline collapsing,
+    <img> tag cleaning) apply to all text types.
+    """
+    # ── Stem-specific rules ────────────────────────────────────
+    if is_stem:
+        # -1. Split inline options (S#128): A.xx B.xx C.xx D.xx → one per line
+        text = _split_inline_options(text)
+        # -0.5. Deduplicate repeated option blocks (S#131)
+        text = _dedupe_option_blocks(text)
+        # 0. Strip leading question number (e.g. "1.", "12．", "3、")
+        text = re.sub(
+            r'^\s*(?:[（(]\s*)?\d{1,3}\s*[.．、)\s）]\s*',
+            '', text, count=1,
+        )
+        # 1. Remove residual 【答案】...【详解】... markers
+        text = re.sub(r'【答案】.*?(?:【详解】|$)', '', text, flags=re.DOTALL)
+        text = re.sub(r'【详解】.*$', '', text, flags=re.DOTALL)
+
+    # ── Common rules (stem, answer, explanation) ──────────────
     # 2. Remove score annotations like （4分）/（共13分）/（每小题5分）
-    stem = re.sub(r'[（(]\s*(?:共\s*)?\d+\s*分\s*[）)]', '', stem)
+    text = re.sub(r'[（(]\s*(?:共\s*)?\d+\s*分\s*[）)]', '', text)
     # 3. Remove standalone page-marker lines (e.g. "第2页 / 共19页")
-    stem = re.sub(r'^第\d+页\s*/\s*共\d+页\s*$', '', stem, flags=re.MULTILINE)
+    text = re.sub(r'^第\d+页\s*/\s*共\d+页\s*$', '', text, flags=re.MULTILINE)
     # 4. Collapse 3+ consecutive newlines to 2
-    stem = re.sub(r'\n{3,}', '\n\n', stem)
-    return stem.strip()
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # 5. Convert <img> tags to placeholder (S#134: tolerate \s* before src
+    #    for PP-StructureV3 output like <imgsrc=...> missing a space).
+    #    Handle both old imgs/... and rewritten /api/documents/images/...
+    #    URLs; both wrapped <div> and bare <img> forms.
+    text = re.sub(
+        r'<div[^>]*>\s*<img\s*src="(imgs/img_in_image_box_\d+_\d+_\d+_\d+\.\w+)"[^>]*>\s*</div>',
+        r'[📷 题目配图]',
+        text,
+    )
+    text = re.sub(
+        r'<img\s*src="(imgs/[^"]+)"[^>]*>',
+        r'[📷 题目配图]',
+        text,
+    )
+    # Fix 3 (S#133/#135): rewritten MinIO URLs (wrapped + bare)
+    # S#135: Preserve URL as ![图](url) Markdown image so frontend MathRenderer
+    # can render it inline at the correct position in the stem.
+    text = re.sub(
+        r'<div[^>]*>\s*<img\s*src="/api/documents/images/([^"]+)"[^>]*>\s*</div>',
+        r'![图](/api/documents/images/\1)',
+        text,
+    )
+    text = re.sub(
+        r'<img\s*src="/api/documents/images/([^"]+)"[^>]*>',
+        r'![图](/api/documents/images/\1)',
+        text,
+    )
+    # S#134: Remove standalone <div> wrappers (non-image HTML residue
+    # from PP-StructureV3 like <div style="text-align: center;">)
+    text = re.sub(r'<div[^>]*>', '', text)
+    text = re.sub(r'</div>', '', text)
+    # S#134: Remove teacher-edition [T] annotation markers
+    text = re.sub(r'\s*\[T\]', '', text)
+    # S#136: Clean orphan | markers from OCR table artifacts.
+    # Only strip leading/trailing | — mid-line | may be math (|x|, {x|x>0}).
+    text = re.sub(r'^\s*\|\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*\|\s*$', '', text, flags=re.MULTILINE)
+    return text.strip()
+
+
+# Backward-compat wrapper — all existing stem-only call sites still work.
+def _clean_stem_for_db(stem: str) -> str:
+    return _clean_text_for_db(stem, is_stem=True)
 
 
 def _score_stem_quality(stem: str, options: list[str] | None = None) -> float:
@@ -366,6 +648,7 @@ def _score_stem_quality(stem: str, options: list[str] | None = None) -> float:
       -0.4: starts with bare 【 or ] (residual annotation)
       -0.3: "参考答案" present (answer section leaked into stem)
       -0.3: short (<15 chars) AND no LaTeX (→ waived if options present)
+      -0.5: stem starts with option marker (A./A、/A) — only options, no stem
     """
     # Determine if we have meaningful options to offset short-stem penalties
     _has_opts = bool(
@@ -387,6 +670,13 @@ def _score_stem_quality(stem: str, options: list[str] | None = None) -> float:
     if len(stem) < 15 and not re.search(r'[$\\\\]', stem):
         if not _has_opts:
             score -= 0.3
+    # Session #131: Detect stems that are ONLY options (no actual question text).
+    # Q7186 is the canonical case: "A.2N B.4N C.6N D.8N" with no preceding stem.
+    # When the stem's first content character is an option letter-marker, the
+    # actual question body was lost during LLM extraction.
+    _first_non_space = stem.lstrip()
+    if re.match(r'^[A-H][.、．)\s]', _first_non_space):
+        score -= 0.5
     return max(0.0, score)
 
 
@@ -434,17 +724,25 @@ def _check_question_count_sanity(
 ) -> tuple[bool, str]:
     """Compare markdown QNO count against LLM question count.
 
+    Session #130: With reading comprehension merges, llm_question_count is
+    expected to be LOWER than markdown_qno_count (groups merged into one).
+    Only over-splitting (> warn threshold) is treated as an error.
+
     Returns:
         (is_ok, detail_message).
-        is_ok=True: ratio is within acceptable range.
-        is_ok=False: potential over-splitting or under-extraction.
     """
     if markdown_qno_count == 0:
-        # No QNOs found — markdown may be too degraded for this check.
-        # Return ok=True (don't block processing on unreadable documents).
         return True, "no QNOs found in markdown (skipping check)"
 
     ratio = llm_question_count / markdown_qno_count
+
+    # Session #130: Under-count is expected (material-based groups merged).
+    # Log a note if very low but don't block — merging is by design.
+    if ratio < 0.3:
+        return True, (
+            f"ok (merged groups: {llm_question_count}Q / "
+            f"{markdown_qno_count} markdown QNOs = {ratio:.1f}x)"
+        )
     if ratio <= _QNO_RATIO_WARN:
         return True, (
             f"ok ({llm_question_count}Q / {markdown_qno_count} markdown QNOs"
@@ -498,6 +796,151 @@ _QNO_RETRY_PREFIX = """\
 #   4. Table-heavy layouts (periodic table, experimental data) lost in OCR
 _SUBJECTS_NEEDING_PRE_CLEAN = frozenset({"CHEM", "化学", "chemistry"})
 
+# ── HTML Table → Markdown Table Converter (S#131) ──────────────────
+# PP-StructureV3 outputs exam tables as HTML <table> blocks.  Raw HTML
+# in Markdown stems renders as code soup in the frontend.  This regex
+# converter transforms simple HTML tables into Markdown pipe tables
+# (| cell | cell |) which render correctly and preserve structure.
+
+_HTML_TABLE_RE = re.compile(
+    r'<table[^>]*>(.*?)</table>',
+    re.DOTALL | re.IGNORECASE,
+)
+_HTML_TR_RE = re.compile(
+    r'<tr[^>]*>(.*?)</tr>',
+    re.DOTALL | re.IGNORECASE,
+)
+# Capture full <td>/<th> tag (attributes + content) for colspan/rowspan access
+_HTML_TD_FULL_RE = re.compile(
+    r'<t[hd]([^>]*)>(.*?)</t[hd]>',
+    re.DOTALL | re.IGNORECASE,
+)
+_COLSPAN_RE = re.compile(r'colspan\s*=\s*"(\d+)"', re.IGNORECASE)
+_ROWSPAN_RE = re.compile(r'rowspan\s*=\s*"(\d+)"', re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+_HTML_IMG_RE = re.compile(
+    r'<img[^>]*src\s*=\s*"([^"]+)"[^>]*>',
+    re.IGNORECASE,
+)
+
+
+def _convert_html_tables_to_markdown(text: str) -> str:
+    """Convert HTML <table> blocks to Markdown pipe tables.
+
+    Handles common exam table patterns from PP-StructureV3:
+    - Simple data tables → Markdown pipe table
+    - colspan=n → cell content duplicated across n columns
+    - Tables with inline images → ``![img](path)`` in cells
+    - Non-tabular HTML blocks left unchanged
+    """
+    # Strip meaningless OCR wrappers (PP-StructureV3 sometimes nests
+    # tables inside <html><body>...</body></html>)
+    text = text.replace('<html>', '').replace('</html>', '')
+    text = text.replace('<body>', '').replace('</body>', '')
+    def _clean_cell(cell_html: str) -> str:
+        """Strip HTML tags/entities from cell content, keep images as markdown."""
+        cell = _HTML_IMG_RE.sub(r'![\1](\1)', cell_html)
+        cell = _HTML_TAG_RE.sub('', cell)
+        cell = (cell.replace('&amp;', '&').replace('&lt;', '<')
+                 .replace('&gt;', '>').replace('&quot;', '"')
+                 .replace('&#39;', "'"))
+        return ' '.join(cell.split())
+
+    def _html_table_to_md(html_match: re.Match) -> str:
+        table_content = html_match.group(1)
+        rows = _HTML_TR_RE.findall(table_content)
+        if not rows:
+            return html_match.group(0)
+
+        # Track cells that span across rows via rowspan.
+        # Each entry: {"col": int, "content": str, "remaining": int}
+        pending_rowspans: list[dict] = []
+
+        md_rows: list[list[str]] = []
+        for row_html in rows:
+            cell_matches = _HTML_TD_FULL_RE.findall(row_html)
+            if not cell_matches:
+                continue
+
+            cleaned: list[str] = []
+            col_idx = 0  # current virtual column (after pending injections)
+
+            for attrs, content in cell_matches:
+                # ── Inject any pending rowspan cells that belong at col_idx ─
+                while True:
+                    inject = next((p for p in pending_rowspans if p["col"] == col_idx), None)
+                    if inject is None:
+                        break
+                    cleaned.append(inject["content"])
+                    # Handle colspan for injected rowspan cell copies
+                    inject_colspan = inject.get("colspan", 1)
+                    for _ in range(inject_colspan - 1):
+                        cleaned.append(inject["content"])
+                        col_idx += 1
+                    inject["remaining"] -= 1
+                    col_idx += inject_colspan
+
+                cell_text = _clean_cell(content)
+
+                # Handle colspan
+                colspan_m = _COLSPAN_RE.search(attrs)
+                colspan = int(colspan_m.group(1)) if colspan_m else 1
+
+                # Handle rowspan
+                rowspan_m = _ROWSPAN_RE.search(attrs)
+                rowspan = int(rowspan_m.group(1)) if rowspan_m else 1
+
+                cleaned.append(cell_text)
+                for _ in range(colspan - 1):
+                    cleaned.append(cell_text)
+
+                if rowspan > 1:
+                    pending_rowspans.append({
+                        "col": col_idx,
+                        "content": cell_text,
+                        "remaining": rowspan - 1,
+                        "colspan": colspan,
+                    })
+
+                col_idx += colspan
+
+            # ── Inject any remaining pending rowspan cells (at or past the last col) ──
+            while True:
+                inject = next((p for p in pending_rowspans if p["col"] >= col_idx), None)
+                if inject is None:
+                    break
+                cleaned.append(inject["content"])
+                inject_colspan = inject.get("colspan", 1)
+                for _ in range(inject_colspan - 1):
+                    cleaned.append(inject["content"])
+                inject["remaining"] -= 1
+                col_idx = inject["col"] + inject_colspan
+
+            # Remove expired rowspan entries
+            pending_rowspans = [p for p in pending_rowspans if p["remaining"] > 0]
+
+            md_rows.append(cleaned)
+
+        if not md_rows:
+            return html_match.group(0)
+
+        # Normalise column count to the widest row
+        col_count = max(len(r) for r in md_rows)
+        for r in md_rows:
+            while len(r) < col_count:
+                r.append('')
+
+        # Build Markdown pipe table
+        lines: list[str] = []
+        lines.append('| ' + ' | '.join(md_rows[0]) + ' |')
+        lines.append('| ' + ' | '.join(['---'] * col_count) + ' |')
+        for row in md_rows[1:]:
+            lines.append('| ' + ' | '.join(row) + ' |')
+
+        return '\n'.join(lines)
+
+    return _HTML_TABLE_RE.sub(_html_table_to_md, text)
+
 
 def _pre_clean_markdown(markdown: str, subject_code: str | None = None) -> str:
     """Apply subject-specific OCR artifact cleanup before LLM annotation.
@@ -516,16 +959,28 @@ def _pre_clean_markdown(markdown: str, subject_code: str | None = None) -> str:
     if not markdown or not subject_code:
         return markdown
 
-    # Only apply chemistry-specific cleaning for now
+    text = markdown
+
+    # ── Rule 0: HTML tables → Markdown (ALL subjects) ──────────
+    # PP-StructureV3 outputs HTML <table> for exam tables.
+    # Convert to Markdown pipe tables so the frontend renders them.
+    text = _convert_html_tables_to_markdown(text)
+
+    # ── Rule 0.5: Split compact inline options (S#136) ───────────
+    # OCR often outputs all 4 options on one line
+    # (e.g. "A.x B.y C.z D.w").  Splitting them before the LLM sees
+    # the text prevents the model from silently dropping trailing
+    # options (Q2 missing D, Q8 missing C/D).
+    text = _split_inline_options(text)
+
+    # Only apply chemistry-specific cleaning for chemistry
     is_chem = (
         subject_code in _SUBJECTS_NEEDING_PRE_CLEAN
         or (isinstance(subject_code, str)
             and subject_code.lower() in _SUBJECTS_NEEDING_PRE_CLEAN)
     )
     if not is_chem:
-        return markdown
-
-    text = markdown
+        return text
 
     # ── Rule 1: Normalize chemical reaction arrows ──────────────
     # PP-StructureV3 may render → as -, —, ->, or lose it entirely.
@@ -581,7 +1036,14 @@ def _pre_clean_markdown(markdown: str, subject_code: str | None = None) -> str:
     if len(cleaned_lines) < len(lines):
         text = '\n'.join(cleaned_lines)
 
-    # ── Rule 4: Chemistry table detection hint ─────────────────
+    # ── Rule 4: Convert HTML tables to Markdown pipe tables ──────
+    # PP-StructureV3 outputs HTML <table> blocks for exam tables
+    # (periodic table fragments, experimental data, option grids).
+    # Raw HTML in Markdown displays as code soup in the frontend.
+    # Convert to Markdown pipe-table format preserving structure.
+    text = _convert_html_tables_to_markdown(text)
+
+    # ── Rule 5: Chemistry table detection hint ─────────────────
     # Add a comment for the LLM when table-like structures are
     # detected (periodic table fragments, experimental data grids).
     # This is a lightweight annotation, not a transformation.
@@ -629,10 +1091,10 @@ _ANSWER_CONTAMINATION_MARKERS = (
 _ANSWER_MAX_LENGTH: dict[str, int] = {
     "choice": 10,        # single letter + optional spaces
     "multi_choice": 20,  # e.g. "ABC" or "A, C"
-    "fill": 200,         # short expression / number / phrase
-    "calculation": 300,  # final result + optional unit
-    "proof": 200,        # brief conclusion
-    "essay": 300,        # short answer text
+    "fill": 500,         # complex expression / multiple blanks
+    "calculation": 1500, # multi-step math with (1)(2)(3) sub-parts (S#131)
+    "proof": 3000,       # multi-step proof with detailed reasoning (S#131)
+    "essay": 3000,       # merged reading comprehension with sub-answers (S#131: 300→3000)
 }
 
 
@@ -667,13 +1129,54 @@ def _validate_llm_answer(answer: str, qtype: str) -> str:
             return ""
 
     # ── Rule 3: Length limits by question type ───────────────────
-    max_len = _ANSWER_MAX_LENGTH.get(qtype, 300)
+    max_len = _ANSWER_MAX_LENGTH.get(qtype, 1000)
     if len(cleaned) > max_len:
         logger.warning(
             "Answer validation: rejected %s answer (%d chars > %d max): %r",
             qtype, len(cleaned), max_len, cleaned[:80],
         )
         return ""
+
+    # ── Rule 3b: Explanation-in-answer detection (S#131) ──────────
+    # LLMs sometimes put full solution steps into answer instead of
+    # explanation.  Detect explanation-like patterns and reject if
+    # the answer looks like a tutorial rather than a final result.
+    if qtype in ("essay", "calculation", "proof", "fill"):
+        _EXPL_LIKE_PATTERNS = [
+            r'解[：:]\s*\w', r'证明[：:]\s*\w',
+            r'由(题意|题[设干]|已知|条件).{0,10}[可得知]',
+            r'根据.{0,10}[可得知]',
+            r'因(为|此)[，,]\s*\w',
+            r'所(以|述)[，,]\s*\w',
+            r'故[，,]\s*\w',
+            r'设\s*\w+\s*[=为]',
+            r'则\s*\w+\s*[=为]',
+            r'综上所述[，,]',
+            r'需要填空[。：:]',
+            r'具体[：:]\s*\w',
+        ]
+        import re as _re_expl
+        expl_score = 0
+        for pat in _EXPL_LIKE_PATTERNS:
+            if _re_expl.search(pat, cleaned):
+                expl_score += 1
+        # If answer has multiple explanation-like patterns and is long,
+        # it's almost certainly explanation content mislabeled as answer
+        if expl_score >= 2 and len(cleaned) > 200:
+            logger.warning(
+                "Answer validation: rejected %s answer — looks like explanation "
+                "(%d explanation-like patterns, %d chars): %r",
+                qtype, expl_score, len(cleaned), cleaned[:80],
+            )
+            return ""
+        elif expl_score >= 3:
+            # Even short text with 3+ explanation patterns is suspicious
+            logger.warning(
+                "Answer validation: rejected %s answer — dense explanation "
+                "patterns (%d matches, %d chars): %r",
+                qtype, expl_score, len(cleaned), cleaned[:80],
+            )
+            return ""
 
     # ── Rule 4: Choice/Multi-choice — must be letter(s) only ─────
     if qtype in ("choice", "multi_choice"):
@@ -761,22 +1264,220 @@ def _split_markdown_at_answer_section(markdown: str) -> tuple[str, str]:
     return markdown, ""
 
 
+async def _crop_figures_from_pages(
+    questions: list[dict[str, Any]],
+    page_images: list[str],
+    job_id: str,
+) -> list[dict[str, Any]]:
+    """Fallback: crop figure regions from PDF page images when ZIP unavailable.
+
+    PP-StructureV3 names images ``img_in_image_box_X_Y_W_H.jpg`` where
+    (X, Y, W, H) are pixel coordinates on the original page image (200 DPI).
+    This function crops those regions from the page images and uploads them.
+
+    Scans both ``stem`` and ``explanation`` fields for image references.
+    Handles ``<img>`` HTML tags (with or without space before ``src``), and
+    Markdown image syntax (``![...](imgs/...)``) that the LLM may have
+    converted to during extraction.
+    """
+    import re as _re_img
+    from PIL import Image as _PILImage
+
+    from app.db.minio import upload_file as _minio_upload
+
+    # ── Collect from both stem and explanation ──────────────────
+    img_refs: dict[str, tuple[int, int, int, int]] = {}  # path → (x, y, w, h)
+    _html_re = _re_img.compile(
+        r'<img\s*src="(imgs/img_in_image_box_(\d+)_(\d+)_(\d+)_(\d+)\.\w+)"'
+    )
+    _md_re = _re_img.compile(
+        r'!\[.*?\]\((imgs/img_in_image_box_(\d+)_(\d+)_(\d+)_(\d+)\.\w+)\)'
+    )
+    for q in questions:
+        for field in ("stem", "explanation"):
+            text = str(q.get(field, ""))
+            if not text or "img_in_image_box" not in text:
+                continue
+            # HTML <img> tags (tolerate <imgsrc= without space)
+            for m in _html_re.finditer(text):
+                path, x, y, w, h = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
+                if path not in img_refs:
+                    img_refs[path] = (x, y, w, h)
+            # Markdown ![alt](imgs/...) — LLM may convert HTML→MD
+            for m in _md_re.finditer(text):
+                path, x, y, w, h = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
+                if path not in img_refs:
+                    img_refs[path] = (x, y, w, h)
+
+    if not img_refs:
+        with open("D:\\temp\\debug_img.txt", "a") as _df:
+            _df.write(f"CROP_FIGURES: no img_refs found in {len(questions)} questions\n")
+        return questions
+
+    # ── Entry point debug ──
+    import os as _os_dbg
+    _p0_exists = _os_dbg.path.exists(page_images[0]) if page_images else False
+    _p0_size = _os_dbg.path.getsize(page_images[0]) if _p0_exists else 0
+    with open("D:\\temp\\debug_img.txt", "a") as _df:
+        _df.write(
+            f"CROP_FIGURES: entry — {len(img_refs)} img_refs, "
+            f"{len(page_images)} page_images, "
+            f"p0_exists={_p0_exists}, p0_size={_p0_size}, "
+            f"p0_path={page_images[0][:120] if page_images else 'NONE'}\n"
+        )
+
+    # Estimate page height from the first page image
+    try:
+        with _PILImage.open(page_images[0]) as probe:
+            page_height = probe.height
+    except Exception as _ex:
+        _path = page_images[0][:120] if page_images else "NONE"
+        _exists = __import__("os").path.exists(page_images[0]) if page_images else False
+        with open("D:\\temp\\debug_img.txt", "a") as _df:
+            _df.write(
+                f"CROP_FIGURES: PIL open FAILED — path={_path}, "
+                f"exists={_exists}, error={_ex}\n"
+            )
+        logger.error(
+            "CROP_FIGURES: Cannot open page_images[0] for size probe: %s "
+            "(path=%s, exists=%s)",
+            _ex, _path, _exists,
+        )
+        return questions
+
+    logger.info(
+        "Page-crop fallback: %d figures from %d pages (page_h=%dpx)",
+        len(img_refs), len(page_images), page_height,
+    )
+
+    url_map: dict[str, str] = {}
+    for img_path, (x, y, w, h) in img_refs.items():
+        # Determine page number from Y coordinate
+        page_idx = min(y // page_height, len(page_images) - 1)
+        page_path = page_images[page_idx]
+
+        _page_exists = _os_dbg.path.exists(page_path)
+        _page_size = _os_dbg.path.getsize(page_path) if _page_exists else 0
+        with open("D:\\temp\\debug_img.txt", "a") as _df:
+            _df.write(
+                f"CROP_FIGURES: processing {img_path} — "
+                f"bbox=({x},{y},{w},{h}), page_idx={page_idx}, "
+                f"page_h={page_height}, page_exists={_page_exists}, "
+                f"page_size={_page_size}\n"
+            )
+
+        try:
+            with _PILImage.open(page_path) as page_img:
+                # Ensure crop box is within image bounds
+                left, top = x, y % page_height if page_idx > 0 else y
+                right, bottom = min(left + w, page_img.width), min(top + h, page_img.height)
+                if right <= left or bottom <= top:
+                    with open("D:\\temp\\debug_img.txt", "a") as _df:
+                        _df.write(
+                            f"CROP_FIGURES: INVALID BOX {img_path} — "
+                            f"crop=({left},{top},{right},{bottom}), "
+                            f"img=({page_img.width},{page_img.height})\n"
+                        )
+                    logger.warning("Invalid crop box for %s: (%d,%d,%d,%d)", img_path, left, top, right, bottom)
+                    continue
+                cropped = page_img.crop((left, top, right, bottom))
+
+                # Save cropped image to bytes
+                import io as _io
+                buf = _io.BytesIO()
+                cropped.save(buf, format="PNG")
+                buf.seek(0)
+                img_bytes = buf.read()
+
+            # Upload to MinIO
+            import io as _io_upload
+            obj_name = f"ppsv3-figures/{job_id}/{img_path.replace('imgs/', '').rsplit('.', 1)[0]}.png"
+            _minio_upload(
+                object_name=obj_name,
+                data=_io_upload.BytesIO(img_bytes),
+                length=len(img_bytes),
+                content_type="image/png",
+                bucket="question-images",
+            )
+            minio_url = f"/api/documents/images/{obj_name}"
+            url_map[img_path] = minio_url
+            logger.debug("Cropped figure %s (page %d, box %d,%d,%d,%d) → %s", img_path, page_idx, left, top, right - left, bottom - top, minio_url)
+        except Exception as exc:
+            with open("D:\\temp\\debug_img.txt", "a") as _df:
+                _df.write(
+                    f"CROP_FIGURES: EXCEPTION {img_path} — "
+                    f"page={page_idx}, box=({x},{y},{w},{h}), "
+                    f"page_path={page_path[:120]}, "
+                    f"type={type(exc).__name__}, error={exc}\n"
+                )
+            logger.error(
+                "CROP_FIGURES: failed for %s (page=%d, box=%d,%d,%d,%d, "
+                "page_path=%s): %s",
+                img_path, page_idx, x, y, w, h,
+                page_path[:120], exc, exc_info=True,
+            )
+
+    if not url_map:
+        with open("D:\\temp\\debug_img.txt", "a") as _df:
+            _df.write(
+                f"CROP_FIGURES: ALL FAILED — "
+                f"{len(img_refs)} img_refs, {len(page_images)} pages, "
+                f"job={job_id[:40]}, refs={list(img_refs.keys())[:5]}\n"
+            )
+        logger.error(
+            "CROP_FIGURES: all %d figure crops failed for job %s "
+            "(page_count=%d, img_refs=%s)",
+            len(img_refs), job_id, len(page_images),
+            list(img_refs.keys())[:5],
+        )
+        return questions
+
+    uploaded = len(url_map)
+    with open("D:\\temp\\debug_img.txt", "a") as _df:
+        _df.write(
+            f"CROP_FIGURES: SUCCESS — uploaded {uploaded}/{len(img_refs)} figures, "
+            f"job={job_id[:40]}\n"
+        )
+    logger.info("Page-crop fallback: uploaded %d figures for job %s", uploaded, job_id)
+
+    # Rewrite stems and explanations (HTML <img> + Markdown ![]())
+    for q in questions:
+        for field in ("stem", "explanation"):
+            text = str(q.get(field, ""))
+            if not text:
+                continue
+            for orig, new_url in url_map.items():
+                text = text.replace(f'src="{orig}"', f'src="{new_url}"')
+                text = text.replace(f'"{orig}"', f'"{new_url}"')
+                # Markdown ![alt](imgs/...) → ![alt](minio_url)
+                text = text.replace(f']({orig})', f']({new_url})')
+            q[field] = text
+
+    return questions
+
+
 async def _rewrite_stem_image_urls(
     questions: list[dict[str, Any]],
     job_id: str,
     task_id: str = "",
+    page_images: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Rewrite PP-StructureV3 <img src="imgs/..."> paths to MinIO URLs.
 
-    Downloads the image ZIP from PP-StructureV3 API using the stored job_id,
-    uploads each image to MinIO, and replaces ``imgs/...`` paths in all
-    question stems with MinIO object URLs.
+    Primary path: downloads the image ZIP from PP-StructureV3 API.
+    Fallback (S#131): when ZIP is unavailable, crops figure regions
+    from the original PDF page images using bounding-box coordinates
+    embedded in the filename (img_in_image_box_X_Y_W_H.jpg).
+
+    Scans both ``stem`` and ``explanation`` fields for image references.
+    Tolerates ``<imgsrc=...>`` (missing space before ``src``) and
+    Markdown ``![...](imgs/...)`` that the LLM may have converted to.
 
     Called from _save_annotated_questions before DB insertion so images
     are available to the frontend immediately.
 
-    Returns the question list with rewritten stems (in-place mutation +
-    return for convenience).
+    Returns the question list with rewritten stems/explanations
+    (in-place mutation + return for convenience).
     """
     import httpx
     import re as _re_img
@@ -790,12 +1491,17 @@ async def _rewrite_stem_image_urls(
 
     _JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 
-    # Collect unique imgs/... paths across all stems
+    # Collect unique imgs/... paths across stems + explanations
+    _html_re = _re_img.compile(r'<img\s*src="(imgs/[^"]+)"')
+    _md_re = _re_img.compile(r'!\[.*?\]\((imgs/[^)]+)\)')
     img_paths: set[str] = set()
     for q in questions:
-        stem = str(q.get("stem", ""))
-        for m in _re_img.finditer(r'<img\s+src="(imgs/[^"]+)"', stem):
-            img_paths.add(m.group(1))
+        for field in ("stem", "explanation"):
+            text = str(q.get(field, ""))
+            for m in _html_re.finditer(text):
+                img_paths.add(m.group(1))
+            for m in _md_re.finditer(text):
+                img_paths.add(m.group(1))
 
     if not img_paths:
         return questions
@@ -826,12 +1532,24 @@ async def _rewrite_stem_image_urls(
             )
     except Exception as exc:
         logger.warning(
-            "Failed to get ZIP URL for job %s: %s — keeping imgs/ paths",
-            job_id, exc,
+            "Failed to get ZIP URL for job %s: %s", job_id, exc,
         )
-        return questions
+        zip_url = ""
 
+    with open("D:\\temp\\debug_img.txt", "a") as _df:
+        _df.write(f"REWRITE_STEM: zip_url={'SET' if zip_url else 'EMPTY'}, page_images_count={len(page_images) if page_images else 'None'}\n")
     if not zip_url:
+        if page_images:
+            with open("D:\\temp\\debug_img.txt", "a") as _df:
+                _df.write(f"REWRITE_STEM: -> crop fallback, page_images[0]={page_images[0][:80]}\n")
+            logger.info(
+                "No image ZIP for job %s — falling back to PDF page crop (%d pages)",
+                job_id, len(page_images),
+            )
+            return await _crop_figures_from_pages(
+                questions, page_images, job_id,
+            )
+        logging.getLogger().warning("[DEBUG _rewrite_stem] No ZIP URL AND no page_images! page_images=%s", page_images)
         logger.warning(
             "No image ZIP URL for job %s — keeping imgs/ paths", job_id,
         )
@@ -868,7 +1586,7 @@ async def _rewrite_stem_image_urls(
                         content_type=f"image/{fn.rsplit('.', 1)[-1]}",
                         bucket="question-images",
                     )
-                minio_url = f"/api/files/question-images/{obj_name}"
+                minio_url = f"/api/documents/images/{obj_name}"
                 # Map both relative forms: "imgs/filename" and raw filename
                 url_map[f"imgs/{fn}"] = minio_url
                 url_map[rel] = minio_url
@@ -891,23 +1609,24 @@ async def _rewrite_stem_image_urls(
     if not url_map:
         return questions
 
-    # ── Rewrite stems in-place ──────────────────────────────────────
+    # ── Rewrite stems + explanations in-place ──────────────────────
     rewritten = 0
     for q in questions:
-        stem = str(q.get("stem", ""))
-        if "imgs/" not in stem:
-            continue
-        for orig_path, minio_url in url_map.items():
-            stem = stem.replace(
-                f'src="{orig_path}"', f'src="{minio_url}"',
-            )
-        if stem != q.get("stem", ""):
-            q["stem"] = stem
-            rewritten += 1
+        for field in ("stem", "explanation"):
+            text = str(q.get(field, ""))
+            if "imgs/" not in text:
+                continue
+            for orig_path, minio_url in url_map.items():
+                text = text.replace(f'src="{orig_path}"', f'src="{minio_url}"')
+                # Markdown ![alt](imgs/...) → ![alt](minio_url)
+                text = text.replace(f']({orig_path})', f']({minio_url})')
+            if text != q.get(field, ""):
+                q[field] = text
+                rewritten += 1
 
     logger.info(
-        "Image URL rewrite: %d/%d stems rewritten for job %s",
-        rewritten, len(questions), job_id,
+        "Image URL rewrite: %d fields rewritten for job %s (%d questions)",
+        rewritten, job_id, len(questions),
     )
 
     return questions
@@ -935,6 +1654,18 @@ _LLM_ANNOTATION_SEM = asyncio.Semaphore(2)  # Limit concurrent MIMO annotation c
 _CHEM_LLM_ANNOTATION_MODE = "reasoning"       # routes directly to DeepSeek
 _CHEM_LLM_ANNOTATION_MODEL = "deepseek-v4-pro"
 _CHEM_LLM_SUBJECTS: frozenset[str] = frozenset({"chemistry", "CHEM"})
+
+# S#131: Subjects that need DeepSeek for JSON-safe LaTeX handling.
+# MIMO API does not fully support response_format=json_object,
+# causing LaTeX-heavy subjects (math, physics) to return unescaped
+# backslashes that break JSON parsing (e.g. \frac, \mathbf, \begin).
+# Routing these subjects via DeepSeek ensures proper JSON escaping.
+_DEEPSEEK_LATEX_SUBJECTS: frozenset[str] = frozenset({
+    "math", "MATH", "数学",
+    "physics", "PHYS", "物理",
+})
+_DEEPSEEK_LATEX_MODE = "reasoning"
+_DEEPSEEK_LATEX_MODEL = "deepseek-v4-pro"
 
 # Valid types from LLM annotation
 _LLM_VALID_TYPES = frozenset({
@@ -1342,6 +2073,32 @@ class _DocumentProcessing:
                 )
                 steps_completed.append("extract")
 
+                # ── Persist raw OCR Markdown to DB (source of truth) ──
+                if paddleocr_markdown and doc_id:
+                    try:
+                        async with async_session_factory() as _md_session:
+                            await _md_session.execute(
+                                text(
+                                    "UPDATE documents SET ocr_markdown = :md "
+                                    "WHERE id = :did"
+                                ),
+                                {"md": paddleocr_markdown, "did": doc_id},
+                            )
+                            await _md_session.commit()
+                        await self._log_step(
+                            task_id, "markdown_save",
+                            f"OCR Markdown 已保存 ({len(paddleocr_markdown)} 字符)",
+                        )
+                        logger.info(
+                            "OCR Markdown saved: doc_id=%d, len=%d chars",
+                            doc_id, len(paddleocr_markdown),
+                        )
+                    except Exception as _mde:
+                        logger.warning(
+                            "Failed to save OCR Markdown for doc %d: %s",
+                            doc_id, _mde, exc_info=True,
+                        )
+
                 # ── Session #125: Unified LLM full extraction (single MIMO call) ──
                 # Replaces the old two-call approach:
                 #   OLD: Path 1 (metadata merge, no stem) + Path 2 (full extraction)
@@ -1373,6 +2130,7 @@ class _DocumentProcessing:
                                 pdf_data=data if is_pdf else None,
                                 pages_to_process=pages_to_process,
                                 paddleocr_job_id=paddleocr_job_id,
+                                ocr_markdown=paddleocr_markdown,
                             )
                             if saved_questions:
                                 steps_completed.append("llm_annotate")
@@ -2142,13 +2900,6 @@ class _DocumentProcessing:
                 )
             question_blocks.append(block)
 
-        # Cleanup temp files
-        for img_path in page_images:
-            try:
-                Path(img_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-
         return (
             question_blocks,
             getattr(result, "paddleocr_markdown", ""),
@@ -2209,11 +2960,9 @@ class _DocumentProcessing:
         subject_prompt_add = _get_subject_prompt_addition(subject_code)
 
         # ── Session #125: MIMO V2.5 as primary annotation model ──
-        # MIMO has 1M context window → no truncation needed for any
-        # document (including 20+ page Chinese exams).  DeepSeek serves
-        # as fallback via the Gateway's provider chain (MIMO → DeepSeek
-        # → Ollama).  The only cap is the answer section (8K chars —
-        # answer keys are inherently short).
+        # 1M context → no truncation needed for any document.
+        # Session #131: Removed 8000-char answer-section cap — truncating
+        # LaTeX-heavy answer keys caused trailing questions to lose answers.
 
         if answer_md and len(answer_md) >= 20:
             # ── V3 prompt with separated body + answers ──────────
@@ -2225,9 +2974,15 @@ class _DocumentProcessing:
                     "LLM V3: full body (%d chars) via MIMO — no truncation",
                     len(body_md),
                 )
-            max_answer = 8000
-            if len(answer_md) > max_answer:
-                answer_md = answer_md[:max_answer]
+            # Session #131: Removed 8000-char answer-section cap.
+            # Truncating LaTeX-heavy answer keys (math/physics)
+            # caused trailing questions (Q19-21) to lose answers.
+            # MIMO 1M context handles full answer sections natively.
+            if len(answer_md) > 8000:
+                logger.info(
+                    "LLM V3: full answer section (%d chars) — no truncation",
+                    len(answer_md),
+                )
             prompt = _LLM_ANNOTATION_PROMPT_V3.replace(
                 "{body}", body_md,
             ).replace("{answers}", answer_md)
@@ -2275,13 +3030,19 @@ class _DocumentProcessing:
             # annotation calls to 2 to avoid overwhelming the API.
             # Gateway fallback chain: MIMO → DeepSeek → Ollama.
             #
-            # S#126: Per-subject LLM routing.
-            # Chemistry → DeepSeek V4 Pro (mode="reasoning", better
-            # comprehensive question merging).  Other subjects keep
-            # mode="fast" → MIMO → DeepSeek V4 Flash fallback.
-            if subject_code and subject_code in _CHEM_LLM_SUBJECTS:
-                annotate_mode = _CHEM_LLM_ANNOTATION_MODE
-                annotate_model = _CHEM_LLM_ANNOTATION_MODEL
+            # S#126+131: Per-subject LLM routing.
+            # Chemistry → DeepSeek V4 Pro (better comprehensive question
+            #   merging — keeps (1)(2)(3) sub-items as one question).
+            # Math/Physics → DeepSeek V4 Pro (S#131: MIMO doesn't fully
+            #   support response_format=json_object; LaTeX backslashes
+            #   like \frac, \mathbf break JSON parsing).
+            # Other subjects → mode="fast" → MIMO → DeepSeek V4 Flash fallback.
+            if subject_code and (
+                subject_code in _CHEM_LLM_SUBJECTS
+                or subject_code in _DEEPSEEK_LATEX_SUBJECTS
+            ):
+                annotate_mode = _DEEPSEEK_LATEX_MODE
+                annotate_model = _DEEPSEEK_LATEX_MODEL
             else:
                 annotate_mode = "fast"
                 annotate_model = None
@@ -2289,7 +3050,7 @@ class _DocumentProcessing:
                 result = await llm_gateway.generate(
                     mode=annotate_mode, prompt=prompt,
                     response_format={"type": "json_object"},
-                    max_tokens=49152,  # Session #125: 32K→49K — MIMO handles larger output
+                    max_tokens=65536,  # Session #131: 49K→65K — chemistry tables+LaTeX need more output
                     model=annotate_model,
                 )
             response_text = result.get("response", "")
@@ -2550,7 +3311,9 @@ class _DocumentProcessing:
 
     @staticmethod
     def _parse_llm_annotation_json(text: str) -> Any:
-        """Parse JSON from LLM response, handling markdown code fences."""
+        """Parse JSON from LLM response, handling markdown code fences
+        and LaTeX/CJK escaping issues common in merged reading comprehension.
+        """
         import re
 
         text = text.strip()
@@ -2563,35 +3326,111 @@ class _DocumentProcessing:
         if fence_match:
             text = fence_match.group(1).strip()
 
-        try:
-            return json.loads(text, strict=False)
-        except json.JSONDecodeError:
-            # Try extracting JSON object from surrounding text
-            obj_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if obj_match:
-                raw_json = obj_match.group(0)
-                try:
-                    return json.loads(raw_json, strict=False)
-                except json.JSONDecodeError:
-                    # LaTeX backslashes (e.g. \frac, \sqrt, \left) are not
-                    # valid JSON escape sequences and cause parse failures.
-                    # Only escape backslashes that are NOT followed by a
-                    # valid JSON escape char (" \ / b f n r t u).
-                    # This avoids double-escaping already-correct \\ sequences.
-                    try:
-                        fixed = re.sub(
-                            r'\\(?!["\\/bfnrtu])',
-                            r'\\\\',
-                            raw_json,
-                        )
-                        return json.loads(fixed, strict=False)
-                    except json.JSONDecodeError:
-                        pass
+        # Extract JSON object — the LLM may wrap it in explanatory text
+        obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not obj_match:
             logger.warning(
-                "LLM annotation: JSON parse failed for %d chars",
+                "LLM annotation: no JSON object found in %d chars",
                 len(text),
             )
             return None
+        raw_json = obj_match.group(0)
+
+        def _try_parse(json_str: str, strict: bool = False) -> Any | None:
+            """Try json.loads, returning None on failure.
+
+            Uses ``strict=True`` to reject invalid JSON escapes like
+            LaTeX ``\\frac``, which forces them into Attempt 2's
+            correct double-escaping path instead of silently
+            converting ``\\f``→form-feed (0x0C).
+            """
+            try:
+                return json.loads(json_str, strict=strict)
+            except json.JSONDecodeError:
+                return None
+
+        # ── Attempt 1: Strict parse ──
+        # Rejects LaTeX backslash sequences (\\frac, \\sqrt, etc.)
+        # which are invalid JSON.  Falls through to Attempt 2.
+        result = _try_parse(raw_json)
+        if result is not None:
+            return result
+
+        # ── Attempt 2: LaTeX backslash escaping ──
+        # LaTeX \\frac, \\sqrt, \\left, etc. are NOT valid JSON escapes.
+        # Escape lone backslashes that aren't part of a valid JSON escape
+        # sequence (\\\", \\\\, \\/, \\b, \\f, \\n, \\r, \\t, \\u).
+        fixed = re.sub(
+            r'\\(?!["\\/bfnrtu])',
+            r'\\\\',
+            raw_json,
+        )
+        result = _try_parse(fixed, strict=False)
+        if result is not None:
+            return result
+
+        # ── Attempt 3: Fix unescaped quotes inside string values ──
+        # CJK text passages may contain literal " characters that break
+        # JSON string boundaries.  This is common in Chinese reading
+        # comprehension passages with dialogue or quotation marks.
+        # Strategy: find all JSON string values and escape internal quotes.
+        try:
+            # Locate string values: "key": "value"
+            # Escape any unescaped " that appears between the value quotes
+            def _escape_inner_quotes(s: str) -> str:
+                """Escape \" inside JSON string values."""
+                # Pattern: after a key, the value string starts with "
+                # We scan character by character tracking whether we're
+                # inside a string value and escape bare " chars.
+                result_chars: list[str] = []
+                in_string = False
+                escape_next = False
+                for i, ch in enumerate(s):
+                    if escape_next:
+                        escape_next = False
+                        result_chars.append(ch)
+                        continue
+                    if ch == '\\':
+                        escape_next = True
+                        result_chars.append(ch)
+                        continue
+                    if ch == '"':
+                        if in_string:
+                            # Look ahead: is this quote followed by , } ] or :
+                            # indicating end of string value?
+                            after = s[i+1:i+20].lstrip()
+                            if after and after[0] in ',}]:':
+                                in_string = False
+                            else:
+                                # This " is inside a string value — escape it
+                                result_chars.append('\\')
+                        else:
+                            in_string = True
+                    result_chars.append(ch)
+                return ''.join(result_chars)
+
+            fixed2 = _escape_inner_quotes(fixed)
+            result = _try_parse(fixed2)
+            if result is not None:
+                logger.info(
+                    "LLM annotation: JSON parsed after inner-quote escaping"
+                )
+                return result
+        except Exception:
+            pass
+
+        # ── Attempt 4: json_repair library (if available) ──
+        try:
+            import json_repair  # type: ignore[import-untyped]
+            return json_repair.repair_json(fixed, return_objects=True)
+        except Exception:
+            pass
+
+        logger.warning(
+            "LLM annotation: JSON parse failed for %d chars",
+            len(text),
+        )
+        return None
 
     @staticmethod
     def _infer_type_from_section(section: str) -> str:
@@ -2667,6 +3506,7 @@ class _DocumentProcessing:
         pdf_data: bytes | None = None,
         pages_to_process: list[str] | None = None,
         paddleocr_job_id: str = "",
+        ocr_markdown: str = "",
     ) -> list[dict]:
         """Save LLM-annotated questions directly to DB (one transaction).
 
@@ -2681,6 +3521,7 @@ class _DocumentProcessing:
             pdf_data: Raw PDF bytes (for subject resolution)
             pages_to_process: Page image paths (for image association)
             paddleocr_job_id: PP-StructureV3 API job ID (for image upload)
+            ocr_markdown: Raw OCR markdown (for option supplement fallback)
 
         Returns:
             List of saved question dicts: [{id, content, answer, ...}]
@@ -2691,18 +3532,32 @@ class _DocumentProcessing:
             return []
 
         # ── Session #115: Rewrite PP-StructureV3 image URLs ──────────
-        # Stems may contain <img src="imgs/..."> paths from PP-StructureV3
-        # markdown.  If a job_id is available, download the image ZIP,
-        # upload to MinIO, and replace paths before saving.
+        # Stems + explanations may contain <img src="imgs/..."> paths
+        # from PP-StructureV3 markdown.  If a job_id is available,
+        # download the image ZIP, upload to MinIO, and replace paths
+        # before saving.
+        # S#134 TODO3: Check whether LLM preserves imgs/ in its output
+        _llm_img_count = sum(
+            1 for q in questions
+            for field in ("stem", "explanation")
+            if "imgs/" in str(q.get(field, ""))
+        )
+        logger.warning("PIPELINE_DEBUG: job_id=%s pages=%d llm_img_refs=%d",
+                       paddleocr_job_id[:30] if paddleocr_job_id else "EMPTY",
+                       len(pages_to_process) if pages_to_process else 0,
+                       _llm_img_count)
         if paddleocr_job_id:
+            # S#134: Scan both stem and explanation for image references
             _has_imgs = any(
-                "<img" in str(q.get("stem", ""))
-                and "imgs/" in str(q.get("stem", ""))
+                "<img" in str(q.get(field, ""))
+                and "imgs/" in str(q.get(field, ""))
                 for q in questions
+                for field in ("stem", "explanation")
             )
             if _has_imgs:
                 questions = await _rewrite_stem_image_urls(
                     questions, paddleocr_job_id, task_id,
+                    page_images=pages_to_process,
                 )
 
         from app.db.session import async_session_factory
@@ -2790,6 +3645,11 @@ class _DocumentProcessing:
                 # content was "[选择题] （4分） 第1题" instead of the actual
                 # question text.
                 stem_raw = q.get("stem", "").strip()
+                # S#136: supplement check
+                if ocr_markdown and qno:
+                    _sl = set(m.group()[0] for m in _INLINE_OPTION_MARKER_RE.finditer(stem_raw))
+                    if len(_sl) < 4:
+                        logger.warning("S#136 Q%d stem_opts=%d ocr_md=%d", qno, len(_sl), len(ocr_markdown))
                 stem = _clean_stem_for_db(stem_raw)
                 # Session #125: Extract options before scoring so
                 # _score_stem_quality can reduce short-stem penalties
@@ -2806,7 +3666,7 @@ class _DocumentProcessing:
                 total_stem_quality += stem_quality
                 stem_count += 1
 
-                if stem and stem_quality >= 0.5:
+                if stem and stem_quality >= 0.3:  # S#136: relaxed from 0.5→0.3 for truncated options
                     content = stem
                     # ── Session #115: Options formatting ──────────
                     # Force each option to its own line for readability.
@@ -2846,6 +3706,12 @@ class _DocumentProcessing:
                 section = q.get("section", "")
 
                 try:
+                    # Session #130: Extract passage_text for
+                    # material-based question groups (reading,
+                    # cloze, experiments, etc.)
+                    _passage = q.get("passage_text", "")
+                    _passage = _passage.strip() if _passage else None
+
                     db_q = await q_repo.create(
                         content=content,
                         document_id=doc_id,
@@ -2853,6 +3719,7 @@ class _DocumentProcessing:
                         subject_id=subject_id,
                         source_type="llm_annotation",
                         question_type=qtype,
+                        passage_text=_passage,
                     )
                     await session.flush()
 
@@ -2865,11 +3732,18 @@ class _DocumentProcessing:
                         # Session #115: Save LLM explanation when available.
                         # Non-empty explanations arrive for teacher-edition
                         # format docs with inline 【详解】 markers.
+                        # S#134: Apply text cleaning to answer + explanation
+                        # (same pipeline as stem, without QNO/option rules).
                         llm_explanation = q.get("explanation", "")
+                        cleaned_answer = _clean_text_for_db(answer, is_stem=False) if answer else ""
+                        cleaned_explanation = (
+                            _clean_text_for_db(llm_explanation, is_stem=False)
+                            if llm_explanation else None
+                        )
                         await sol_repo.create(
                             question_id=db_q.id,
-                            final_answer=answer or "",
-                            explanation=llm_explanation or None,
+                            final_answer=cleaned_answer or "",
+                            explanation=cleaned_explanation,
                             model_source="llm_annotation",
                             mode="llm_annotation",
                         )
@@ -2881,21 +3755,145 @@ class _DocumentProcessing:
                     # references under section headers).  When present,
                     # associate the rendered page image as fallback.
                     _stem_text = str(q.get("stem", ""))
+                    _expl_text = str(q.get("explanation", ""))
                     _has_md_img = bool(q.get("_has_images", False))
-                    _has_inline_img = "<img" in _stem_text
+                    _has_inline_img = "<img" in _stem_text or "<img" in _expl_text
                     _q_has_image = _has_md_img or _has_inline_img
+
+                    # S#135: Track whether Fix 2 successfully associated
+                    # precise figure images, so we can skip the whole-page
+                    # screenshot fallback below.
+                    _associated_keys: set[str] = set()
+
+                    # Fix 2 (S#133/#134): Extract individual figure images from
+                    # stem_raw + explanation (still has <img> tags after Fix 1
+                    # URL rewrite) and associate them with the question in
+                    # question_images table.  Deduplicate via associated_keys so
+                    # the same image referenced in both stem and explanation
+                    # only creates one record.
+                    if _has_inline_img:
+                        try:
+                            from app.domains.question.image_service import (
+                                QuestionImageService as _QIS,
+                            )
+                            _img_service_fig = _QIS(session)
+                            _img_re = r'<img\s*src="/api/documents/images/([^"]+)"'
+                            for _field, _field_text in [
+                                ("stem", _stem_text),
+                                ("explanation", _expl_text),
+                            ]:
+                                for _m in re.finditer(_img_re, _field_text):
+                                    _img_key = _m.group(1)
+                                    if _img_key in _associated_keys:
+                                        continue
+                                    _associated_keys.add(_img_key)
+                                    await _img_service_fig.associate_original(
+                                        question_id=db_q.id,
+                                        image_key=_img_key,
+                                        description=(
+                                            f"Figure for Q{qno or db_q.id}"
+                                        ),
+                                    )
+                                    logger.debug(
+                                        "Associated figure (from %s): %s → Q%d",
+                                        _field, _img_key[:80], db_q.id,
+                                    )
+                        except Exception as _exc:
+                            logger.warning(
+                                "Figure association failed for Q%d: %s",
+                                db_q.id, _exc,
+                            )
+
+                        # Path B (S#134): on-the-fly crop when rewritten URLs
+                        # weren't found but imgs/... paths still exist (ZIP
+                        # download + _crop_figures_from_pages both failed).
+                        # Extract bbox coordinates from the filename and crop
+                        # directly from pages_to_process temp images.
+                        if not _associated_keys and _has_inline_img and pages_to_process:
+                            try:
+                                from PIL import Image as _PILImage2
+                                import os as _os2
+                                _raw_re = re.compile(
+                                    r'<img\s*src="imgs/(img_in_image_box_(\d+)_(\d+)_(\d+)_(\d+)\.\w+)"'
+                                )
+                                for _field, _field_text in [
+                                    ("stem", _stem_text),
+                                    ("explanation", _expl_text),
+                                ]:
+                                    for _rm in _raw_re.finditer(_field_text):
+                                        _raw_path = _rm.group(1)
+                                        _rx, _ry, _rw, _rh = (
+                                            int(_rm.group(2)), int(_rm.group(3)),
+                                            int(_rm.group(4)), int(_rm.group(5)),
+                                        )
+                                        # Determine page from Y coordinate
+                                        _probe_path = pages_to_process[0]
+                                        if not _os2.path.isfile(_probe_path):
+                                            continue
+                                        try:
+                                            with _PILImage2.open(_probe_path) as _probe:
+                                                _ph = _probe.height
+                                        except Exception:
+                                            continue
+                                        _pidx = min(_ry // _ph, len(pages_to_process) - 1)
+                                        _ppath = pages_to_process[_pidx]
+                                        if not _os2.path.isfile(_ppath):
+                                            continue
+                                        try:
+                                            with _PILImage2.open(_ppath) as _pimg:
+                                                _l, _t = _rx, _ry % _ph if _pidx > 0 else _ry
+                                                _r, _b = min(_l + _rw, _pimg.width), min(_t + _rh, _pimg.height)
+                                                if _r <= _l or _b <= _t:
+                                                    continue
+                                                _cropped = _pimg.crop((_l, _t, _r, _b))
+                                                import io as _io2, uuid as _uuid2
+                                                _buf = _io2.BytesIO()
+                                                _cropped.save(_buf, format="PNG")
+                                                _buf.seek(0)
+                                                _img_bytes = _buf.read()
+                                            from app.db.minio import upload_file as _upload2
+                                            _obj = f"ppsv3-figures/{paddleocr_job_id}/{_raw_path.rsplit('.',1)[0]}.png"
+                                            _upload2(
+                                                object_name=_obj, data=_img_bytes,
+                                                length=len(_img_bytes),
+                                                content_type="image/png",
+                                                bucket="question-images",
+                                            )
+                                            _minio_url = f"/api/documents/images/{_obj}"
+                                            await _img_service_fig.associate_original(
+                                                question_id=db_q.id,
+                                                image_key=_obj,
+                                                description=f"Figure for Q{qno or db_q.id}",
+                                            )
+                                            _associated_keys.add(_obj)
+                                            logger.info(
+                                                "Path B crop: %s (page %d, box %d,%d,%d,%d) → Q%d",
+                                                _raw_path, _pidx, _l, _t, _r - _l, _b - _t, db_q.id,
+                                            )
+                                        except Exception as _pex:
+                                            logger.warning(
+                                                "Path B crop failed for Q%d %s: %s",
+                                                db_q.id, _raw_path, _pex,
+                                            )
+                            except Exception as _bex:
+                                logger.warning(
+                                    "Path B setup failed for Q%d: %s", db_q.id, _bex,
+                                )
 
                     saved.append({
                         "id": db_q.id,
                         "content": content,
                         "answer": answer,
+                        "explanation": llm_explanation or "",  # S#131: prevent enrichment explain overwrite
                         "question_type": qtype,
                         "has_image": _q_has_image,
                         "image_bbox": [0, 0, 0, 0],  # LLM annotation path has no per-figure bbox
                     })
 
                     # ── Associate page image for questions with figures ──
-                    if _q_has_image and pages_to_process:
+                    # S#135: Only fall back to whole-page screenshot when
+                    # Fix 2 above did NOT already associate precise figures.
+                    if _q_has_image and pages_to_process and not _associated_keys:
                         try:
                             from app.domains.question.image_service import (
                                 QuestionImageService,
@@ -2974,19 +3972,42 @@ class _DocumentProcessing:
             )
 
             if not quality_pass:
-                logger.warning(
-                    "LLM annotation quality gate FAILED: "
-                    "saved=%d threshold=%d avg_quality=%.2f — "
-                    "rolling back, will fall back to regex pipeline",
-                    len(saved), threshold, avg_quality,
-                )
-                await session.rollback()
-                await self._log_step(
-                    task_id, "llm_save",
-                    f"Quality gate failed: {len(saved)}/{threshold} questions, "
-                    f"avg_quality={avg_quality:.2f}",
-                )
-                return []  # empty → triggers fallback in caller
+                if len(saved) > 0:
+                    # ── Session #12x: Partial save ──────────────────
+                    # Even when the overall quality gate fails, commit
+                    # questions that passed individual validation
+                    # (stem_quality >= 0.5).  This avoids discarding
+                    # good questions alongside bad ones.  Caller does
+                    # NOT fall back to regex pipeline for saved questions.
+                    await session.commit()
+                    logger.warning(
+                        "LLM annotation quality gate FAILED but partial save: "
+                        "saved=%d threshold=%d avg_quality=%.2f — "
+                        "committed %d individually-valid questions",
+                        len(saved), threshold, avg_quality, len(saved),
+                    )
+                    await self._log_step(
+                        task_id, "llm_save",
+                        f"Partial save: {len(saved)}/{threshold} questions "
+                        f"(avg_quality={avg_quality:.2f}, below gate but "
+                        f"individually valid)",
+                    )
+                    return saved
+                else:
+                    # Zero valid questions — rollback entirely
+                    logger.warning(
+                        "LLM annotation quality gate FAILED: "
+                        "saved=0 threshold=%d avg_quality=%.2f — "
+                        "rolling back, will fall back to regex pipeline",
+                        threshold, avg_quality,
+                    )
+                    await session.rollback()
+                    await self._log_step(
+                        task_id, "llm_save",
+                        f"Quality gate failed: 0/{threshold} questions, "
+                        f"avg_quality={avg_quality:.2f}",
+                    )
+                    return []
 
             await session.commit()
 

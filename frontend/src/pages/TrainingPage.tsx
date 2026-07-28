@@ -126,7 +126,7 @@ export default function TrainingPage() {
                 const text = trimmed.slice(2).trim();
                 return (
                   <Radio key={letter} value={letter}>
-                    <b>{letter}.</b> {text}
+                    <b>{letter}.</b> <MathRenderer content={text} />
                   </Radio>
                 );
               })}
@@ -319,25 +319,25 @@ export default function TrainingPage() {
                 ) : (
                   <CloseCircleOutlined style={{ color: "#ff4d4f" }} />
                 )}
-                <Text>{r.content.slice(0, 80)}...</Text>
+                <Text><MathRenderer content={r.content.slice(0, 80)} />...</Text>
               </Space>
             }
           >
             <p>
               <Text strong>你的答案：</Text>
-              <Text type={r.is_correct ? "success" : "danger"}>{r.student_answer || "（未作答）"}</Text>
+              <Text type={r.is_correct ? "success" : "danger"}><MathRenderer content={r.student_answer || "（未作答）"} /></Text>
             </p>
             {!r.is_correct && (
               <p>
                 <Text strong>正确答案：</Text>
-                <Text type="success">{r.correct_answer}</Text>
+                <Text type="success"><MathRenderer content={r.correct_answer} /></Text>
               </p>
             )}
             {r.explanation && (
               <div style={{ marginTop: 8 }}>
                 <Text strong>解析：</Text>
                 <Paragraph style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>
-                  {r.explanation}
+                  <MathRenderer content={r.explanation || ""} />
                 </Paragraph>
               </div>
             )}

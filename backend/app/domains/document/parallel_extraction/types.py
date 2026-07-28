@@ -182,6 +182,7 @@ class PaddleOCRPageResult:
     height: int = 0
     blocks: list[PaddleOCRBlock] = field(default_factory=list)
     markdown_text: str = ""  # per-page markdown with LaTeX + <img> refs
+    markdown_images: dict[str, str] = field(default_factory=dict)  # S#134: {filename: url} from API markdown.images
 
 
 @dataclass

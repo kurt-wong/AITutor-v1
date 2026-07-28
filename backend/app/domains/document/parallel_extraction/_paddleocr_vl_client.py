@@ -146,7 +146,7 @@ class PaddleOCRVlClient:
             # which need to be replaced with MinIO URLs.
             if full_markdown:
                 full_markdown = await self._upload_markdown_images(
-                    job_id, full_markdown, self._get_client(),
+                    job_id, full_markdown, pages, self._get_client(),
                 )
             return PaddleOCRResult(
                 job_id=job_id,
@@ -313,91 +313,100 @@ class PaddleOCRVlClient:
     # ── Session #101 P2: Image Upload ──────────────────────────────────
 
     async def _upload_markdown_images(
-        self, job_id: str, markdown: str, client: httpx.AsyncClient,
+        self, job_id: str, markdown: str, pages: list[PaddleOCRPageResult],
+        client: httpx.AsyncClient,
     ) -> str:
         """Download PP-StructureV3 image assets and rewrite URLs to MinIO.
 
-        The API may provide a ZIP containing images referenced by the
-        markdown (e.g. ``<img src=\"imgs/img_...jpg\">``).  We download
-        the ZIP, upload each image to MinIO, and replace the src paths
-        with MinIO object URLs.
+        S#134: Images are embedded in the JSONL response as
+        ``markdown.images`` dicts (``{filename: download_url}``)
+        per page — NOT as a ZIP.  We download each image URL,
+        upload to MinIO, and replace ``imgs/filename`` references
+        in the markdown with MinIO URLs.
         """
-        # Check for ZIP/image download URL in job result
-        try:
-            response = await client.get(
-                f"{_JOB_URL}/{job_id}",
-                headers=self._auth_headers,
-            )
-            response.raise_for_status()
-            data = response.json()
-            result_info = data.get("data", {}).get("resultUrl", {})
-            zip_url = result_info.get("markdownZipUrl") or result_info.get("zipUrl") or ""
-        except Exception:
-            zip_url = ""
+        import re as _re_img
 
-        if not zip_url:
-            logger.info("PaddleOCR-VL: no image ZIP URL for %s — images not available", job_id)
+        # ── Collect image URL map from all pages ─────────────────
+        img_url_map: dict[str, str] = {}  # filename → download URL
+        for page in pages:
+            for fn, url in page.markdown_images.items():
+                if fn not in img_url_map:
+                    img_url_map[fn] = url
+
+        # S#134 debug: log what we actually received
+        _total_pages = len(pages)
+        _pages_with_imgs = sum(1 for p in pages if p.markdown_images)
+        _sample_keys = list(img_url_map.keys())[:5] if img_url_map else []
+        with open("D:\\temp\\debug_img.txt", "a") as _df:
+            _df.write(
+                f"UPLOAD_IMAGES: entry — job={job_id}, "
+                f"pages={_total_pages}, pages_with_images={_pages_with_imgs}, "
+                f"unique_imgs={len(img_url_map)}, sample_keys={_sample_keys}\n"
+            )
+        if not img_url_map:
+            # Also dump the first page's markdown keys to see what's available
+            _sample_md_keys = []
+            if pages:
+                _raw = pages[0].markdown_images
+                _sample_md_keys = list(_raw.keys()) if _raw else []
+            with open("D:\\temp\\debug_img.txt", "a") as _df:
+                _df.write(f"UPLOAD_IMAGES: NO IMAGES — sample page0 markdown_images keys={_sample_md_keys}\n")
+            logger.info("PaddleOCR-VL: no images in markdown.images for %s", job_id)
             return markdown
 
-        import re as _re_img
-        img_refs = _re_img.findall(r'<img\s+src="([^"]+)"', markdown)
-        if not img_refs:
-            return markdown  # No images to upload
+        logger.warning(
+            "PaddleOCR-VL: %d unique images from markdown.images for %s",
+            len(img_url_map), job_id,
+        )
 
-        tmp_dir = tempfile.mkdtemp(prefix="ppsv3_imgs_")
-        try:
-            # Download ZIP
-            resp = await client.get(zip_url)
-            resp.raise_for_status()
-            zip_path = _os.path.join(tmp_dir, "images.zip")
-            with open(zip_path, "wb") as f:
-                f.write(resp.content)
+        # ── Download each image and upload to MinIO ──────────────
+        url_map: dict[str, str] = {}  # original_ref → MinIO URL
+        for fn, img_url in img_url_map.items():
+            try:
+                resp = await client.get(img_url)
+                resp.raise_for_status()
+                img_data = resp.content
+                if not img_data:
+                    logger.warning("PaddleOCR-VL: empty image %s (url=%s)", fn, img_url[:80])
+                    continue
 
-            # Extract
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(tmp_dir)
+                obj_name = f"ppsv3-images/{job_id}/{fn}"
+                import io as _io_up
+                _minio_upload(
+                    object_name=obj_name,
+                    data=_io_up.BytesIO(img_data),
+                    length=len(img_data),
+                    content_type=f"image/{fn.rsplit('.', 1)[-1] if '.' in fn else 'png'}",
+                    bucket="question-images",
+                )
+                minio_url = f"/api/documents/images/{obj_name}"
+                # Map both forms: bare filename and "imgs/filename"
+                url_map[fn] = minio_url
+                url_map[f"imgs/{fn}"] = minio_url
+                logger.info(
+                    "PaddleOCR-VL: uploaded %s (%d bytes) → %s",
+                    fn, len(img_data), minio_url,
+                )
+            except Exception as e:
+                logger.warning(
+                    "PaddleOCR-VL: failed to download/upload %s: %s", fn, e,
+                )
 
-            # Upload each image to MinIO, build URL map
-            url_map: dict[str, str] = {}
-            for root, _dirs, files in _os.walk(tmp_dir):
-                for fn in files:
-                    if fn.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")):
-                        local_path = _os.path.join(root, fn)
-                        # Determine relative path within the ZIP
-                        rel = _os.path.relpath(local_path, tmp_dir).replace("\\", "/")
-                        obj_name = f"ppsv3-images/{job_id}/{rel}"
-                        with open(local_path, "rb") as imgf:
-                            _minio_upload(
-                                object_name=obj_name,
-                                data=imgf,
-                                length=_os.path.getsize(local_path),
-                                content_type=f"image/{fn.rsplit('.',1)[-1]}",
-                                bucket="question-images",
-                            )
-                        # MinIO public URL
-                        minio_url = f"/api/files/question-images/{obj_name}"
-                        url_map[rel] = minio_url
-                        logger.debug("Uploaded PP-StructureV3 image: %s → %s", rel, minio_url)
+        if not url_map:
+            return markdown
 
-            # Rewrite markdown <img> src paths
-            for orig_rel, minio_url in url_map.items():
-                markdown = markdown.replace(f'src="{orig_rel}"', f'src="{minio_url}"')
-                # Also handle variants: imgs/ prefix
-                fn_only = _os.path.basename(orig_rel)
-                markdown = markdown.replace(f'src="imgs/{fn_only}"', f'src="{minio_url}"')
+        # ── Rewrite markdown <img> src paths ─────────────────────
+        img_refs = _re_img.findall(r'<img\s*src="([^"]+)"', markdown)
+        rewritten = 0
+        for ref, minio_url in url_map.items():
+            # ref is "imgs/filename" or bare filename — replace in src attribute
+            markdown = markdown.replace(f'src="{ref}"', f'src="{minio_url}"')
+            rewritten += 1
 
-            logger.info(
-                "PaddleOCR-VL: uploaded %d images for %s → markdown URLs rewritten",
-                len(url_map), job_id,
-            )
-        except Exception as e:
-            logger.warning(
-                "PaddleOCR-VL: image download/upload failed for %s: %s — "
-                "keeping original markdown paths", job_id, e,
-            )
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
+        logger.warning(
+            "PaddleOCR-VL: UPLOAD COMPLETE — %d/%d images uploaded, %d markdown refs rewritten",
+            len(url_map) // 2, len(img_url_map), rewritten,
+        )
         return markdown
 
     # ── JSONL Parser ──────────────────────────────────────────────────
@@ -449,6 +458,15 @@ class PaddleOCRVlClient:
         pruned = lr.get("prunedResult", {})
         md_obj = lr.get("markdown", {})
         markdown_text = md_obj.get("text", "") if isinstance(md_obj, dict) else ""
+        markdown_images: dict[str, str] = md_obj.get("images", {}) if isinstance(md_obj, dict) else {}  # S#134
+        # S#134 debug: first page only
+        if line_num == 1 and isinstance(md_obj, dict):
+            _md_keys = list(md_obj.keys())
+            with open("D:\\temp\\debug_img.txt", "a") as _df:
+                _df.write(f"PARSE_PAGE1: markdown keys={_md_keys}, images_type={type(markdown_images).__name__}, images_count={len(markdown_images)}\n")
+                if markdown_images:
+                    _sample = list(markdown_images.items())[:3]
+                    _df.write(f"PARSE_PAGE1: images sample={_sample}\n")
 
         width = pruned.get("width", 0)
         height = pruned.get("height", 0)
@@ -489,6 +507,7 @@ class PaddleOCRVlClient:
             height=height,
             blocks=blocks,
             markdown_text=markdown_text,
+            markdown_images=markdown_images,
         )
 
     # ── Result Classification Helpers ─────────────────────────────────

@@ -3,6 +3,7 @@ import { Card, List, Tag, Typography, Space, Select, Spin, Empty, Button, Divide
 import { WarningOutlined, FilterOutlined, EyeOutlined, LoadingOutlined } from "@ant-design/icons";
 import { apiGetParams, apiGet } from "../../services/api";
 import { DIFFICULTY_LABELS, ERROR_COLORS } from "../../types";
+import MathRenderer from "../../components/MathRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -148,7 +149,7 @@ export default function WrongBookPage() {
                   )}
                   <Text type="secondary">错误 {item.wrong_count} 次</Text>
                 </Space>
-                <Paragraph ellipsis={{ rows: 2 }}>{item.question_content}</Paragraph>
+                <Paragraph ellipsis={{ rows: 2 }}><MathRenderer content={item.question_content} /></Paragraph>
                 <Button
                   type="link"
                   icon={solutionLoading && expandedId === item.id ? <LoadingOutlined /> : <EyeOutlined />}
@@ -159,17 +160,17 @@ export default function WrongBookPage() {
                 </Button>
                 {expandedId === item.id && solution && (
                   <div style={{ background: "var(--bg-solution)", padding: 12, borderRadius: "var(--radius)", marginTop: 8 }}>
-                    <Text strong>答案：</Text><Text>{solution.final_answer}</Text>
+                    <Text strong>答案：</Text><Text><MathRenderer content={solution.final_answer} /></Text>
                     <Divider style={{ margin: "8px 0" }} />
                     {solution.solution_steps.map((s) => (
                       <Paragraph key={s.step} style={{ marginBottom: 4 }}>
-                        <Tag color="blue">{s.step}</Tag> {s.description}
+                        <Tag color="blue">{s.step}</Tag> <MathRenderer content={s.description} />
                       </Paragraph>
                     ))}
                     {solution.explanation && (
                       <>
                         <Divider style={{ margin: "8px 0" }} />
-                        <Text type="secondary">{solution.explanation}</Text>
+                        <Text type="secondary"><MathRenderer content={solution.explanation} /></Text>
                       </>
                     )}
                   </div>

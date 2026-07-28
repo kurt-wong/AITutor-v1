@@ -80,7 +80,12 @@ async def batch_upload_documents(
 
 # ── T11-02: Question List with Filters ────────────────────────
 
-SUBJECT_MAP = {"数学": 1, "物理": 2, "化学": 3, "英语": 4, "语文": 5}
+# Session #131: Updated to match actual subjects table IDs (1-9).
+# Prior mapping had 英语→4 (wrong: 4=BIO) and was missing bio/politics/history/geography.
+SUBJECT_MAP = {
+    "数学": 1, "物理": 2, "化学": 3, "生物": 4,
+    "语文": 5, "英语": 6, "政治": 7, "历史": 8, "地理": 9,
+}
 
 
 @router.get("/questions")
@@ -387,9 +392,13 @@ async def analyze_document(
                 "question_number": q.question_number,
                 "source_type": q.source_type,
                 "question_type": q.question_type,  # Session #100: expose for E2E verification
+                # Session #130: Sequential display number (1-based
+                # within document). Original exam QNO is metadata only.
+                "display_number": idx + 1,
+                "passage_text": getattr(q, "passage_text", None),
                 "knowledge_points": kp_map.get(q.id, []),  # Session #101 P1: expose for E2E
             }
-            for q in questions
+            for idx, q in enumerate(questions)
         ],
         "questions_count": len(questions),
         "difficulty_distribution": build_distribution(questions),

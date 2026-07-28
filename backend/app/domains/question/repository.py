@@ -28,6 +28,7 @@ class QuestionRepository:
         source_type: str = "uploaded",
         image_key: str | None = None,
         question_type: str | None = None,
+        passage_text: str | None = None,
     ) -> Question:
         """Create a new question record."""
         question = Question(
@@ -39,6 +40,7 @@ class QuestionRepository:
             difficulty=difficulty,
             source_type=source_type,
             question_type=question_type,
+            passage_text=passage_text,
         )
         self.session.add(question)
         await self.session.flush()
@@ -162,14 +164,26 @@ class QuestionRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def count_all(self, exclude_generated: bool = False) -> int:
-        """Count total questions.
-
-        Args:
-            exclude_generated: If True, exclude questions with source_type='generated'
-        """
+    async def count_all(
+        self,
+        exclude_generated: bool = False,
+        subject_id: int | None = None,
+        difficulty: int | None = None,
+        document_id: int | None = None,
+        query: str = "",
+    ) -> int:
+        """Count total questions with optional filters (Session #131)."""
         from sqlalchemy import func as sql_func
         stmt = select(sql_func.count()).select_from(Question)
+        if query:
+            escaped = query.replace("%", r"\%").replace("_", r"\_")
+            stmt = stmt.where(Question.content.ilike(f"%{escaped}%", escape="\\"))
+        if subject_id is not None:
+            stmt = stmt.where(Question.subject_id == subject_id)
+        if difficulty is not None:
+            stmt = stmt.where(Question.difficulty == difficulty)
+        if document_id is not None:
+            stmt = stmt.where(Question.document_id == document_id)
         if exclude_generated:
             stmt = stmt.where(Question.source_type != "generated")
         result = await self.session.execute(stmt)
