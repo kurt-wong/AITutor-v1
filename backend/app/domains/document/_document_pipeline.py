@@ -94,9 +94,10 @@ class DocumentPipeline:
         subject_code = task_data.get("subject")
 
         # Normalize Chinese subject names to English codes
+        # Keys must match SUBJECT_CODE_MAP in subject_identifier.py
         if subject_code:
             _CN_TO_EN = {
-                "数学": "math", "语文": "chinese", "英语": "english",
+                "数学": "mathematics", "语文": "chinese", "英语": "english",
                 "物理": "physics", "化学": "chemistry", "生物": "biology",
                 "政治": "politics", "历史": "history", "地理": "geography",
             }
@@ -176,8 +177,9 @@ class DocumentPipeline:
                         ctx.file_path, filename_meta,
                     )
                     if not ctx.subject_code and filename_meta.get("subject"):
+                        # Keys must match SUBJECT_CODE_MAP in subject_identifier.py
                         _CN_TO_CODE = {
-                            "数学": "math", "语文": "chinese", "英语": "english",
+                            "数学": "mathematics", "语文": "chinese", "英语": "english",
                             "物理": "physics", "化学": "chemistry", "生物": "biology",
                             "政治": "politics", "历史": "history", "地理": "geography",
                         }
