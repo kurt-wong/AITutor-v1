@@ -5,6 +5,26 @@
 
 ---
 
+## Session #137g — 2026-07-28: PaddleOCR use_gpu 修复 + 管线验证
+
+### PaddleOCR use_gpu 修复
+
+`paddleocr_provider.py` 传递 `use_gpu` 给 PaddleOCR 2.9.1，该版本已移除此参数（2.7+ 改为由安装的 paddlepaddle 变体决定 GPU）。
+
+- `__init__` 保留 `use_gpu` 参数（向后兼容），传 `True` 时打印 deprecation warning
+- `_get_ocr_instance()` 和 `extract_text()` 移除 `use_gpu` 传递
+- 影响范围：仅废弃的本地 OCR 回退路径，生产管线（PP-StructureV3）不受影响
+
+### 管线影响评估
+
+| 项 | 结论 |
+|---|------|
+| DB migration（passage_text/year） | ✅ 无问题，alembic 已是最新（head=016） |
+| OCR use_gpu | ✅ 已修复，废弃路径不再崩溃 |
+| 生产管线（PP-StructureV3） | 不受影响 |
+
+---
+
 ## Session #137g — 2026-07-28: 4 项 HIGH/MEDIUM 优先级修复
 
 按 TRAE + Claude 共识优先级修复剩余架构违规。

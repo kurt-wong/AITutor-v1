@@ -1,6 +1,6 @@
 # 代码评估报告全面验证结果
 
-> 验证日期: 2026-07-28 | 版本: 1.28.0
+> 验证日期: 2026-07-28 | 版本: 1.29.0
 > 验证方式: 5 个并行 Agent + 手动代码扫描 + TRAE 交叉验证
 > 评分修正: 核心管线 6.5→7.0（TRAE 建议折中）
 > 修复后扫描: 2026-07-28 Claude 4-Agent 全量复扫 + TRAE 逐项验证
@@ -161,6 +161,7 @@
 | **B13** | sse_handler.py 越权 | 新建 `StudentImageService`，sse_handler 改为委托调用 | S#137g |
 | **API commit** | `training.py:58` + `exams.py:44` | commit 移入 `TrainingService.create_training_set()` + `ExamService.create_exam()` | S#137g |
 | **B8** | MCP 工具互调 | 提取 `_map_knowledge_impl()` 共享 helper | S#137g |
+| **use_gpu** | PaddleOCR 参数废弃 | 移除 `use_gpu` 传递，保留向后兼容参数 | S#137g |
 
 ### 仍存在问题
 
