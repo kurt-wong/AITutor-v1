@@ -65,6 +65,10 @@ function MathBlock({ latex, display = false }: { latex: string; display?: boolea
         // S#135: Bridge commonly-used-but-unsupported LaTeX commands
         "\\xlongequal": "\\stackrel{#1}{=}",
         "\\ds": "\\displaystyle",
+        // S#137e: cancel commands (KaTeX supports \enclose for strikethrough)
+        "\\cancel": "\\enclose{updiagonalstrike}{#1}",
+        "\\bcancel": "\\enclose{downdiagonalstrike}{#1}",
+        "\\xcancel": "\\enclose{horizontalstrike}{#1}",
       },
     });
 

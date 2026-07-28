@@ -33,6 +33,56 @@ if TYPE_CHECKING:
     )
 
 
+# ═══ Table Normalisation (P1-2) ═══════════════════════════════════════════
+
+_HTML_TABLE_RE = re.compile(
+    r"<table[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE
+)
+
+
+def _normalize_stem_tables(text: str) -> str:
+    """Convert HTML <table> blocks in stem text to Markdown pipe tables.
+
+    The VL model may output HTML tables in question stems.  The frontend
+    MathRenderer only recognises GFM pipe tables, so we normalise here.
+    """
+    if not text or "<table" not in text.lower():
+        return text
+
+    def _convert(m: re.Match) -> str:
+        html = m.group(0)
+        # Extract rows from <tr>...</tr>
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL | re.IGNORECASE)
+        if len(rows) < 2:
+            return html  # need at least header + 1 body row
+
+        def _cells(row_html: str) -> list[str]:
+            return [
+                re.sub(r"<[^>]+>", "", c).strip()
+                for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, re.DOTALL | re.IGNORECASE)
+            ]
+
+        header = _cells(rows[0])
+        if not header:
+            return html
+        col_count = len(header)
+        body = [_cells(r) for r in rows[1:]]
+        # Pad rows to column count
+        for row in body:
+            while len(row) < col_count:
+                row.append("")
+
+        lines = [
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join(["---"] * col_count) + " |",
+        ]
+        for row in body:
+            lines.append("| " + " | ".join(row) + " |")
+        return "\n".join(lines)
+
+    return _HTML_TABLE_RE.sub(_convert, text)
+
+
 # ═══ Output Type ═══════════════════════════════════════════════════════════
 
 @dataclass

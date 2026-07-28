@@ -113,10 +113,11 @@ class PageQuestion:
         _qno = d.get("qno")
         if _qno is not None and not isinstance(_qno, str):
             _qno = str(_qno)
+        from app.domains.question.structurer import _normalize_stem_tables
         return cls(
             qno=_qno,
-            stem=d.get("stem", ""),
-            options=d.get("options", []),
+            stem=_normalize_stem_tables(d.get("stem", "")),
+            options=[_normalize_stem_tables(o) for o in d.get("options", [])],
             complete=d.get("complete", True),
             figures=d.get("figures", []),
             type=d.get("type"),
