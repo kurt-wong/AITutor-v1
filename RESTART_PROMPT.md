@@ -258,6 +258,7 @@ Q2/Q8 选项缺失的根因是 LLM annotation 被 quality gate 静默丢弃，�
 ### ✅ B6 — Gateway 统一（S#137 完成）— 删除 `_call_ollama_solve`，走 Gateway fallback
 ### ✅ B9 — PIPELINE_DEBUG（S#137b 完成）— `warning` → `debug` 级别
 ### ✅ P2-4 — 管线静默吞异常（S#137b 完成）— 3 处 `except: pass` → 加 `logger.warning`
+### ✅ B1 — 699行拆分（S#137c 完成）— `DocumentPipeline` 类 + `PipelineContext` 数据类
 
 ### 🟡 P1-1 — KaTeX 不支持的 LaTeX 命令
 
@@ -293,6 +294,7 @@ S#136 已通过代码层面（OCR 预拆分 + 选项补全 + 阈值放松）解�
 
 | Session | 日期 | 内容 |
 |---------|------|------|
+| **#137c** | **07-28** | **B1 拆分**: `_process_document_task` 699行 → `DocumentPipeline` 类(8个阶段方法) + `PipelineContext` 数据类。`async_document.py` -689行。 |
 | **#137b** | **07-28** | **第二阶段修复**: P2-4 管线 3 处静默吞异常 → 加 logger.warning；B9 PIPELINE_DEBUG warning→debug 降级。 |
 | **#137** | **07-28** | **代码评估验证 + 第一批修复**: 5 个并行 Agent 验证评估报告(93%准确)。第一批 5 项: F1 XSS(escapeHtml) + P1-3(start.ps1) + F2(SSE AbortController) + B6(Gateway 统一，删除 _call_ollama_solve)。详见 `Docs/CODE_REVIEW_VERIFICATION.md`。 |
 | **#136** | **07-28** | **选项提取三层修复**: (1) `_split_inline_options()` 在 OCR pre-clean 中预拆分 (2) option supplement fallback 从 OCR 补全缺失选项 (3) stem_quality 阈值 0.5→0.3 放松。根因: quality gate 静默丢弃 → regex 管线绕过所有选项代码。 |

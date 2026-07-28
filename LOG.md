@@ -24,6 +24,25 @@
 
 ---
 
+## Session #137c — 2026-07-28: B1 管线拆分
+
+`_process_document_task` 699行 → `DocumentPipeline` 类 + `PipelineContext` 数据类。
+
+| 阶段 | 方法 | 行数 |
+|------|------|------|
+| 初始化+元数据 | `_init_task_context()` + `_extract_filename_metadata()` | ~80 |
+| 下载+转换 | `_download_and_convert()` | ~60 |
+| 提取(Route A) | `_extract_route_parallel()` + `_merge_llm_into_regex()` | ~160 |
+| 提取(Route B) | `_extract_route_ppstructure()` | ~70 |
+| 存储 | `_store_questions()` | ~70 |
+| 富化入队 | `_enqueue_enrichment()` | ~20 |
+| 收尾 | `_finalize_task()` | ~50 |
+| 错误处理 | `_handle_task_error()` | ~30 |
+
+`async_document.py`: -689行。新文件 `_document_pipeline.py`: 652行。
+
+---
+
 ## Session #137b — 2026-07-28: 第二阶段修复
 
 ### P2-4 — 管线静默吞异常
