@@ -24,6 +24,19 @@
 
 ---
 
+## Session #137d — 2026-07-28: B3-B5 架构合规迁移
+
+| 违规 | API 文件 | 迁移到 Service | 新方法 |
+|------|----------|---------------|--------|
+| B3 | `training.py:120-131` | `TrainingService` | `record_wrong_questions()` |
+| B4 | `admin.py:366-382` | `QuestionService` | `get_knowledge_points_for_questions()` |
+| B5 | `documents.py:158-170` | `DocumentService` | `download_image()` (static) |
+| B5 | `student.py:68-85` | `DocumentService` | `upload_student_image()` (static) |
+
+7 files changed: +121/-58.
+
+---
+
 ## Session #137c — 2026-07-28: B1 管线拆分
 
 `_process_document_task` 699行 → `DocumentPipeline` 类 + `PipelineContext` 数据类。

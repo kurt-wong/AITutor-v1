@@ -259,6 +259,9 @@ Q2/Q8 选项缺失的根因是 LLM annotation 被 quality gate 静默丢弃，�
 ### ✅ B9 — PIPELINE_DEBUG（S#137b 完成）— `warning` → `debug` 级别
 ### ✅ P2-4 — 管线静默吞异常（S#137b 完成）— 3 处 `except: pass` → 加 `logger.warning`
 ### ✅ B1 — 699行拆分（S#137c 完成）— `DocumentPipeline` 类 + `PipelineContext` 数据类
+### ✅ B3 — training.py API→Service（S#137d 完成）— `TrainingService.record_wrong_questions()`
+### ✅ B4 — admin.py API→Service（S#137d 完成）— `QuestionService.get_knowledge_points_for_questions()`
+### ✅ B5 — MinIO API→Service（S#137d 完成）— `DocumentService.download_image()` + `upload_student_image()`
 
 ### 🟡 P1-1 — KaTeX 不支持的 LaTeX 命令
 
@@ -294,6 +297,7 @@ S#136 已通过代码层面（OCR 预拆分 + 选项补全 + 阈值放松）解�
 
 | Session | 日期 | 内容 |
 |---------|------|------|
+| **#137d** | **07-28** | **B3-B5 架构合规**: training.py→`TrainingService.record_wrong_questions()`；admin.py→`QuestionService.get_knowledge_points_for_questions()`；documents.py/student.py→`DocumentService.download_image()`+`upload_student_image()`。7文件+121/-58。 |
 | **#137c** | **07-28** | **B1 拆分**: `_process_document_task` 699行 → `DocumentPipeline` 类(8个阶段方法) + `PipelineContext` 数据类。`async_document.py` -689行。 |
 | **#137b** | **07-28** | **第二阶段修复**: P2-4 管线 3 处静默吞异常 → 加 logger.warning；B9 PIPELINE_DEBUG warning→debug 降级。 |
 | **#137** | **07-28** | **代码评估验证 + 第一批修复**: 5 个并行 Agent 验证评估报告(93%准确)。第一批 5 项: F1 XSS(escapeHtml) + P1-3(start.ps1) + F2(SSE AbortController) + B6(Gateway 统一，删除 _call_ollama_solve)。详见 `Docs/CODE_REVIEW_VERIFICATION.md`。 |
