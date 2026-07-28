@@ -3542,7 +3542,7 @@ class _DocumentProcessing:
             for field in ("stem", "explanation")
             if "imgs/" in str(q.get(field, ""))
         )
-        logger.warning("PIPELINE_DEBUG: job_id=%s pages=%d llm_img_refs=%d",
+        logger.debug("Pipeline stats: job_id=%s pages=%d llm_img_refs=%d",
                        paddleocr_job_id[:30] if paddleocr_job_id else "EMPTY",
                        len(pages_to_process) if pages_to_process else 0,
                        _llm_img_count)

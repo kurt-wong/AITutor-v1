@@ -920,7 +920,8 @@ class AsyncPipeline(_DocumentProcessing):
                 row = r.fetchone()
                 if row:
                     subject_name = row[0] or ""
-        except Exception:
+        except Exception as _subj_err:
+            logger.warning("Subject lookup failed for Q%d: %s", question_id, _subj_err)
             subject_name = ""
 
         # Build prompt context
@@ -1296,8 +1297,8 @@ class AsyncPipeline(_DocumentProcessing):
                             } for c in _codes]
                             saved = await _kp_repo.save_question_knowledge(qid, _kps)
                             _kp_count += saved
-                        except Exception:
-                            pass
+                        except Exception as _kp_err:
+                            logger.warning("KP mapping skipped for Q%d: %s", qid, _kp_err)
                     if _kp_count > 0:
                         await _kp_session.commit()
                         await self._log_step(
@@ -1727,8 +1728,8 @@ class AsyncPipeline(_DocumentProcessing):
                 _row = _r.fetchone()
                 if _row and _row[0]:
                     qtype = _row[0]
-        except Exception:
-            pass
+        except Exception as _qt_err:
+            logger.warning("Question type lookup failed for Q%d: %s", question_id, _qt_err)
 
         final_answer = _validate_llm_answer(str(final_answer_raw), qtype)
         if not final_answer:
