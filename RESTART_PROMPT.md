@@ -256,6 +256,8 @@ Q2/Q8 选项缺失的根因是 LLM annotation 被 quality gate 静默丢弃，�
 ### ✅ F1 — XSS 修复（S#137 完成）— `escapeHtml()` 转义表格内容
 ### ✅ F2 — SSE AbortController（S#137 完成）— `useSSEStream` 支持 abort
 ### ✅ B6 — Gateway 统一（S#137 完成）— 删除 `_call_ollama_solve`，走 Gateway fallback
+### ✅ B9 — PIPELINE_DEBUG（S#137b 完成）— `warning` → `debug` 级别
+### ✅ P2-4 — 管线静默吞异常（S#137b 完成）— 3 处 `except: pass` → 加 `logger.warning`
 
 ### 🟡 P1-1 — KaTeX 不支持的 LaTeX 命令
 
@@ -291,6 +293,7 @@ S#136 已通过代码层面（OCR 预拆分 + 选项补全 + 阈值放松）解�
 
 | Session | 日期 | 内容 |
 |---------|------|------|
+| **#137b** | **07-28** | **第二阶段修复**: P2-4 管线 3 处静默吞异常 → 加 logger.warning；B9 PIPELINE_DEBUG warning→debug 降级。 |
 | **#137** | **07-28** | **代码评估验证 + 第一批修复**: 5 个并行 Agent 验证评估报告(93%准确)。第一批 5 项: F1 XSS(escapeHtml) + P1-3(start.ps1) + F2(SSE AbortController) + B6(Gateway 统一，删除 _call_ollama_solve)。详见 `Docs/CODE_REVIEW_VERIFICATION.md`。 |
 | **#136** | **07-28** | **选项提取三层修复**: (1) `_split_inline_options()` 在 OCR pre-clean 中预拆分 (2) option supplement fallback 从 OCR 补全缺失选项 (3) stem_quality 阈值 0.5→0.3 放松。根因: quality gate 静默丢弃 → regex 管线绕过所有选项代码。 |
 | **#135** | **07-28** | **配图内联渲染 + whole-page guard**: MathRenderer 支持 `![alt](url)` Markdown 图片；`_clean_text_for_db` 转换 `<img>` → `![图](url)`；`_associated_keys` 提升外层作用域 + guard 防止重复整页截图。Q1-Q21 8 问题逐项核实。 |

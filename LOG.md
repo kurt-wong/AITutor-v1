@@ -24,6 +24,24 @@
 
 ---
 
+## Session #137b — 2026-07-28: 第二阶段修复
+
+### P2-4 — 管线静默吞异常
+
+3 处 `except Exception: pass` → 加 `logger.warning`:
+
+| 位置 | 函数 | 修复 |
+|------|------|------|
+| L1299 | `_enrich_question()` | KP mapping 异常记录 |
+| L923 | `_process_pipeline_task_b()` | Subject lookup 异常记录 |
+| L1730 | `_save_solution()` | Question type lookup 异常记录 |
+
+### B9 — PIPELINE_DEBUG 降级
+
+`async_document.py` L3545: `logger.warning("PIPELINE_DEBUG: ...")` → `logger.debug("Pipeline stats: ...")`
+
+---
+
 ## Session #136 — 2026-07-28: 选项提取三层修复
 
 根因: LLM annotation 被 quality gate 静默丢弃 → regex 管线绕过选项代码。
