@@ -17,7 +17,7 @@ from app.mcp.base import MCPServerBase, MCPTool, success_response, error_respons
 from app.gateway.router import llm_gateway
 from app.core.prompt_loader import get_system_prompt, format_prompt
 from app.db.session import async_session_factory
-from app.domains.knowledge.repository import KnowledgeRepository
+from app.domains.knowledge.service import KnowledgeService
 from app.domains.knowledge.subject_identifier import SubjectIdentifier
 
 logger = logging.getLogger(__name__)
@@ -109,8 +109,8 @@ class KnowledgeMCPServer(MCPServerBase):
         try:
             # Load actual knowledge node codes from DB for prompt injection
             async with async_session_factory() as session:
-                repo = KnowledgeRepository(session)
-                all_nodes = await repo.list_all()
+                svc = KnowledgeService(session)
+                all_nodes = await svc.list_all_nodes()
                 node_codes_block = "\n".join(
                     f"  - id={n.id}, code={n.code}, name={n.name}" for n in all_nodes
                 )

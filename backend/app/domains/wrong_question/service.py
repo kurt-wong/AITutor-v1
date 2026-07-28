@@ -62,3 +62,12 @@ class WrongQuestionService:
             "wrong_questions": result,
             "total": total,
         }
+
+    async def create(
+        self, question_id: int, error_type: str = "unknown", image_key: str | None = None
+    ) -> dict:
+        """Create a wrong question record."""
+        wq = await self.repo.create(
+            question_id=question_id, error_type=error_type, image_key=image_key
+        )
+        return {"id": wq.id, "question_id": wq.question_id, "error_type": wq.error_type}

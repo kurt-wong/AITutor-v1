@@ -14,8 +14,8 @@ from typing import Any
 
 from app.mcp.base import MCPServerBase, MCPTool, success_response, error_response
 from app.db.session import async_session_factory
-from app.domains.question.repository import QuestionRepository
-from app.domains.question.solution_repository import SolutionRepository
+from app.domains.question.service import QuestionService
+from app.domains.question.solution_service import SolutionService
 
 
 # Forbidden fields per DSD §7 (no COT storage)
@@ -52,8 +52,8 @@ class StorageMCPServer(MCPServerBase):
 
         try:
             async with async_session_factory() as session:
-                repo = QuestionRepository(session)
-                question = await repo.create(
+                svc = QuestionService(session)
+                question = await svc.create(
                     document_id=document_id,
                     content=content,
                     question_number=question_number,
@@ -76,8 +76,8 @@ class StorageMCPServer(MCPServerBase):
 
         try:
             async with async_session_factory() as session:
-                repo = QuestionRepository(session)
-                question = await repo.get_by_id(question_id)
+                svc = QuestionService(session)
+                question = await svc.repo.get_by_id(question_id)
                 if not question:
                     return error_response("NOT_FOUND", "Question not found")
                 return success_response({
@@ -105,8 +105,8 @@ class StorageMCPServer(MCPServerBase):
 
         try:
             async with async_session_factory() as session:
-                repo = QuestionRepository(session)
-                questions = await repo.search(
+                svc = QuestionService(session)
+                questions = await svc.repo.search(
                     query=query,
                     subject_id=subject,
                     difficulty=difficulty,
@@ -156,8 +156,8 @@ class StorageMCPServer(MCPServerBase):
 
         try:
             async with async_session_factory() as session:
-                repo = SolutionRepository(session)
-                solution = await repo.create(
+                svc = SolutionService(session)
+                solution = await svc.create_solution(
                     question_id=question_id,
                     final_answer=final_answer,
                     solution_steps=solution_steps,
@@ -182,8 +182,8 @@ class StorageMCPServer(MCPServerBase):
 
         try:
             async with async_session_factory() as session:
-                repo = SolutionRepository(session)
-                solution = await repo.get_by_question(question_id)
+                svc = SolutionService(session)
+                solution = await svc.repo.get_by_question(question_id)
                 if not solution:
                     return error_response("NOT_FOUND", "Solution not found")
                 return success_response({

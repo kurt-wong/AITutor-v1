@@ -37,6 +37,10 @@ class KnowledgeService:
             "total": len(nodes),
         }
 
+    async def list_all_nodes(self):
+        """Return raw KnowledgeNode list (for MCP server code lookups)."""
+        return await self.repo.list_all()
+
     async def get_tree_by_subject(self, subject_id: int) -> dict | None:
         """Get knowledge tree for a specific subject."""
         nodes = await self.repo.list_by_subject(subject_id)

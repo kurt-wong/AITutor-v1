@@ -13,7 +13,6 @@ from typing import Any
 
 from app.mcp.base import MCPServerBase, MCPTool, success_response, error_response
 from app.db.session import async_session_factory
-from app.domains.embedding.repository import EmbeddingRepository
 from app.domains.embedding.service import EmbeddingService
 
 
@@ -65,14 +64,14 @@ class EmbeddingMCPServer(MCPServerBase):
             # Generate embedding using service (initialized once at server startup)
             embedding_result = await self._embedding_service.generate_embedding(text)
 
-            # Store in database
+            # Store in database via service (B7: no direct repo access)
             async with async_session_factory() as session:
-                repo = EmbeddingRepository(session)
-                await repo.create(
+                await self._embedding_service.store_embedding(
+                    session,
                     question_id=question_id,
                     vector=embedding_result["vector"],
-                    embedding_provider=embedding_result["provider"],
-                    embedding_dimension=embedding_result["dimension"],
+                    provider=embedding_result["provider"],
+                    dimension=embedding_result["dimension"],
                 )
                 await session.commit()
 
@@ -101,8 +100,7 @@ class EmbeddingMCPServer(MCPServerBase):
 
         try:
             async with async_session_factory() as session:
-                repo = EmbeddingRepository(session)
-                results = await repo.search_similar(question_id, top_k=top_k)
+                results = await self._embedding_service.search_similar(session, question_id, top_k=top_k)
                 return success_response({
                     "similar_questions": [
                         {"question_id": r["question_id"], "similarity": r["similarity"]}

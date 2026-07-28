@@ -260,3 +260,25 @@ class EmbeddingService:
             "model": "mock-embedding",
             "latency_ms": 0.0,
         }
+
+    async def store_embedding(
+        self, session, question_id: int, vector: list[float],
+        provider: str, dimension: int,
+    ) -> None:
+        """Persist an embedding vector via the repository layer."""
+        from app.domains.embedding.repository import EmbeddingRepository
+        repo = EmbeddingRepository(session)
+        await repo.create(
+            question_id=question_id,
+            vector=vector,
+            embedding_provider=provider,
+            embedding_dimension=dimension,
+        )
+
+    async def search_similar(
+        self, session, question_id: int, top_k: int = 5
+    ) -> list[dict]:
+        """Search for similar questions via pgvector."""
+        from app.domains.embedding.repository import EmbeddingRepository
+        repo = EmbeddingRepository(session)
+        return await repo.search_similar(question_id, top_k=top_k)

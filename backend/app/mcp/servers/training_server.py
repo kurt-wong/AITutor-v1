@@ -16,10 +16,10 @@ from app.mcp.base import MCPServerBase, MCPTool, success_response, error_respons
 from app.gateway.router import llm_gateway
 from app.core.prompt_loader import get_system_prompt
 from app.db.session import async_session_factory
-from app.domains.question.repository import QuestionRepository
+from app.domains.question.service import QuestionService
 from app.domains.question.solution_service import SolutionService
 from app.domains.training.service import TrainingService, ExamService
-from app.domains.wrong_question.repository import WrongQuestionRepository
+from app.domains.wrong_question.service import WrongQuestionService
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +89,8 @@ class TrainingMCPServer(MCPServerBase):
         count = payload.get("count", 5)
         try:
             async with async_session_factory() as session:
-                repo = WrongQuestionRepository(session)
-                wrong_questions = await repo.list_all(limit=count)
+                wq_svc = WrongQuestionService(session)
+                wrong_questions = await wq_svc.repo.list_all(limit=count)
 
             if not wrong_questions:
                 return success_response({
@@ -100,9 +100,9 @@ class TrainingMCPServer(MCPServerBase):
 
             question_texts = []
             async with async_session_factory() as session:
-                q_repo = QuestionRepository(session)
+                q_svc = QuestionService(session)
                 for wq in wrong_questions:
-                    q = await q_repo.get_by_id(wq.question_id)
+                    q = await q_svc.repo.get_by_id(wq.question_id)
                     if q:
                         question_texts.append(q.content)
 
@@ -239,7 +239,7 @@ class TrainingMCPServer(MCPServerBase):
         - 带 answer 的题目同步写 solutions（详解可查，不含 COT）
         - 调用方负责 commit；本方法只 flush 以获取自增 id
         """
-        q_repo = QuestionRepository(session)
+        q_svc = QuestionService(session)
         training_svc = TrainingService(session) if training_set_id else None
         exam_svc = ExamService(session) if exam_id else None
         sol_service = SolutionService(session)
@@ -250,7 +250,7 @@ class TrainingMCPServer(MCPServerBase):
             content = self._extract_question_content(item)
             if not content:
                 continue
-            question = await q_repo.create(
+            question = await q_svc.create(
                 content=content,
                 source_type="generated",
                 question_type=item.get("type") or item.get("question_type"),

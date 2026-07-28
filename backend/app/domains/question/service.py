@@ -133,6 +133,23 @@ class QuestionService:
         """Admin: delete question."""
         return await self.repo.delete(question_id)
 
+    async def create(
+        self,
+        document_id: int | None = None,
+        content: str = "",
+        question_number: int | None = None,
+        source_type: str = "uploaded",
+        question_type: str | None = None,
+    ):
+        """Create a question. Returns ORM model (caller needs .id)."""
+        return await self.repo.create(
+            document_id=document_id,
+            content=content,
+            question_number=question_number,
+            source_type=source_type,
+            question_type=question_type,
+        )
+
     async def get_knowledge_points_for_questions(
         self, question_ids: list[int],
     ) -> dict[int, list[dict]]:

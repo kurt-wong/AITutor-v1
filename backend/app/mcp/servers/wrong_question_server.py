@@ -14,7 +14,7 @@ from typing import Any
 
 from app.mcp.base import MCPServerBase, MCPTool, success_response, error_response
 from app.db.session import async_session_factory
-from app.domains.wrong_question.repository import WrongQuestionRepository
+from app.domains.wrong_question.service import WrongQuestionService
 from app.domains.wrong_question.wrong_mark_service import WrongMarkService
 
 
@@ -70,8 +70,8 @@ class WrongQuestionMCPServer(MCPServerBase):
 
         try:
             async with async_session_factory() as session:
-                repo = WrongQuestionRepository(session)
-                wq = await repo.create(
+                svc = WrongQuestionService(session)
+                wq = await svc.create(
                     question_id=question_id,
                     error_type=error_type,
                     image_key=image_key,
@@ -92,9 +92,9 @@ class WrongQuestionMCPServer(MCPServerBase):
 
         try:
             async with async_session_factory() as session:
-                repo = WrongQuestionRepository(session)
-                questions = await repo.list_all(skip=skip, limit=limit)
-                total = await repo.count()
+                svc = WrongQuestionService(session)
+                questions = await svc.repo.list_all(skip=skip, limit=limit)
+                total = await svc.repo.count()
                 return success_response({
                     "wrong_questions": [
                         {
