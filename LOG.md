@@ -5,6 +5,31 @@
 
 ---
 
+## Session #137g — 2026-07-28: 全流程测试 + 质量问题评估
+
+### 管线全流程测试结果
+
+PDF 上传 -> PP-StructureV3 -> LLM 标注 -> 入库 -> 验证通过：
+- LLM 标注路径正常工作（source_type=llm_annotation，21 道题）
+- subject_id 21/21 全部为 MATH
+- 知识点映射零跨学科
+- 根因确认：管线质量问题由后端进程未正确重载导致，非代码 bug
+
+### 质量问题评估（3 Agent 并行分析 + TRAE 交叉验证）
+
+发现 16 项问题，分 4 级：
+
+P0 数据丢失（4 项）：D1 token 截断、D2 漏题不重试、D3 答案长度过严、D4 options 格式兼容
+P1 渲染错误（5 项）：R1 LaTeX 语法、R2 Unicode 希腊字母、R3 max/min 语法、R4 非数学内容误包
+P2 布局问题（4 项）：L1 max-width、L2 表格渲染、L3 详解溢出、L4 聊天气泡宽度
+P3 低优先级（3 项）：E1-E3 概率性问题
+
+### 修复计划（已确认）
+
+D1(5min) -> D3(5min) -> D4(10min) -> D2(30min) -> R1-4(2h) -> L1-4(1h)，总计约 4h。
+
+---
+
 ## Session #137g — 2026-07-28: PaddleOCR use_gpu 修复 + 管线验证
 
 ### PaddleOCR use_gpu 修复
