@@ -294,6 +294,9 @@ class DocumentPipeline:
                 logger.warning("Failed to save OCR Markdown for doc %d: %s", ctx.doc_id, _mde)
 
         # LLM full extraction
+        _llm_check = f"enabled={settings.LLM_ANNOTATION_ENABLED} markdown={len(paddleocr_markdown or '')} blocks={len(merged_blocks)}"
+        logger.info("LLM annotate check: %s", _llm_check)
+        await self._service._log_step(ctx.task_id, "llm_check", _llm_check)
         if (settings.LLM_ANNOTATION_ENABLED and paddleocr_markdown and merged_blocks):
             await ctx.update_progress(40, "llm_annotate", "LLM 全量提取中...")
             annotation = await self._service._step_llm_annotate(
