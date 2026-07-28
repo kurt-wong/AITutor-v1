@@ -39,12 +39,14 @@ class PaddleOCRProvider(OCRProvider):
         """Initialize PaddleOCR provider.
 
         Args:
-            use_gpu: Whether to use GPU acceleration (requires CUDA)
+            use_gpu: Deprecated (PaddleOCR 2.7+ removed this param). GPU is
+                determined by installed paddlepaddle variant (CPU vs GPU).
             lang: Language model to use ('ch' for Chinese, 'en' for English)
             use_angle_cls: Whether to use text angle classification
             model_dir: Custom model directory path (optional)
         """
-        self._use_gpu = use_gpu
+        if use_gpu:
+            logger.warning("use_gpu is deprecated in PaddleOCR 2.7+; install paddlepaddle-gpu for GPU support")
         self._lang = lang
         self._use_angle_cls = use_angle_cls
         self._model_dir = model_dir
@@ -70,16 +72,13 @@ class PaddleOCRProvider(OCRProvider):
                 kwargs = {
                     "use_angle_cls": self._use_angle_cls,
                     "lang": self._lang,
-                    "use_gpu": self._use_gpu,
                     "show_log": False,  # Suppress verbose output
                 }
                 if self._model_dir:
                     kwargs["det_model_dir"] = self._model_dir
 
                 self._ocr_instance = PaddleOCR(**kwargs)
-                logger.info(
-                    f"PaddleOCR initialized: lang={self._lang}, gpu={self._use_gpu}"
-                )
+                logger.info(f"PaddleOCR initialized: lang={self._lang}")
             except ImportError as e:
                 logger.error("PaddleOCR not installed. Run: pip install paddlepaddle paddleocr")
                 raise RuntimeError("PaddleOCR not installed") from e
@@ -123,7 +122,6 @@ class PaddleOCRProvider(OCRProvider):
                 ocr = PaddleOCR(
                     use_angle_cls=self._use_angle_cls,
                     lang=lang,
-                    use_gpu=self._use_gpu,
                     show_log=False,
                 )
 
