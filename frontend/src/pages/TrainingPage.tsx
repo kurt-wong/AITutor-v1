@@ -195,7 +195,7 @@ export default function TrainingPage() {
     ];
 
     return (
-      <div>
+      <div style={{ maxWidth: "var(--page-max-width)", margin: "0 auto", padding: "var(--page-padding)" }}>
         <Title level={4}>训练管理</Title>
         <Spin spinning={loading}>
           {trainingSets.length === 0 && !loading ? (
@@ -215,7 +215,7 @@ export default function TrainingPage() {
     const progress = Math.round((answered / questions.length) * 100);
 
     return (
-      <div>
+      <div style={{ maxWidth: "var(--page-max-width)", margin: "0 auto", padding: "var(--page-padding)" }}>
         <Space style={{ marginBottom: 16 }}>
           <Button icon={<ArrowLeftOutlined />} onClick={backToList}>
             返回列表
@@ -291,7 +291,7 @@ export default function TrainingPage() {
   if (mode === "results" && result) {
     const pct = Math.round((result.correct / result.total) * 100);
     return (
-      <div>
+      <div style={{ maxWidth: "var(--page-max-width)", margin: "0 auto", padding: "var(--page-padding)" }}>
         <Button icon={<ArrowLeftOutlined />} onClick={backToList} style={{ marginBottom: 16 }}>
           返回列表
         </Button>
@@ -336,7 +336,7 @@ export default function TrainingPage() {
             {r.explanation && (
               <div style={{ marginTop: 8 }}>
                 <Text strong>解析：</Text>
-                <Paragraph style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>
+                <Paragraph style={{ whiteSpace: "pre-wrap", marginTop: 4, overflowWrap: "break-word", wordBreak: "break-word", maxWidth: "100%" }}>
                   <MathRenderer content={r.explanation || ""} />
                 </Paragraph>
               </div>

@@ -148,6 +148,27 @@ async def get_task_status(
     return create_response({"status": status, "logs": logs}, request)
 
 
+@router.post("/{doc_id}/reprocess-qd")
+async def reprocess_qd(
+    doc_id: int,
+    request: Request = None,
+    session: AsyncSession = Depends(get_db),
+):
+    """Reprocess QD extraction from stored OCR markdown (preview mode).
+
+    Reads the document's ocr_markdown from DB and re-runs
+    extract_questions_from_markdown() — no PDF re-upload needed.
+    Returns questions as JSON preview.  Does NOT save to DB.
+
+    Use this for QD prompt iteration: tweak the extractor prompt,
+    call this endpoint, review results, repeat.  When satisfied,
+    re-upload the PDF normally for full pipeline processing.
+    """
+    service = DocumentService(session)
+    result = await service.reprocess_qd_preview(doc_id)
+    return create_response(result, request)
+
+
 @router.get("/images/{image_key:path}")
 async def serve_image(image_key: str):
     """Serve an image from MinIO storage.

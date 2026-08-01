@@ -480,6 +480,7 @@ class ParallelExtractionPipeline:
                 paddleocr_job_id=result.job_id,
                 paddleocr_display_formulas=display_formula_map,
                 paddleocr_tables=table_dicts,
+                paddleocr_result=result,
             )
 
         except asyncio.TimeoutError:

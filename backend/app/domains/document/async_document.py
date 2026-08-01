@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -27,6 +28,62 @@ from app.core.logging import get_logger
 from app.domains.question.structurer import _strip_page_markers
 
 logger = get_logger("async.document")
+
+
+# ── Session #137: Pipeline Monitoring Checkpoints ──────────────────────
+_PIPELINE_LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "logs")
+
+def _pipeline_checkpoint(task_id: str, stage: str, data: dict) -> None:
+    """Log a pipeline checkpoint for monitoring and debugging.
+
+    Each checkpoint logs key metrics at a specific pipeline stage
+    so we can trace data flow and identify quality issues.
+
+    Writes to both:
+    - Python logger (stdout) — truncated preview
+    - JSONL log file (logs/pipeline_{task_id}.jsonl) — full data
+
+    Args:
+        task_id: Document processing task ID
+        stage: Pipeline stage name (e.g., 'ocr_markdown', 'llm_raw_response')
+        data: Checkpoint data (metrics, samples, etc.)
+    """
+    import json as _json
+    from datetime import datetime as _dt
+
+    # ── 1. Write to logger (truncated) ─────────────────────────
+    try:
+        truncated = {}
+        for k, v in data.items():
+            if isinstance(v, str) and len(v) > 300:
+                truncated[k] = v[:300] + f"...[{len(v)} total]"
+            elif isinstance(v, list) and len(v) > 5:
+                truncated[k] = v[:5] + [f"...[{len(v)} total]"]
+            else:
+                truncated[k] = v
+        logger.info(
+            "PIPELINE_CHECKPOINT [%s] %s: %s",
+            task_id[:8], stage,
+            _json.dumps(truncated, ensure_ascii=False, default=str),
+        )
+    except Exception:
+        logger.info("PIPELINE_CHECKPOINT [%s] %s: (logging error)", task_id[:8], stage)
+
+    # ── 2. Write to JSONL log file (full data) ─────────────────
+    try:
+        os.makedirs(_PIPELINE_LOG_DIR, exist_ok=True)
+        log_file = os.path.join(_PIPELINE_LOG_DIR, f"pipeline_{task_id[:12]}.jsonl")
+        entry = {
+            "timestamp": _dt.now().isoformat(),
+            "task_id": task_id,
+            "stage": stage,
+            "data": data,
+        }
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        logger.warning("PIPELINE_CHECKPOINT file write failed: %s", e)
+
 
 # ── LLM Annotation Prompt (Session #91: 一次性标注完整试卷 Markdown) ──────
 
@@ -53,6 +110,12 @@ logger = get_logger("async.document")
 
 _LLM_ANNOTATION_PROMPT_V3 = """\
 你是一位教育文档结构化专家。以下是一份试卷的正文和参考答案区。
+
+【硬性规则 — 违反则提取失败】
+1. 选择题必须提取全部选项（A/B/C/D），禁止省略任何一个
+2. 选项内容必须完整，禁止截断
+3. 如果某个选项在原文中不完整，标注 [原文缺失]，但不要删除该选项
+4. stem 必须完整包含题干和所有选项，禁止拆分
 
 请提取所有题目信息，返回严格的 JSON。请完整输出所有题目，不要省略任何内容。输出可以很长（最多 80000 字符），优先保证每道题目的 stem、options 内容完整性。宁可输出更长，也不能截断题目。
 
@@ -241,15 +304,31 @@ _SUBJECT_PROMPT_ADDITIONS: dict[str, str] = {
     "CHEM": """
 ## 化学学科特别指令
 
+### ⚠️ 题目完整性 — 最高优先级（违反视为任务失败）
+
+化学试卷的题目编号是连续的。你必须提取文档中出现的**每一道题**，禁止跳过任何题号。
+
+**执行步骤（必须逐条完成）：**
+1. 先扫描全文，统计所有独立题号（独立题号 = 以独立行开头的 "N. " 形式的数字，N≥1）
+2. 输出 questions 数组时，数组长度必须等于上述统计的题号总数
+3. 输出完成后自查：如果 OCR 中有题号 1-21 和 22-23，你的输出中必须包含 1,2,3,...,21,22,23 每一个 qno，一个都不能少
+4. **选择题即使题干相似、选项简单，也必须逐题独立输出**。例如 Q10-Q21 即使每题只有题干+A/B/C/D 选项，也不能跳过、合并或省略任何一题
+5. 对于综合大题（题号后跟 (1)(2)(3) 子问题的），按综合题规则处理（见上文），但独立选择题**绝对不允许**合并
+
+**常见错误（禁止）：**
+- ❌ 选择题 Q1-Q9 正常输出，Q10-Q21 跳过不输出 → **任务失败**
+- ❌ 将多道独立选择题（Q10、Q11、Q12...）合并为一个 question → stem 会混杂多道题的内容
+- ❌ 因为题目"太简单"或"结构重复"而省略 → 所有题目都要输出
+- ❌ 将整段选择题区域（Q10-Q21）当作"综合题"处理 → 它们是独立的 12 道选择题，必须逐个输出
+
 ### 化学方程式与符号
 - 化学方程式中的 →（反应箭头）、⇌（可逆反应）、↑（气体）、↓（沉淀）是题目的核心内容，必须在 stem 中完整保留
 - 反应条件（如"加热"、"高温"、"催化剂"、"通电"等，通常写在箭头上下方）如出现在 OCR 文本中，必须保留
 - 化学式中的下标数字（如 H₂O 的 2、Fe₃O₄ 的 3 和 4）是标准表示，即使 OCR 转为普通数字（H2O、Fe3O4），也不要试图"修正"——保持原文
 - 离子符号（Fe³⁺、SO₄²⁻ 等）同理，OCR 可能转为 Fe3+、SO42-，保持原文
-- 化学式中的 ""（如 2H₂ + O₂ → 2H₂O 前面的化学计量数）与下标区分开
 
 ### 化学题型特征
-- 化学选择题 stem 通常较短（只含核心问题，不含冗长叙述），这是正常的——不要因此降低 stem 质量
+- 化学选择题 stem 通常较短（只含核心问题，不含冗长叙述）——逐个输出即可，不要跳过
 - 实验题通常有较长描述，包含实验步骤、装置说明、数据表格——这些都是 stem 的一部分，必须完整复制
 - 推断题 stem 包含物质转化关系描述（"A 是...，B 是...，A 与 B 反应生成 C..."），必须完整保留
 - 化学计算题的最终答案通常是数值+单位（如"0.5 mol/L"、"80%"），放在 answer 字段
@@ -581,6 +660,25 @@ def _clean_text_for_db(text: str, *, is_stem: bool = True) -> str:
         text = re.sub(r'【详解】.*$', '', text, flags=re.DOTALL)
 
     # ── Common rules (stem, answer, explanation) ──────────────
+    # S#138: Clean underline noise from PP-StructureV3 OCR
+    # \underline{\underline{\underline{A}}} → (  )
+    # Note: \x5c = backslash hex code (avoids regex \u unicode escape issue)
+    text = re.sub(
+        r'\x5cunderline\s*\{\x5cunderline\s*\{\x5cunderline\s*\{[^}]*\}\s*\}\s*\}',
+        '(  )',
+        text,
+    )
+    # S#138: Clean stray \text{"} noise and residual patterns
+    text = re.sub(r'\x5ctext\s*\{\s*"\s*\}', '', text)
+    # S#138: Clean residual \triangle patterns using direct string replace
+    # Pattern: $ \triangle X$$ \triangle X$ → △X
+    for _letter in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+        _old = f'$ \\triangle {_letter}$$ $\\triangle {_letter}$'
+        _new = f'△{_letter}'
+        text = text.replace(_old, _new)
+    # Clean isolated $"$ artifacts
+    text = re.sub(r'\$\s*"\s*\$', '', text)
+
     # 2. Remove score annotations like （4分）/（共13分）/（每小题5分）
     text = re.sub(r'[（(]\s*(?:共\s*)?\d+\s*分\s*[）)]', '', text)
     # 3. Remove standalone page-marker lines (e.g. "第2页 / 共19页")
@@ -680,110 +778,415 @@ def _score_stem_quality(stem: str, options: list[str] | None = None) -> float:
     return max(0.0, score)
 
 
-# ── S#127: Question Count Sanity Check ─────────────────────────────────
-# Instead of heuristic per-page estimates, extract top-level question
-# numbers directly from the OCR markdown and compare to the LLM output.
-# Chinese exam papers use clear QNO patterns like "1.", "12．", "21、"
-# at line starts — this is data-driven and subject-agnostic.
+# ── MIMO Cross-Validation ────────────────────────────────────────────
+# Replaces the old regex-based QNO sanity check (S#127) which had
+# fundamentally low coverage on real-world exam OCR — regex can't
+# handle inline QNOs, multi-column layouts, or non-standard numbering.
+#
+# Instead, a second LLM (MIMO V2.5 via mode="fast") compares the
+# OCR source against the extraction JSON and returns a structured
+# verdict: pass / retry (with feedback) / reject.
+#
+# MIMO V2.5 is multimodal but this validator uses text-only mode
+# (OCR markdown + extraction summary) for speed and cost efficiency.
+# Page-image-based visual verification can be added later for
+# image-heavy subjects (chemistry apparatus diagrams, geometry).
 
-# Matches line-start QNOs: 1-2 digits followed by . 、 ． or )
-# Excludes: 4+ digit numbers (years like 2024.), parenthesized (1)/①
-# sub-questions, Chinese section headers (一、二、三、)
-_QNO_LINE_RE = re.compile(
-    r'^\s*(\d{1,2})[.、．)](?!\d)',
-    re.MULTILINE,
-)
+_CROSS_VALIDATE_PROMPT = """\
+你是一个试卷题目提取质量审核员。请对比原始 OCR 文档内容与 LLM 提取的题目列表，判断提取是否完整、准确。
 
-# Max reasonable ratio of LLM questions to markdown QNOs.
-# S#126: VL-1.6 markdown 16 QNOs → Pro 22Q = 1.38x, Flash 28Q = 1.75x.
-# 1.5x gives a safe margin for legitimate multi-part questions while
-# flagging clear over-splitting (Flash's 1.75x triggered, Pro's 1.38x passes).
-_QNO_RATIO_WARN = 1.5
-_QNO_RATIO_CRITICAL = 2.0
+## 原始 OCR 文档（截取前 6000 字符供参考）
+```
+{ocr_sample}
+```
+
+## LLM 提取的题目摘要
+- 题目总数: {total_count}
+- 题号列表: {qno_list}
+- 题型分布: {type_distribution}
+
+## 各题 stem 摘要（前 80 字符）
+{stem_summaries}
+
+## 审核要求
+1. **题号连续性**: 题号是否从 1 开始连续排列（如 1,2,3,...,N）？有无跳跃或遗漏？
+2. **题目完整性**: OCR 文档中是否还存在被 LLM 遗漏的题目？（对比 OCR 中出现的独立题号）
+3. **过度合并**: 是否存在将多道独立题目（尤其是选择题）错误合并为一道的情况？
+4. **过度拆分**: 是否存在将一道综合大题错误拆分为多道独立题的情况？
+5. **内容准确性**: stem 内容是否与 OCR 原文一致？有无凭空编造？
+
+## 输出格式
+请以严格 JSON 格式输出（不要包含 markdown 代码块标记）:
+{{
+  "valid": true,
+  "ocr_estimated_total": 23,
+  "extracted_total": 23,
+  "issues": [],
+  "action": "pass"
+}}
+
+字段说明:
+- valid: 提取是否完整且准确
+- ocr_estimated_total: 你从 OCR 中估计的独立题目总数
+- extracted_total: LLM 实际提取的题目数
+- issues: 具体问题描述列表（如无问题则为空数组）
+- action: "pass"（通过）/ "retry"（有明确可修正问题，建议带反馈重试）/ "reject"（质量太差不值得重试）
+
+注意：
+- 化学试卷的独立选择题（每题只有题干 + A/B/C/D 选项）必须逐题独立计数，不能因为"结构相似"而合并
+- 如果题号跳跃（如 1-9 正常但 10-21 缺失），必须在 issues 中明确指出缺失的题号范围
+- action="retry" 时，issues 中的描述应足够具体，能让主 LLM 在重试时定位和修正问题
+"""
+
+# Max cross-validation retries to prevent infinite loops
+_MAX_CROSS_VALIDATE_RETRIES = 1
 
 
-def _extract_markdown_qno_count(markdown: str) -> int:
-    """Count unique top-level question numbers in OCR markdown.
-
-    Only counts line-start ``1-99.`` / ``1-99、`` / ``1-99．`` patterns.
-    Parenthesized sub-questions ``(1)``, circled numbers ``①``, and
-    Chinese section headers ``一、`` are intentionally excluded.
-    """
-    matches = _QNO_LINE_RE.findall(markdown)
-    unique = set()
-    for m in matches:
-        n = int(m)
-        if 1 <= n <= 99:
-            unique.add(n)
-    return len(unique)
+def _build_validator_stem_summaries(questions: list[dict]) -> str:
+    """Build a compact stem summary for the validator prompt."""
+    lines = []
+    for q in questions:
+        qno = q.get("qno", "?")
+        qtype = q.get("type", "?")
+        stem = (q.get("stem", "") or "")[:80].replace("\n", " ")
+        opt_count = len(q.get("options", []))
+        opt_note = f" [{opt_count}选项]" if opt_count > 0 else ""
+        lines.append(f"  Q{qno} ({qtype}){opt_note}: {stem}")
+    return "\n".join(lines)
 
 
-def _check_question_count_sanity(
-    markdown_qno_count: int,
-    llm_question_count: int,
-) -> tuple[bool, str]:
-    """Compare markdown QNO count against LLM question count.
+async def _cross_validate(
+    task_id: str,
+    full_markdown: str,
+    questions: list[dict],
+    validator_mode: str = "fast",
+    validator_model: str | None = None,
+) -> dict[str, Any]:
+    """Cross-validate extraction quality with a second LLM.
 
-    Session #130: With reading comprehension merges, llm_question_count is
-    expected to be LOWER than markdown_qno_count (groups merged into one).
-    Only over-splitting (> warn threshold) is treated as an error.
+    Compares OCR source against the extracted questions and returns
+    a structured verdict.  Falls back to {"valid": True, "action": "pass"}
+    on any error (best-effort validation — never blocks extraction).
+
+    Args:
+        validator_mode: Gateway mode for the validator LLM.
+            "fast" (MIMO) for text-mode extractions.
+            "reasoning" (DeepSeek) for vision-first extractions.
+        validator_model: Optional model override.
 
     Returns:
-        (is_ok, detail_message).
+        {"valid": bool, "action": "pass"|"retry"|"reject", "issues": [...],
+         "ocr_estimated_total": int, "extracted_total": int}
     """
-    if markdown_qno_count == 0:
-        return True, "no QNOs found in markdown (skipping check)"
+    from app.gateway.router import llm_gateway
 
-    ratio = llm_question_count / markdown_qno_count
+    # Build question summary
+    qnos = [str(q.get("qno", "?")) for q in questions]
+    type_counts: dict[str, int] = {}
+    for q in questions:
+        t = q.get("type", "unknown")
+        type_counts[t] = type_counts.get(t, 0) + 1
 
-    # Session #130: Under-count is expected (material-based groups merged).
-    # Log a note if very low but don't block — merging is by design.
-    if ratio < 0.3:
-        return True, (
-            f"ok (merged groups: {llm_question_count}Q / "
-            f"{markdown_qno_count} markdown QNOs = {ratio:.1f}x)"
+    prompt = _CROSS_VALIDATE_PROMPT.format(
+        ocr_sample=full_markdown[:6000],
+        total_count=len(questions),
+        qno_list=", ".join(qnos),
+        type_distribution=str(type_counts),
+        stem_summaries=_build_validator_stem_summaries(questions),
+    )
+
+    try:
+        async with _LLM_ANNOTATION_SEM:
+            result = await llm_gateway.generate(
+                mode=validator_mode,
+                prompt=prompt,
+                response_format={"type": "json_object"},
+                max_tokens=2048,
+                model=validator_model,
+            )
+        response_text = result.get("response", "")
+        if not response_text:
+            logger.warning("Cross-validator: empty response — accepting as-is")
+            return {"valid": True, "action": "pass", "issues": [],
+                    "ocr_estimated_total": len(questions), "extracted_total": len(questions)}
+
+        # Parse JSON response (handle markdown fences)
+        import re as _vre
+        _vjson = response_text.strip()
+        _vm = _vre.match(r'```(?:json)?\s*\n?(.*?)\n?```', _vjson, _vre.DOTALL)
+        if _vm:
+            _vjson = _vm.group(1).strip()
+        verdict = json.loads(_vjson)
+
+        valid = verdict.get("valid", True)
+        action = verdict.get("action", "pass")
+        if action not in ("pass", "retry", "reject"):
+            action = "pass"
+
+        logger.info(
+            "Cross-validator verdict: valid=%s action=%s ocr_est=%s extracted=%s issues=%d",
+            valid, action,
+            verdict.get("ocr_estimated_total", "?"),
+            verdict.get("extracted_total", "?"),
+            len(verdict.get("issues", [])),
         )
-    if ratio <= _QNO_RATIO_WARN:
-        return True, (
-            f"ok ({llm_question_count}Q / {markdown_qno_count} markdown QNOs"
-            f" = {ratio:.1f}x)"
-        )
-    elif ratio <= _QNO_RATIO_CRITICAL:
-        return False, (
-            f"WARN: possible over-splitting ({llm_question_count}Q / "
-            f"{markdown_qno_count} markdown QNOs = {ratio:.1f}x"
-            f" > {_QNO_RATIO_WARN}x threshold)"
-        )
-    else:
-        return False, (
-            f"CRITICAL: severe over-splitting ({llm_question_count}Q / "
-            f"{markdown_qno_count} markdown QNOs = {ratio:.1f}x"
-            f" > {_QNO_RATIO_CRITICAL}x threshold)"
-        )
+        return {
+            "valid": valid,
+            "action": action,
+            "issues": verdict.get("issues", []),
+            "ocr_estimated_total": verdict.get("ocr_estimated_total", len(questions)),
+            "extracted_total": verdict.get("extracted_total", len(questions)),
+        }
+
+    except Exception as e:
+        logger.warning("Cross-validator failed: %s — accepting as-is", str(e)[:200])
+        return {"valid": True, "action": "pass", "issues": [],
+                "ocr_estimated_total": len(questions), "extracted_total": len(questions)}
 
 
-# ── S#127: QNO Retry Prompt ───────────────────────────────────────────
-# When the sanity check flags over-splitting, re-submit the full markdown
-# with an explicit retry prefix that tells the LLM how many questions the
-# document actually contains and asks it to re-analyze carefully.
-_QNO_RETRY_PREFIX = """\
-## ⚠️ 重试指令 — 题目数不匹配
+# ── Cross-Validation Retry Prefix ─────────────────────────────────────
+# When the validator returns action="retry", this prefix is prepended
+# to the original annotation prompt with concrete, actionable feedback.
 
-上一次提取的题目数（{llm_count} 题）远多于文档中实际标注的题号数（约 {qno_count} 个题号）。
-这意味着你可能将综合大题的各个子小题（(1)(2)(3) 或 ①②③）错误地拆分成了独立题目。
+_CROSS_VALIDATE_RETRY_PREFIX = """\
+## ⚠️ 质量审核未通过 — 请根据以下反馈重新提取
 
-请仔细重新阅读完整 Markdown，注意区分：
-- **主题目题号**：1. 2. 3. ... 21. 22.（行首，1-2 位数字 + . / 、/ ．）
-- **子小题编号**：(1) (2) (3) 或 ① ② ③ —— 这些不是独立题目，而是同一道题的子问题
+上一轮提取结果经 MIMO V2.5 交叉验证发现以下问题:
 
-综合题（如推断题、实验题、流程题）通常以一个大题号标注，下设若干子问题。请将它们作为一个题目输出：
-- stem 应包含大题号 + 完整的题干描述 + 所有子问题
-- 不要把每个子问题拆成独立题目
+{issues_formatted}
 
-请重新提取，确保题目数与文档中的主题目题号数大致匹配。
+请仔细重新阅读完整 OCR Markdown，针对上述每个问题逐一修正:
+- 如有遗漏的题目，务必补全
+- 如有不当合并，将独立题目逐个输出
+- 如有不当拆分，将子问题合并到综合大题中
+- 确保题号从 1 开始连续排列，无跳跃
 
 ---
 """
+
+
+# ── Vision-First Extraction (MIMO V2.5 Vision) ────────────────────────
+# For image-dense subjects, MIMO V2.5 Vision extracts directly from page
+# images rather than degraded OCR text.  DeepSeek V4 Pro then cross-
+# validates the vision extraction against the OCR markdown.
+
+
+def _repair_truncated_json(text: str) -> dict[str, Any] | None:
+    """Attempt to recover a truncated JSON object by closing brackets.
+
+    For responses cut off mid-generation (e.g. API token limits),
+    this counts unbalanced {, [, and " delimiters and appends the
+    minimum closing sequence.  Only attempted for dict roots.
+    """
+    text = text.rstrip()
+    if not text or text[0] != "{":
+        return None
+
+    # Count unbalanced delimiters (simple heuristic — ignores strings)
+    braces = 0     # {...}
+    brackets = 0   # [...]
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+        elif not in_string:
+            if ch == "{":
+                braces += 1
+            elif ch == "}":
+                braces -= 1
+            elif ch == "[":
+                brackets += 1
+            elif ch == "]":
+                brackets -= 1
+
+    if braces <= 0 and brackets <= 0:
+        return None  # already balanced or negative (corrupt)
+
+    # Close in order: strings, arrays, objects
+    repair = ""
+    if in_string:
+        repair += '"'
+    repair += "]" * max(0, brackets)
+    repair += "}" * max(0, braces)
+
+    if not repair:
+        return None
+
+    repaired = text + repair
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # Last resort: brute-force close everything
+    repaired2 = text
+    if in_string:
+        repaired2 += '"'
+    repaired2 += "]" * brackets if brackets > 0 else ""
+    repaired2 += "}" * braces if braces > 0 else ""
+    try:
+        return json.loads(repaired2)
+    except json.JSONDecodeError:
+        return None
+
+
+def _encode_page_images(page_paths: list[str], max_pages: int = 20) -> list[str]:
+    """Encode page image files to base64 data URIs.
+
+    JPEG-encodes each image to bound total payload size, then returns
+    data URIs suitable for multimodal LLM APIs.  Capped at *max_pages*
+    to stay within vision provider context limits.
+
+    Returns:
+        ["data:image/jpeg;base64,...", ...]  (empty list on all-fail)
+    """
+    import base64 as _b64
+    from PIL import Image as _PILImage
+
+    base64_images: list[str] = []
+    for path in page_paths[:max_pages]:
+        try:
+            with _PILImage.open(path) as img:
+                if img.mode in ("RGBA", "P", "LA"):
+                    img = img.convert("RGB")
+                # Resize large images to keep payload reasonable
+                w, h = img.size
+                max_dim = 2048
+                if w > max_dim or h > max_dim:
+                    ratio = max_dim / max(w, h)
+                    img = img.resize((int(w * ratio), int(h * ratio)), _PILImage.LANCZOS)
+                buf = __import__("io").BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
+                base64_images.append(b64)
+        except Exception as _enc_err:
+            logger.warning(
+                "Failed to encode page image %s: %s",
+                path, str(_enc_err)[:120],
+            )
+    return base64_images
+
+
+async def _mimo_vision_extract(
+    task_id: str,
+    page_images: list[str],
+    subject_code: str | None = None,
+) -> dict[str, Any] | None:
+    """Extract questions via MIMO V2.5 Vision (image-first).
+
+    Encodes page images to base64, sends them with the vision extraction
+    prompt, and parses the JSON response.  Falls back to None on any error
+    (caller should then route to text-mode extraction).
+
+    Returns:
+        Parsed annotation dict {"metadata": ..., "questions": [...]}
+        or None on failure.
+    """
+    from app.gateway.router import llm_gateway
+
+    # Build prompt with subject context if available
+    prompt = _VISION_EXTRACTION_PROMPT
+    if subject_code and subject_code in _VISION_FIRST_SUBJECTS:
+        subject_prompt_add = _get_subject_prompt_addition(subject_code)
+        if subject_prompt_add:
+            prompt = subject_prompt_add + "\n" + prompt
+
+    # Encode page images
+    base64_images = _encode_page_images(page_images)
+    if not base64_images:
+        logger.error("Vision extraction: all page images failed to encode")
+        return None
+
+    logger.info(
+        "Vision extraction: %d pages → %d base64 images for %s",
+        len(page_images), len(base64_images), subject_code,
+    )
+    _pipeline_checkpoint(task_id, "vision_extraction_start", {
+        "page_count": len(page_images),
+        "encoded_count": len(base64_images),
+        "subject": subject_code,
+    })
+
+    try:
+        async with _LLM_ANNOTATION_SEM:
+            result = await llm_gateway.generate(
+                mode="vision",
+                prompt=prompt,
+                images=base64_images,
+                response_format={"type": "json_object"},
+                max_tokens=32768,
+            )
+        response_text = result.get("response", "")
+        if not response_text:
+            logger.warning("Vision extraction: empty response from MIMO")
+            return None
+
+        _pipeline_checkpoint(task_id, "vision_raw_response", {
+            "response_chars": len(response_text),
+            "sample_first_500": response_text[:500],
+            "sample_last_200": response_text[-200:],
+        })
+
+        # Parse JSON (handle markdown fences + truncated responses)
+        _vjson = response_text.strip()
+        import re as _vre
+
+        # Try 1: strip markdown fences → clean JSON
+        # NOTE: use greedy (.*) — non-greedy (.*?) would match empty
+        # string when closing ``` is missing (truncated responses)
+        _vm = _vre.match(r'```(?:json)?\s*\n?(.*)(?:\n?```)?$', _vjson, _vre.DOTALL)
+        if _vm:
+            _vjson = _vm.group(1).strip()
+
+        # Try 2: standard json.loads (works if complete)
+        try:
+            parsed = json.loads(_vjson)
+        except json.JSONDecodeError:
+            # Try 3: raw_decode finds the first complete JSON object
+            import json as _json_mod
+            _decoder = _json_mod.JSONDecoder()
+            try:
+                parsed, _idx = _decoder.raw_decode(_vjson)
+                logger.info(
+                    "Vision extraction: raw_decode found valid JSON at char 0-%d (total %d chars)",
+                    _idx, len(_vjson),
+                )
+            except json.JSONDecodeError:
+                # Try 4: close truncated JSON by appending missing brackets
+                parsed = _repair_truncated_json(_vjson)
+                if parsed is None:
+                    logger.warning(
+                        "Vision extraction: all JSON parse attempts failed, "
+                        "response first 200: %s... last 200: ...%s",
+                        response_text[:200], response_text[-200:],
+                    )
+                    return None
+
+        if not isinstance(parsed, dict):
+            logger.warning("Vision extraction: root is not dict")
+            return None
+
+        questions = parsed.get("questions", [])
+        if not isinstance(questions, list) or len(questions) == 0:
+            logger.warning("Vision extraction: no questions in output")
+            return None
+
+        logger.info(
+            "Vision extraction: %d questions, metadata keys=%s",
+            len(questions), list(parsed.get("metadata", {}).keys()),
+        )
+        return parsed
+
+    except Exception as e:
+        logger.error("Vision extraction failed: %s", str(e)[:300])
+        return None
 
 
 # ── Session #125: Chemistry Markdown Pre-cleaning ──────────────────────
@@ -973,6 +1376,21 @@ def _pre_clean_markdown(markdown: str, subject_code: str | None = None) -> str:
     # options (Q2 missing D, Q8 missing C/D).
     text = _split_inline_options(text)
 
+    # ── Rule 0.6: Clean underline noise (S#138) ─────────────────
+    # PP-StructureV3 produces nested \underline for fill-in blanks:
+    # \underline{\underline{\underline{A}}}  → replace with placeholder
+    # Note: \x5c = backslash hex code (avoids regex \u unicode escape issue)
+    text = re.sub(
+        r'\x5cunderline\s*\{\x5cunderline\s*\{\x5cunderline\s*\{[^}]*\}\s*\}\s*\}',
+        '(  )',
+        text,
+    )
+
+    # ── Rule 0.7: Clean stray \text{"} noise (S#138) ────────────
+    # OCR may produce isolated $\text{"}$ artifacts
+    text = re.sub(r'\x5ctext\s*\{\s*"\s*\}', '', text)
+    text = re.sub(r'\$\s*"\s*\$', '', text)
+
     # Only apply chemistry-specific cleaning for chemistry
     is_chem = (
         subject_code in _SUBJECTS_NEEDING_PRE_CLEAN
@@ -1068,6 +1486,116 @@ def _pre_clean_markdown(markdown: str, subject_code: str | None = None) -> str:
     return text
 
 
+def _apply_latex_preprocessing(markdown: str) -> str:
+    """Apply LaTeX preprocessing to OCR Markdown before LLM annotation.
+
+    Uses LatexFallbackEngine's Unicode symbol tables to normalize
+    math notation. This improves LLM extraction quality by ensuring
+    consistent LaTeX formatting.
+
+    Args:
+        markdown: Raw OCR Markdown from PP-StructureV3
+
+    Returns:
+        Preprocessed Markdown with Unicode math symbols converted to LaTeX.
+    """
+    if not markdown:
+        return markdown
+
+    text = markdown
+
+    # Import LatexFallbackEngine symbol tables
+    from app.domains.document.parallel_extraction.latex_fallback import (
+        GREEK_TO_LATEX,
+        UNICODE_OPS_TO_LATEX,
+        UNICODE_ARROWS_TO_LATEX,
+        _UNICODE_SUPER_DIGITS,
+        _UNICODE_SUB_DIGITS,
+    )
+
+    # ── Step 1: Unicode Greek letters → LaTeX ──────────────────────
+    for unicode_char, latex_cmd in GREEK_TO_LATEX.items():
+        text = text.replace(unicode_char, latex_cmd)
+
+    # ── Step 2: Unicode math operators → LaTeX ─────────────────────
+    for unicode_char, latex_cmd in UNICODE_OPS_TO_LATEX.items():
+        text = text.replace(unicode_char, latex_cmd)
+
+    # ── Step 3: Unicode arrows → LaTeX ─────────────────────────────
+    for unicode_char, latex_cmd in UNICODE_ARROWS_TO_LATEX.items():
+        text = text.replace(unicode_char, latex_cmd)
+
+    # ── Step 4: Unicode superscripts → LaTeX ───────────────────────
+    # Convert Unicode superscript digits to ^{...} format
+    sup_map = _UNICODE_SUPER_DIGITS
+    sup_pattern = re.compile(r'([⁰¹²³⁴⁵⁶⁷⁸⁹ⁱ⁺⁻⁼⁽⁾ⁿ]+)')
+    def _replace_superscript(m: re.Match) -> str:
+        chars = m.group(1)
+        converted = []
+        for ch in chars:
+            if ch in sup_map:
+                converted.append(sup_map[ch])
+            else:
+                converted.append(ch)
+        return '^{' + ''.join(converted) + '}'
+    text = sup_pattern.sub(_replace_superscript, text)
+
+    # ── Step 5: Unicode subscripts → LaTeX ─────────────────────────
+    # Convert Unicode subscript digits to _{...} format
+    sub_map = _UNICODE_SUB_DIGITS
+    sub_pattern = re.compile(r'([₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎]+)')
+    def _replace_subscript(m: re.Match) -> str:
+        chars = m.group(1)
+        converted = []
+        for ch in chars:
+            if ch in sub_map:
+                converted.append(sub_map[ch])
+            else:
+                converted.append(ch)
+        return '_{' + ''.join(converted) + '}'
+    text = sub_pattern.sub(_replace_subscript, text)
+
+    # ── Step 5.5: Unicode Modifier Letters → normal letters (S#138) ──
+    # OCR may output Modifier Letters (U+1D43-U+1D7F) like ᵃᵇᶜ
+    # which render as superscripts. Convert to normal letters.
+    _MODIFIER_LETTERS = {
+        'ᵃ': 'a', 'ᵇ': 'b', 'ᵈ': 'd', 'ᵉ': 'e',
+        'ᵍ': 'e', 'ᵏ': 'k', 'ᵐ': 'm', 'ᵒ': 'o',
+        'ᵖ': 'p', 'ᵗ': 't', 'ᵘ': 'u', 'ᵛ': 'v',
+        'ᵢ': 'i', 'ᵣ': 'r', 'ᵤ': 'u', 'ᵥ': 'v',
+        'ᵦ': 'β', 'ᵧ': 'γ', 'ᵨ': 'ρ', 'ᵩ': 'φ',
+        'ᵪ': 'χ',
+    }
+    for mod_char, normal_char in _MODIFIER_LETTERS.items():
+        text = text.replace(mod_char, normal_char)
+
+    # ── Step 6: Remove common emoji ────────────────────────────────
+    # OCR sometimes includes emoji from document metadata.
+    # NOTE: Ranges must NOT overlap with CJK (U+4E00-U+9FFF) or
+    # other content Unicode blocks — the old \U000024C2-\U0001F251
+    # range deleted all Chinese text!  (Session #137 fix)
+    emoji_pattern = re.compile(
+        r'[\U0001F600-\U0001F64F'  # emoticons
+        r'\U0001F300-\U0001F5FF'  # symbols & pictographs
+        r'\U0001F680-\U0001F6FF'  # transport & map symbols
+        r'\U0001F1E0-\U0001F1FF'  # flags
+        r'\U00002702-\U000027B0'  # dingbats
+        r'\U00002600-\U000026FF'  # misc symbols (sun, cloud, etc.)
+        r'\U0000FE00-\U0000FE0F'  # variation selectors
+        r'\U0000200D'             # zero-width joiner
+        r']+', flags=re.UNICODE
+    )
+    text = emoji_pattern.sub('', text)
+
+    if len(text) != len(markdown):
+        logger.debug(
+            "LaTeX preprocessing: %d → %d chars",
+            len(markdown), len(text),
+        )
+
+    return text
+
+
 # ── Session #120: LLM Answer Validation ──────────────────────────────
 
 # Boilerplate patterns that the LLM sometimes returns as answers instead
@@ -1092,10 +1620,183 @@ _ANSWER_MAX_LENGTH: dict[str, int] = {
     "choice": 10,        # single letter + optional spaces
     "multi_choice": 20,  # e.g. "ABC" or "A, C"
     "fill": 500,         # complex expression / multiple blanks
-    "calculation": 1500, # multi-step math with (1)(2)(3) sub-parts (S#131)
-    "proof": 3000,       # multi-step proof with detailed reasoning (S#131)
-    "essay": 3000,       # merged reading comprehension with sub-answers (S#131: 300→3000)
+    "calculation": 4000, # multi-step math with (1)(2)(3) sub-parts (S#137: 1500→4000)
+    "proof": 8000,       # multi-step proof with detailed reasoning (S#137: 3000→8000)
+    "essay": 8000,       # merged reading comprehension with sub-answers (S#137: 3000→8000)
 }
+
+
+def _validate_option_completeness(questions: list[dict]) -> None:
+    """Validate that choice questions have complete options (S#138).
+
+    Logs warnings for choice questions with fewer than expected options.
+    Does NOT modify or remove questions — just flags for monitoring.
+    """
+    for q in questions:
+        qtype = q.get("type", "")
+        if qtype != "choice":
+            continue
+
+        options = q.get("options")
+        stem = str(q.get("stem", ""))
+
+        # Count expected options from stem (A-D or A-H markers)
+        expected = len(re.findall(r'[A-H][.．、)\s]', stem)) or 4
+
+        # Count actual options
+        if isinstance(options, list):
+            actual = len(options)
+        elif isinstance(options, str):
+            # Sometimes options come as a single string
+            actual = len(re.findall(r'[A-H][.．、)]', options))
+        else:
+            actual = 0
+
+        if actual < expected and actual < 4:
+            qno = q.get("qno", "?")
+            logger.warning(
+                "Q%s: choice options incomplete — expected %d, got %d "
+                "(stem: %s...)",
+                qno, expected, actual, stem[:80],
+            )
+            # Flag for monitoring (not used in logic yet)
+            q["_option_incomplete"] = True
+
+
+# S#138: Regex to extract options from OCR markdown
+# Matches: A. content \n B. content \n C. content \n D. content
+_OPTION_RE = re.compile(
+    r'^([A-H])[.．、)\s]\s*(.+?)(?=\n[A-H][.．、)\s]|\n*$)',
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _supplement_options_from_ocr(
+    questions: list[dict], ocr_markdown: str,
+) -> int:
+    """Supplement incomplete LLM options from OCR markdown (S#138).
+
+    For choice questions with missing or truncated options, finds the
+    question text in OCR markdown and extracts options directly.
+
+    Returns: number of questions supplemented.
+    """
+    if not ocr_markdown:
+        return 0
+
+    supplemented = 0
+    for q in questions:
+        qtype = q.get("type", "")
+        if qtype != "choice":
+            continue
+
+        options = q.get("options")
+        qno = q.get("qno")
+
+        # Count actual options (non-empty)
+        if isinstance(options, list):
+            # Count options with meaningful content (>5 chars)
+            actual = sum(1 for opt in options if isinstance(opt, str) and len(opt.strip()) > 5)
+        else:
+            actual = 0
+
+        if actual >= 4:
+            continue  # Already complete
+
+        # Find question in OCR markdown by qno
+        if not qno:
+            continue
+
+        # Look for the question number in OCR text
+        qno_pattern = rf'(?:^|\n)\s*{qno}\s*[.．、)\s]'
+        qno_match = re.search(qno_pattern, ocr_markdown)
+        if not qno_match:
+            continue
+
+        # Extract text from this question to the next question
+        start = qno_match.start()
+        next_qno = re.search(
+            rf'\n\s*{qno + 1}\s*[.．、)\s]',
+            ocr_markdown[start + 1:],
+        )
+        end = start + 1 + next_qno.start() if next_qno else len(ocr_markdown)
+        question_text = ocr_markdown[start:end]
+
+        # Extract options from OCR text
+        ocr_options = _OPTION_RE.findall(question_text)
+        if len(ocr_options) <= actual:
+            continue  # OCR doesn't have more options
+
+        # Merge: keep LLM options, supplement missing ones from OCR
+        # Build a map of existing option letters
+        existing_letters = set()
+        if isinstance(options, list):
+            for opt in options:
+                if isinstance(opt, str) and len(opt) >= 2:
+                    letter = opt[0].upper()
+                    if letter in 'ABCDEFGH':
+                        existing_letters.add(letter)
+
+        # Add missing options from OCR
+        if not isinstance(options, list):
+            options = []
+        for letter, content in ocr_options:
+            if letter not in existing_letters:
+                options.append(f"{letter}.{content.strip()}")
+                logger.info(
+                    "Q%s: supplemented option %s from OCR (%d chars)",
+                    qno, letter, len(content.strip()),
+                )
+
+        if len(options) > actual:
+            q["options"] = options
+            supplemented += 1
+
+    return supplemented
+
+
+_GREEK_PATTERN = re.compile(
+    r'[αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ]'
+    r'|\\(?:alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|'
+    r'kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega)'
+)
+
+
+def _check_greek_preservation(ocr_text: str, questions: list[dict]) -> None:
+    """Check if LLM output preserved Greek letters from OCR (S#138).
+
+    Diagnostic only — logs warnings when a question stem that contains
+    Greek letters in OCR has them missing in the LLM output.
+
+    Strategy: For each question, find Greek letters in the OCR section
+    that corresponds to that question, then compare with the LLM stem.
+    Since we can't reliably split OCR by question, we use a simpler
+    heuristic: if the OCR text has Greek letters but a question's stem
+    has NONE, flag it (likely OCR captured them but LLM dropped them).
+    """
+    ocr_greek = set(_GREEK_PATTERN.findall(ocr_text))
+    if not ocr_greek:
+        return
+
+    for q in questions:
+        stem = str(q.get("stem", ""))
+        llm_greek = set(_GREEK_PATTERN.findall(stem))
+
+        # Only flag if OCR has Greek letters but this stem has none
+        # (suggests LLM dropped them during extraction)
+        if ocr_greek and not llm_greek:
+            qno = q.get("qno", "?")
+            # Check if this question likely should have Greek letters
+            # by looking for common Greek letter contexts in the stem
+            if any(kw in stem for kw in [
+                'omega', 'alpha', 'beta', 'gamma', 'delta',
+                '函数', '三角', '向量', '角', '弧',
+            ]):
+                logger.warning(
+                    "Q%s: Greek letters possibly missing — OCR has %s, "
+                    "stem has none (stem: %s...)",
+                    qno, ocr_greek, stem[:60],
+                )
 
 
 def _validate_llm_answer(answer: str, qtype: str) -> str:
@@ -1310,22 +2011,14 @@ async def _crop_figures_from_pages(
                     img_refs[path] = (x, y, w, h)
 
     if not img_refs:
-        with open("D:\\temp\\debug_img.txt", "a") as _df:
-            _df.write(f"CROP_FIGURES: no img_refs found in {len(questions)} questions\n")
+        # S#147: debug file write removed
         return questions
 
     # ── Entry point debug ──
     import os as _os_dbg
     _p0_exists = _os_dbg.path.exists(page_images[0]) if page_images else False
     _p0_size = _os_dbg.path.getsize(page_images[0]) if _p0_exists else 0
-    with open("D:\\temp\\debug_img.txt", "a") as _df:
-        _df.write(
-            f"CROP_FIGURES: entry — {len(img_refs)} img_refs, "
-            f"{len(page_images)} page_images, "
-            f"p0_exists={_p0_exists}, p0_size={_p0_size}, "
-            f"p0_path={page_images[0][:120] if page_images else 'NONE'}\n"
-        )
-
+    # S#147: debug file write removed
     # Estimate page height from the first page image
     try:
         with _PILImage.open(page_images[0]) as probe:
@@ -1333,11 +2026,6 @@ async def _crop_figures_from_pages(
     except Exception as _ex:
         _path = page_images[0][:120] if page_images else "NONE"
         _exists = __import__("os").path.exists(page_images[0]) if page_images else False
-        with open("D:\\temp\\debug_img.txt", "a") as _df:
-            _df.write(
-                f"CROP_FIGURES: PIL open FAILED — path={_path}, "
-                f"exists={_exists}, error={_ex}\n"
-            )
         logger.error(
             "CROP_FIGURES: Cannot open page_images[0] for size probe: %s "
             "(path=%s, exists=%s)",
@@ -1358,26 +2046,14 @@ async def _crop_figures_from_pages(
 
         _page_exists = _os_dbg.path.exists(page_path)
         _page_size = _os_dbg.path.getsize(page_path) if _page_exists else 0
-        with open("D:\\temp\\debug_img.txt", "a") as _df:
-            _df.write(
-                f"CROP_FIGURES: processing {img_path} — "
-                f"bbox=({x},{y},{w},{h}), page_idx={page_idx}, "
-                f"page_h={page_height}, page_exists={_page_exists}, "
-                f"page_size={_page_size}\n"
-            )
-
+        # S#147: debug file write removed
         try:
             with _PILImage.open(page_path) as page_img:
                 # Ensure crop box is within image bounds
                 left, top = x, y % page_height if page_idx > 0 else y
                 right, bottom = min(left + w, page_img.width), min(top + h, page_img.height)
                 if right <= left or bottom <= top:
-                    with open("D:\\temp\\debug_img.txt", "a") as _df:
-                        _df.write(
-                            f"CROP_FIGURES: INVALID BOX {img_path} — "
-                            f"crop=({left},{top},{right},{bottom}), "
-                            f"img=({page_img.width},{page_img.height})\n"
-                        )
+                    # S#147: debug file write removed
                     logger.warning("Invalid crop box for %s: (%d,%d,%d,%d)", img_path, left, top, right, bottom)
                     continue
                 cropped = page_img.crop((left, top, right, bottom))
@@ -1403,13 +2079,7 @@ async def _crop_figures_from_pages(
             url_map[img_path] = minio_url
             logger.debug("Cropped figure %s (page %d, box %d,%d,%d,%d) → %s", img_path, page_idx, left, top, right - left, bottom - top, minio_url)
         except Exception as exc:
-            with open("D:\\temp\\debug_img.txt", "a") as _df:
-                _df.write(
-                    f"CROP_FIGURES: EXCEPTION {img_path} — "
-                    f"page={page_idx}, box=({x},{y},{w},{h}), "
-                    f"page_path={page_path[:120]}, "
-                    f"type={type(exc).__name__}, error={exc}\n"
-                )
+            # S#147: debug file write removed
             logger.error(
                 "CROP_FIGURES: failed for %s (page=%d, box=%d,%d,%d,%d, "
                 "page_path=%s): %s",
@@ -1418,12 +2088,7 @@ async def _crop_figures_from_pages(
             )
 
     if not url_map:
-        with open("D:\\temp\\debug_img.txt", "a") as _df:
-            _df.write(
-                f"CROP_FIGURES: ALL FAILED — "
-                f"{len(img_refs)} img_refs, {len(page_images)} pages, "
-                f"job={job_id[:40]}, refs={list(img_refs.keys())[:5]}\n"
-            )
+        # S#147: debug file write removed
         logger.error(
             "CROP_FIGURES: all %d figure crops failed for job %s "
             "(page_count=%d, img_refs=%s)",
@@ -1433,11 +2098,7 @@ async def _crop_figures_from_pages(
         return questions
 
     uploaded = len(url_map)
-    with open("D:\\temp\\debug_img.txt", "a") as _df:
-        _df.write(
-            f"CROP_FIGURES: SUCCESS — uploaded {uploaded}/{len(img_refs)} figures, "
-            f"job={job_id[:40]}\n"
-        )
+    # S#147: debug file write removed
     logger.info("Page-crop fallback: uploaded %d figures for job %s", uploaded, job_id)
 
     # Rewrite stems and explanations (HTML <img> + Markdown ![]())
@@ -1536,12 +2197,9 @@ async def _rewrite_stem_image_urls(
         )
         zip_url = ""
 
-    with open("D:\\temp\\debug_img.txt", "a") as _df:
-        _df.write(f"REWRITE_STEM: zip_url={'SET' if zip_url else 'EMPTY'}, page_images_count={len(page_images) if page_images else 'None'}\n")
+    # S#147: debug file write removed
     if not zip_url:
         if page_images:
-            with open("D:\\temp\\debug_img.txt", "a") as _df:
-                _df.write(f"REWRITE_STEM: -> crop fallback, page_images[0]={page_images[0][:80]}\n")
             logger.info(
                 "No image ZIP for job %s — falling back to PDF page crop (%d pages)",
                 job_id, len(page_images),
@@ -1653,7 +2311,7 @@ _LLM_ANNOTATION_SEM = asyncio.Semaphore(2)  # Limit concurrent MIMO annotation c
 # routing directly to DeepSeek avoids the MIMO→fallback hop entirely.
 _CHEM_LLM_ANNOTATION_MODE = "reasoning"       # routes directly to DeepSeek
 _CHEM_LLM_ANNOTATION_MODEL = "deepseek-v4-pro"
-_CHEM_LLM_SUBJECTS: frozenset[str] = frozenset({"chemistry", "CHEM"})
+_CHEM_LLM_SUBJECTS: frozenset[str] = frozenset({"chemistry", "CHEM", "化学"})
 
 # S#131: Subjects that need DeepSeek for JSON-safe LaTeX handling.
 # MIMO API does not fully support response_format=json_object,
@@ -1661,11 +2319,117 @@ _CHEM_LLM_SUBJECTS: frozenset[str] = frozenset({"chemistry", "CHEM"})
 # backslashes that break JSON parsing (e.g. \frac, \mathbf, \begin).
 # Routing these subjects via DeepSeek ensures proper JSON escaping.
 _DEEPSEEK_LATEX_SUBJECTS: frozenset[str] = frozenset({
-    "math", "MATH", "数学",
+    "math", "MATH", "mathematics", "数学",
     "physics", "PHYS", "物理",
+    "chinese", "CHINESE", "语文",  # S#141: MIMO JSON 解析失败，需 DeepSeek
+    "geography", "GEO", "地理",  # S#141: MIMO 截断大型文档响应
+    "biology", "BIO", "生物",  # S#141: MIMO 截断大型文档响应
 })
 _DEEPSEEK_LATEX_MODE = "reasoning"
 _DEEPSEEK_LATEX_MODEL = "deepseek-v4-pro"
+
+# ── Vision-First Subject Routing ─────────────────────────────────────
+# Subjects where OCR text quality is insufficient for reliable extraction.
+# Chemistry (molecular structures, reaction equations), Biology (cell diagrams,
+# experimental setups), and Geography (maps, charts) are visually dense —
+# PP-StructureV3 OCR produces garbled formulas and collapsed tables.
+#
+# For these subjects, MIMO V2.5 Vision extracts directly from page images,
+# bypassing OCR text. DeepSeek V4 Pro then cross-validates by comparing
+# the OCR text against the vision extraction.
+#
+# For all other subjects, the existing flow is preserved:
+# DeepSeek/MIMO text extraction → MIMO text cross-validation.
+_VISION_FIRST_SUBJECTS: frozenset[str] = frozenset({
+    "chemistry", "CHEM", "化学",
+    "biology", "BIO", "生物",
+    "geography", "GEO", "地理",
+})
+
+# MIMO Vision extraction prompt — adapted from V3 for image-first workflow.
+# Key differences from text-mode V3:
+#   - No OCR-specific instructions (no "copy from markdown")
+#   - Instructions to observe page images directly
+#   - Visual layout hints (table structure, multi-column, chemical apparatus)
+#   - Same JSON output format for downstream compatibility
+_VISION_EXTRACTION_PROMPT = """\
+你是一位教育文档结构化专家。请直接观察以下试卷的页面图像，提取所有题目信息并返回严格的 JSON。
+
+【硬性规则 — 违反则提取失败】
+1. 选择题必须提取全部选项（A/B/C/D），禁止省略任何一个
+2. 选项内容必须完整，禁止截断
+3. stem 必须完整包含题干和所有选项，禁止拆分
+4. 如果页面中某个选项不完整（被截断/跨页），标注 [原文缺失]，但不要删除该选项
+
+请提取所有题目信息，返回严格的 JSON。请完整输出所有题目，不要省略任何内容。
+
+**⚠️ LaTeX JSON 转义规则（必读）**：stem/answer/explanation 中的 LaTeX 公式会出现在 JSON 字符串内。JSON 字符串中反斜杠必须写为双反斜杠。例如：
+- 化学方程式 $2H_2+O_2\\rightarrow 2H_2O$ → JSON 中写为 "$2H_2+O_2\\\\rightarrow 2H_2O$"
+- 所有 LaTeX 反斜杠必须在 JSON 中双写，不双写将导致 JSON 解析失败
+
+## 输出格式
+
+{
+  "metadata": {
+    "year": 2026, "district": "海淀区", "school": "人大附中",
+    "subject": "数学", "exam_type": "期末考试", "grade": "高一"
+  },
+  "questions": [
+    {
+      "qno": 1,
+      "stem": "从题干起始到下一题之前的所有文字，包括选项。保留 LaTeX 公式和换行。不要改写、总结或省略。",
+      "options": ["A. 选项1", "B. 选项2", "C. 选项3", "D. 选项4"],
+      "type": "choice",
+      "answer": "B",
+      "explanation": "详细解答过程（如有）。纯最终结果且确无解过程才留空。",
+      "difficulty": "basic",
+      "knowledge_points": ["知识点1", "知识点2"]
+    }
+  ]
+}
+
+## 观察图像指南
+
+- **直接观察页面图像**，不依赖外部 OCR 文本
+- **独立识别每道题**：看清题号标记（数字+点/顿号/括号），逐题独立提取
+- **化学试卷特别注意**：
+  - 独立选择题（每题仅题干 + 4 个选项，结构独立）必须**逐题独立计数**，不得合并
+  - 化学方程式中的上下标、反应箭头、状态符号 (g/l/s/aq) 需准确转录
+  - 实验装置图描述需包含在 stem 中
+- **生物/地理试卷**：图表题需准确描述图表内容
+- 如遇跨页题目（前一页题目延续到后一页），需合并为一道完整题目
+
+## 核心规则（同 V3）
+
+### stem 字段（最重要）
+- stem 必须包含该题的全部内容：从题号开始到下一题号之前
+- 保留所有 LaTeX（$...$、$$...$$）、换行、缩进
+- stem 中移除【答案】和【详解】标记及其后的内容（放入 answer/explanation）
+- 解答题/填空题：stem 包含题目完整叙述和各小题编号
+
+### 选项提取（选择题）
+- 每个选择题的 stem 必须包含全部 4 个选项（A/B/C/D）
+- 跨行选项合并为单行
+- 禁止省略任何选项
+- 禁止选项重复
+
+### 综合题与独立题判断（最重要）
+- **独立选择题**：每道选择题只有题干 + A/B/C/D 选项，结构独立 → 逐题独立输出
+- **综合大题**：一个大题号下设 (1)(2)(3) 等子问题，共享同一段材料 → 合并为一道题
+- 判断依据：看页面排版——选项横向/纵向排列的独立选择题不能合并
+- 化学实验题 / 工艺流程题通常是综合大题（材料+若干子题）
+
+### 答案提取
+- 正文中的【答案】标记：直接提取
+- 无标记时从参考答案区查找
+- 禁止填写"参考答案"、"略"、"见解析"
+- answer 只含最终结果，解题过程放入 explanation
+
+### 禁止行为
+- 禁止编造或猜测 OCR/图像中不清晰的内容
+- 禁止将多道独立题合并为一道
+- 禁止将综合大题拆分为多道独立题
+"""
 
 # Valid types from LLM annotation
 _LLM_VALID_TYPES = frozenset({
@@ -1778,6 +2542,289 @@ def _parse_filename_metadata(filename: str) -> dict[str, str | int | None]:
     result["subject"] = m.group("subject") or None
 
     return result
+
+
+
+
+# ── Block-based Structured Extraction ──────────────────────────────────
+# Uses PaddleOCR-VL's parsing_res_list structured blocks (block_label,
+# block_order, group_id) to extract questions without LLM, avoiding
+# the MIMO Vision 4096-token limit.
+
+_QNO_PATTERN = re.compile(
+    r'^\s*[（(]?(\d{1,2})\s*[.、．)）]',  # "1.", "1、", "1)", "（1）", "(1)"
+)
+_OPTION_LINE_PATTERN = re.compile(r'^([A-H])[.、．)\s]')
+_TEXT_LIKE_LABELS = frozenset({"text", "paragraph_title", "doc_title"})
+_FORMULA_LABELS = frozenset({"display_formula", "inline_formula", "formula"})
+_FIGURE_LABELS = frozenset({"image", "chart", "figure"})
+# Answer section markers — detected in paragraph_title / doc_title
+_ANSWER_SECTION_MARKER = re.compile(
+    r'参考\s*答案|答案(?:\s*$)|答题卡|评分标准', re.IGNORECASE,
+)
+
+
+def _extract_from_paddleocr_blocks(paddleocr_result: Any) -> dict | None:
+    """Extract questions from PaddleOCR-VL structured blocks.
+
+    Walks all blocks across all pages (sorted by page_num, block_order),
+    detects question boundaries via QNO regex on text blocks, then
+    assembles each question's stem, options, formulas, figures, and
+    tables from its constituent blocks.
+    """
+    if paddleocr_result is None:
+        return None
+
+    pages = getattr(paddleocr_result, "pages", None)
+    if not pages:
+        return None
+
+    # Collect + sort all blocks
+    all_blocks: list[Any] = []
+    for page in pages:
+        page_num = getattr(page, "page_num", 1)
+        for block in getattr(page, "blocks", []):
+            all_blocks.append((page_num, block))
+    all_blocks.sort(key=lambda x: (
+        x[0],
+        getattr(x[1], "block_order", 0),
+    ))
+
+    # Question boundary detection
+    questions_raw: list[tuple[int, list[Any]]] = []
+    current_qno: int | None = None
+    current_group: list[Any] = []
+
+    in_answer_section = False
+
+    for page_num, block in all_blocks:
+        label = getattr(block, "block_label", "text")
+        content = (getattr(block, "block_content", "") or "").strip()
+
+        # Detect answer section entry — skip all blocks past this point
+        if not in_answer_section:
+            if label in ("paragraph_title", "doc_title") and _ANSWER_SECTION_MARKER.search(content):
+                in_answer_section = True
+                # Flush the current question group before skipping
+                if current_qno is not None and current_group:
+                    questions_raw.append((current_qno, current_group))
+                    current_qno = None
+                    current_group = []
+                logger.info(
+                    "_extract_from_paddleocr_blocks: answer section "
+                    "detected at P%d B%d — skipping remaining blocks",
+                    page_num, getattr(block, "block_order", 0),
+                )
+                continue
+
+        if in_answer_section:
+            continue
+
+        if label in _TEXT_LIKE_LABELS and content:
+            m = _QNO_PATTERN.match(content)
+            if m:
+                if current_qno is not None and current_group:
+                    questions_raw.append((current_qno, current_group))
+                current_qno = int(m.group(1))
+                current_group = [block]
+                continue
+
+        if current_qno is not None:
+            current_group.append(block)
+
+    if current_qno is not None and current_group:
+        questions_raw.append((current_qno, current_group))
+
+    if not questions_raw:
+        logger.warning("_extract_from_paddleocr_blocks: no QNO blocks found")
+        return None
+
+    assembled = []
+    for qno, group in questions_raw:
+        q = _assemble_one_question(qno, group)
+        if q:
+            assembled.append(q)
+
+    if not assembled:
+        return None
+
+    # ── Deduplicate: for duplicate QNOs, keep the version with longer stem ──
+    seen_qnos: dict[int, dict] = {}
+    for q in assembled:
+        qno = q.get("qno")
+        if qno not in seen_qnos or len(q.get("stem", "")) > len(
+            seen_qnos[qno].get("stem", ""),
+        ):
+            seen_qnos[qno] = q
+    if len(seen_qnos) < len(assembled):
+        logger.info(
+            "_extract_from_paddleocr_blocks: deduplicated %d → %d questions",
+            len(assembled), len(seen_qnos),
+        )
+    assembled = sorted(seen_qnos.values(), key=lambda q: q.get("qno", 0))
+
+    logger.info(
+        "_extract_from_paddleocr_blocks: extracted %d questions",
+        len(assembled),
+    )
+    return {
+        "questions": assembled,
+        "metadata": {
+            "extraction_source": "paddleocr_blocks",
+            "question_count": len(assembled),
+        },
+    }
+
+
+def _assemble_one_question(qno: int, blocks: list[Any]) -> dict | None:
+    """Assemble a single question from its PaddleOCR-VL blocks."""
+    stem_parts: list[str] = []
+    option_parts: list[list[str]] = []
+
+    in_options = False
+    current_opt_label: str | None = None
+    current_opt_content: list[str] = []
+
+    for block in blocks:
+        label = getattr(block, "block_label", "text")
+        content = (getattr(block, "block_content", "") or "").strip()
+        if not content and label not in _FIGURE_LABELS:
+            continue
+
+        if label in _FORMULA_LABELS:
+            if in_options:
+                current_opt_content.append(content)
+            else:
+                stem_parts.append(content)
+
+        elif label in _FIGURE_LABELS:
+            pass  # figures stored as metadata, not in stem
+
+        elif label == "table":
+            if in_options:
+                current_opt_content.append(content)
+
+        elif label in _TEXT_LIKE_LABELS:
+            lines = content.split("\n")
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                opt_m = _OPTION_LINE_PATTERN.match(stripped)
+                if opt_m:
+                    if current_opt_label is not None and current_opt_content:
+                        option_parts.append(
+                            [current_opt_label] + list(current_opt_content),
+                        )
+                    in_options = True
+                    current_opt_label = opt_m.group(1)
+                    option_text = _OPTION_LINE_PATTERN.sub(
+                        "", stripped, count=1,
+                    ).strip()
+                    current_opt_content = [option_text] if option_text else []
+                elif in_options:
+                    current_opt_content.append(stripped)
+                else:
+                    stem_parts.append(stripped)
+
+    if current_opt_label is not None and current_opt_content:
+        option_parts.append([current_opt_label] + list(current_opt_content))
+
+    stem = "\n".join(stem_parts).strip()
+
+    option_strs: list[str] = []
+    for parts in option_parts:
+        label = parts[0]
+        rest = " ".join(parts[1:]) if len(parts) > 1 else ""
+        option_strs.append(f"{label}. {rest}".strip())
+
+    if not stem:
+        logger.debug(
+            "_assemble_one_question: qno=%d rejected (empty stem)", qno,
+        )
+        return None
+
+    if option_strs:
+        qtype = "choice"
+    elif any(kw in stem for kw in ("填空", "___", "（", "(")):
+        qtype = "fill"
+    else:
+        qtype = "calculation"
+
+    return {
+        "qno": qno,
+        "type": qtype,
+        "section": "",
+        "stem": stem,
+        "options": option_strs,
+        "answer": "",
+        "explanation": "",
+        "score": None,
+        "difficulty": None,
+        "knowledge_points": [],
+    }
+
+
+def _block_deterministic_validate(
+    questions: list[dict],
+) -> dict[str, Any]:
+    """Deterministic quality check for block-extracted questions.
+
+    Block extraction is rule-based (regex + layout), so there's no LLM
+    hallucination to validate.  A simple QNO continuity + stem check
+    replaces the expensive LLM cross-validator.
+
+    Returns the same shape as _cross_validate().
+    """
+    qnos = sorted(
+        q.get("qno") for q in questions
+        if q.get("qno") is not None
+    )
+    issues = []
+    total = len(qnos)
+    ocr_est = total  # conservative: assume all detected are real
+
+    # Check 1: QNO continuity (1..N, no gaps)
+    if qnos:
+        expected = set(range(1, max(qnos) + 1))
+        gaps = expected - set(qnos)
+        duplicates = [
+            str(qno) for qno in qnos
+            if qnos.count(qno) > 1
+        ]
+        if gaps:
+            issues.append(
+                f"QNO gaps detected: missing {sorted(gaps)}",
+            )
+        if set(duplicates):
+            issues.append(
+                f"Duplicate QNOs: {sorted(set(duplicates))}",
+            )
+
+    # Check 2: Stem non-empty
+    empty_stems = [
+        q.get("qno") for q in questions
+        if not (q.get("stem") or "").strip()
+    ]
+    if empty_stems:
+        issues.append(f"Empty stems for Q{empty_stems}")
+
+    if issues:
+        return {
+            "valid": False,
+            "action": "reject",
+            "issues": issues,
+            "ocr_estimated_total": ocr_est + len(gaps) if qnos else 0,
+            "extracted_total": total,
+        }
+
+    return {
+        "valid": True,
+        "action": "pass",
+        "issues": [],
+        "ocr_estimated_total": total,
+        "extracted_total": total,
+    }
 
 
 class _DocumentProcessing:
@@ -1927,7 +2974,7 @@ class _DocumentProcessing:
                 task_id, "parallel_extract",
                 f"Failed: {result.error_message}",
             )
-            return [], ""
+            return [], "", "", None
 
         await self._log_step(
             task_id, "parallel_extract",
@@ -2220,30 +3267,168 @@ class _DocumentProcessing:
             question_blocks,
             getattr(result, "paddleocr_markdown", ""),
             getattr(result, "paddleocr_job_id", ""),
+            getattr(result, "paddleocr_result", None),
         )
+
+
+
 
     # ── Session #91: LLM Annotation Methods ──────────────────────────────
 
     async def _step_llm_annotate(
         self, task_id: str, full_markdown: str,
         subject_code: str | None = None,
+        page_images: list[str] | None = None,
+        paddleocr_result: Any | None = None,
     ) -> dict[str, Any] | None:
-        """Annotate full exam Markdown via LLM → metadata + questions JSON.
+        """Annotate full exam via LLM → metadata + questions JSON.
 
-        Uses MIMO V2.5 (mode="fast", 1M context) as primary, with
-        DeepSeek → Ollama as Gateway fallback chain.  Extracts:
-        - metadata: {year, district, school, subject, exam_type, grade}
-        - questions: [{qno, type, section, answer, explanation, score}, ...]
+        Routes by subject discipline:
+        - Vision-first subjects (chemistry, biology, geography):
+          Phase 0 (NEW): Extract from PaddleOCR-VL structured blocks
+          (parsing_res_list) — no LLM, no token limit.  Falls back to:
+          Phase 1: MIMO V2.5 Vision extracts from page images.
+          Phase 2: DeepSeek V4 Pro cross-validates against OCR text.
+        - Text-first subjects (all others):
+          DeepSeek/MIMO text extracts from OCR markdown,
+          then MIMO text cross-validates.
 
         Args:
             task_id: Redis task ID for logging
             full_markdown: Complete PP-StructureV3 Markdown output
-            subject_code: Subject identifier for pre-cleaning and
-                          subject-specific prompt instructions
+            subject_code: Subject identifier for routing and prompts
+            page_images: Page image file paths (required for vision-first)
+            paddleocr_result: Raw PaddleOCRResult with structured
+                pages[].blocks[] for block-based extraction (Phase 0)
 
         Returns:
             Parsed annotation dict or None on failure.
         """
+        # ── S#147: Anchor mode switching ──
+        # Vision-first subjects (chemistry, biology, geography) skip Anchor —
+        # they have a dedicated QD blocks → MIMO Vision → V3 fallback chain.
+        # Text-first subjects use QD blocks → V3 text-mode with full fallback.
+        _skip_anchor = (
+            (subject_code or "").lower() in _VISION_FIRST_SUBJECTS
+        )
+        if settings.ANCHOR_MODE_ENABLED and not _skip_anchor:
+            if settings.QUESTION_DRIVEN_EXTRACTION_ENABLED:
+                # ── S#155: Question-driven markdown extraction ──
+                await self._log_step(
+                    task_id, "llm_annotate",
+                    f"Question-driven blocks: subject={subject_code}, "
+                    f"blocks_available={paddleocr_result is not None}",
+                )
+                from app.domains.question._question_driven_extractor import (
+                    extract_questions_from_blocks,
+                    extract_questions_from_markdown,
+                )
+                # S#158: Always use markdown path — PP-StructureV3 does not
+                # produce title labels, making blocks-path section detection
+                # unreliable. The markdown path uses _MD_SECTION_SPLIT_RE
+                # (##-optional), which works correctly for all subjects.
+                qd_result = await extract_questions_from_markdown(
+                    full_markdown,
+                    subject_code=subject_code or "",
+                )
+                if qd_result is not None:
+                    # Normalize to same format as V3/Anchor output
+                    qd_questions = qd_result.get("questions", [])
+                    qd_metadata = qd_result.get("metadata", {})
+                    qd_normalized = []
+                    for q in qd_questions:
+                        qno = q.get("qno")
+                        try:
+                            qno = int(qno) if qno is not None else None
+                        except (ValueError, TypeError):
+                            qno = None
+                        qtype = q.get("type", "calculation")
+                        if qtype not in _LLM_VALID_TYPES:
+                            qtype = self._infer_type_from_section(
+                                q.get("section", ""),
+                            )
+                        answer_raw = str(q.get("answer", "")).strip()
+                        answer = _validate_llm_answer(answer_raw, qtype)
+                        score = q.get("score")
+                        try:
+                            score = int(score) if score is not None else None
+                        except (ValueError, TypeError):
+                            score = None
+                        stem = str(q.get("stem", "")).strip()
+                        options = q.get("options", [])
+                        if isinstance(options, str):
+                            try:
+                                options = json.loads(options)
+                            except (json.JSONDecodeError, TypeError):
+                                options = []
+                        if not isinstance(options, list):
+                            options = []
+                        options = [str(o).strip() for o in options if o and str(o).strip()]
+                        difficulty = q.get("difficulty")
+                        knowledge_points = q.get("knowledge_points", [])
+                        if not isinstance(knowledge_points, list):
+                            knowledge_points = []
+                        kp_strs = [str(kp).strip() for kp in knowledge_points]
+                        qd_normalized.append({
+                            "qno": qno,
+                            "type": qtype,
+                            "section": q.get("section", ""),
+                            "stem": stem,
+                            "options": options,
+                            "answer": answer,
+                            "explanation": str(q.get("explanation", "")).strip(),
+                            "score": score,
+                            "difficulty": difficulty,
+                            "knowledge_points": kp_strs,
+                        })
+
+                    _pipeline_checkpoint(task_id, "qd_markdown_success", {
+                        "question_count": len(qd_normalized),
+                        "source": qd_metadata.get("extraction_source", "question_driven"),
+                    })
+                    logger.info(
+                        "Question-driven markdown: %d questions for %s",
+                        len(qd_normalized),
+                        subject_code,
+                    )
+
+                    # Run cross-validation
+                    validator_verdict = await _cross_validate(
+                        task_id, full_markdown, qd_normalized,
+                        validator_mode=_DEEPSEEK_LATEX_MODE,
+                        validator_model=_DEEPSEEK_LATEX_MODEL,
+                    )
+                    cv_valid = validator_verdict.get("valid", True)
+                    cv_action = validator_verdict.get("action", "pass")
+                    cv_issues = validator_verdict.get("issues", [])
+
+                    if cv_action in ("reject", "fallback"):
+                        logger.warning(
+                            "Question-driven markdown: cross-validator rejected "
+                            "(%s), falling back to text mode",
+                            cv_action,
+                        )
+                        # Fall through to V3 text-mode below
+                    else:
+                        if cv_issues:
+                            logger.info(
+                                "Question-driven markdown: cross-validator found "
+                                "%d issues (action=%s, valid=%s)",
+                                len(cv_issues), cv_action, cv_valid,
+                            )
+                        return {
+                            "metadata": qd_metadata,
+                            "questions": qd_normalized,
+                        }
+                else:
+                    logger.warning(
+                        "Question-driven blocks returned None — "
+                        "falling to V3 text-mode for %s",
+                        subject_code,
+                    )
+                    # Fall through to V3 text-mode below
+
+        # ── V3 mode (original logic) ──
         # ── Mock mode: return empty to trigger fallback ──
         if settings.LLM_GATEWAY_MODE == "mock":
             await self._log_step(
@@ -2252,9 +3437,366 @@ class _DocumentProcessing:
             )
             return None
 
+        # ── Vision-First Routing ────────────────────────────────
+        # For image-dense subjects (chemistry, biology, geography),
+        # MIMO V2.5 Vision extracts directly from page images.
+        # DeepSeek V4 Pro then cross-validates the result.
+        # Falls back to text-mode extraction on vision failure.
+        _is_vision_first = (
+            subject_code and subject_code in _VISION_FIRST_SUBJECTS
+            and page_images and len(page_images) > 0
+        )
+        if _is_vision_first:
+            logger.info(
+                "Vision-first routing: %s (%d pages)",
+                subject_code, len(page_images) if page_images else 0,
+            )
+            await self._log_step(
+                task_id, "llm_annotate",
+                f"Vision-first: {subject_code}, {len(page_images)} pages",
+            )
+
+            # ── Phase 0: Block-based structured extraction ────────
+            # S#155: Question-driven extraction replaces regex QNO split.
+            # Instead of pre-splitting blocks by QNO pattern, we group
+            # blocks by natural section boundaries and let the LLM see
+            # full context to determine question boundaries semantically.
+            # The old regex _extract_from_paddleocr_blocks() is kept as
+            # fallback (via QUESTION_DRIVEN_EXTRACTION_ENABLED=False).
+            vision_parsed = None
+            if paddleocr_result is not None:
+                total_blocks = sum(
+                    len(getattr(p, "blocks", []))
+                    for p in getattr(paddleocr_result, "pages", [])
+                )
+                logger.info(
+                    "Vision-first: trying block-based extraction "
+                    "(%d pages, %d blocks) for %s",
+                    len(getattr(paddleocr_result, "pages", [])),
+                    total_blocks,
+                    subject_code,
+                )
+
+                if settings.QUESTION_DRIVEN_EXTRACTION_ENABLED:
+                    # ── S#155: Question-driven extraction ────────
+                    # S#158: Use markdown path (not blocks) —
+                    # PP-StructureV3 does not produce title labels,
+                    # making blocks-path section detection unreliable.
+                    await self._log_step(
+                        task_id, "llm_annotate",
+                        f"Question-driven markdown (vision-first): "
+                        f"subject={subject_code}",
+                    )
+                    from app.domains.question._question_driven_extractor import (
+                        extract_questions_from_markdown,
+                    )
+                    vision_parsed = await extract_questions_from_markdown(
+                        full_markdown,
+                        subject_code=subject_code or "",
+                    )
+                    if vision_parsed is not None:
+                        _pipeline_checkpoint(
+                            task_id, "qd_markdown_success", {
+                                "question_count": len(
+                                    vision_parsed.get("questions", []),
+                                ),
+                                "source": "question_driven_markdown",
+                            },
+                        )
+                        logger.info(
+                            "Question-driven markdown: %d questions for %s",
+                            len(vision_parsed.get("questions", [])),
+                            subject_code,
+                        )
+                    else:
+                         logger.warning(
+                             "Question-driven extraction returned None — "
+                             "falling to MIMO Vision for %s",
+                             subject_code,
+                         )
+                else:
+                    # ── Legacy: Regex QNO block extraction ───────
+                    vision_parsed = _extract_from_paddleocr_blocks(
+                        paddleocr_result,
+                    )
+                    if vision_parsed is not None:
+                        _pipeline_checkpoint(
+                            task_id, "block_extraction_success", {
+                                "question_count": len(
+                                    vision_parsed.get("questions", []),
+                                ),
+                                "source": "paddleocr_blocks",
+                            },
+                        )
+                        logger.info(
+                            "Block-based extraction: %d questions for %s",
+                            len(vision_parsed.get("questions", [])),
+                            subject_code,
+                        )
+
+            # ── Phase 1: MIMO Vision extraction (fallback) ─────────
+            if vision_parsed is None:
+                await self._log_step(
+                    task_id, "llm_annotate",
+                    "Vision-first: MIMO V2.5 Vision fallback",
+                )
+                vision_parsed = await _mimo_vision_extract(
+                    task_id, page_images, subject_code,
+                )
+
+            if vision_parsed is None:
+                logger.warning(
+                    "Vision extraction failed — falling back to text mode"
+                )
+                # Fall through to text-mode flow below
+            else:
+                # Normalize vision-extracted questions
+                vision_questions = vision_parsed.get("questions", [])
+                vision_metadata = vision_parsed.get("metadata", {})
+
+                _pipeline_checkpoint(task_id, "vision_questions_parsed", {
+                    "question_count": len(vision_questions),
+                    "sample_first_3": [
+                        {
+                            "qno": q.get("qno"),
+                            "type": q.get("type"),
+                            "stem_first_60": (q.get("stem", "") or "")[:60],
+                        }
+                        for q in vision_questions[:3]
+                    ],
+                })
+
+                vision_normalized = []
+                for q in vision_questions:
+                    qno = q.get("qno")
+                    try:
+                        qno = int(qno) if qno is not None else None
+                    except (ValueError, TypeError):
+                        qno = None
+                    qtype = q.get("type", "calculation")
+                    if qtype not in _LLM_VALID_TYPES:
+                        qtype = self._infer_type_from_section(
+                            q.get("section", ""),
+                        )
+                    answer_raw = str(q.get("answer", "")).strip()
+                    answer = _validate_llm_answer(answer_raw, qtype)
+                    score = q.get("score")
+                    try:
+                        score = int(score) if score is not None else None
+                    except (ValueError, TypeError):
+                        score = None
+                    stem = str(q.get("stem", "")).strip()
+                    options = q.get("options", [])
+                    if isinstance(options, str):
+                        try:
+                            options = json.loads(options)
+                        except (json.JSONDecodeError, TypeError):
+                            options = []
+                    if not isinstance(options, list):
+                        options = []
+                    options = [str(o).strip() for o in options if o and str(o).strip()]
+                    difficulty = q.get("difficulty")
+                    if difficulty and difficulty not in (
+                        "easy", "basic", "medium", "hard", "very_hard",
+                    ):
+                        difficulty = None
+                    knowledge_points = q.get("knowledge_points", [])
+                    if not isinstance(knowledge_points, list):
+                        knowledge_points = []
+                    kp_strs = [str(kp).strip() for kp in knowledge_points]
+                    vision_normalized.append({
+                        "qno": qno,
+                        "type": qtype,
+                        "section": q.get("section", ""),
+                        "stem": stem,
+                        "options": options,
+                        "answer": answer,
+                        "explanation": str(q.get("explanation", "")).strip(),
+                        "score": score,
+                        "difficulty": difficulty,
+                        "knowledge_points": kp_strs,
+                    })
+
+                _pipeline_checkpoint(task_id, "vision_normalized", {
+                    "question_count": len(vision_normalized),
+                    "qnos": [q.get("qno") for q in vision_normalized],
+                })
+
+                # Phase 2: Cross-validate vision result
+                extraction_source = vision_metadata.get("extraction_source", "")
+                if extraction_source == "paddleocr_blocks":
+                    # Block extraction is deterministic — use cheap
+                    # QNO continuity check instead of LLM cross-validation
+                    validator_verdict = _block_deterministic_validate(
+                        vision_normalized,
+                    )
+                    logger.info(
+                        "Block extraction deterministic validator: "
+                        "valid=%s action=%s issues=%d",
+                        validator_verdict.get("valid"),
+                        validator_verdict.get("action"),
+                        len(validator_verdict.get("issues", [])),
+                    )
+                else:
+                    validator_verdict = await _cross_validate(
+                        task_id, full_markdown, vision_normalized,
+                        validator_mode=_DEEPSEEK_LATEX_MODE,
+                        validator_model=_DEEPSEEK_LATEX_MODEL,
+                    )
+                cv_action = validator_verdict.get("action", "pass")
+                cv_valid = validator_verdict.get("valid", True)
+                cv_issues = validator_verdict.get("issues", [])
+                cv_ocr_est = validator_verdict.get(
+                    "ocr_estimated_total", len(vision_normalized),
+                )
+
+                if cv_action == "retry" and cv_issues:
+                    logger.warning(
+                        "Vision DeepSeek cross-validator: action=retry, "
+                        "issues=%s — retrying MIMO Vision with feedback",
+                        cv_issues,
+                    )
+                    try:
+                        from app.gateway.router import llm_gateway
+
+                        issues_text = "\n".join(f"- {i}" for i in cv_issues)
+                        retry_prefix = _CROSS_VALIDATE_RETRY_PREFIX.format(
+                            issues_formatted=issues_text,
+                        ).replace(
+                            "重新阅读完整 OCR Markdown",
+                            "重新观察页面图像",
+                        )
+                        retry_prompt = retry_prefix + _VISION_EXTRACTION_PROMPT
+                        base64_retry = _encode_page_images(page_images)
+                        if base64_retry:
+                            async with _LLM_ANNOTATION_SEM:
+                                retry_result = await llm_gateway.generate(
+                                    mode="vision",
+                                    prompt=retry_prompt,
+                                    images=base64_retry,
+                                    response_format={"type": "json_object"},
+                                    max_tokens=32768,
+                                )
+                            retry_text = retry_result.get("response", "")
+                            if not retry_text:
+                                logger.warning("Vision retry: empty response from MIMO")
+                            else:
+                                import re as _rre
+                                _rj = retry_text.strip()
+                                _rm = _rre.match(
+                                    r'```(?:json)?\s*\n?(.*)(?:\n?```)?$',
+                                    _rj, _rre.DOTALL,
+                                )
+                                if _rm:
+                                    _rj = _rm.group(1).strip()
+                                try:
+                                    retry_parsed = json.loads(_rj)
+                                except json.JSONDecodeError:
+                                    retry_parsed = _repair_truncated_json(_rj)
+                                if retry_parsed and isinstance(retry_parsed, dict):
+                                    retry_qs = retry_parsed.get("questions", [])
+                                    if isinstance(retry_qs, list) and retry_qs:
+                                        retry_has_more = len(retry_qs) > len(vision_normalized)
+                                        logger.info(
+                                            "Vision retry: %dQ → %dQ (%s)",
+                                            len(vision_normalized), len(retry_qs),
+                                            "more" if retry_has_more else "fewer",
+                                        )
+                                        if retry_has_more:
+                                            # Accept retry, re-normalize
+                                            vision_normalized = []
+                                            for q in retry_qs:
+                                                qno2 = q.get("qno")
+                                                try:
+                                                    qno2 = int(qno2) if qno2 is not None else None
+                                                except (ValueError, TypeError):
+                                                    qno2 = None
+                                                qtype2 = q.get("type", "calculation")
+                                                if qtype2 not in _LLM_VALID_TYPES:
+                                                    qtype2 = self._infer_type_from_section(
+                                                        q.get("section", ""),
+                                                    )
+                                                a2 = _validate_llm_answer(
+                                                    str(q.get("answer", "")).strip(), qtype2,
+                                                )
+                                                s2 = q.get("score")
+                                                try:
+                                                    s2 = int(s2) if s2 is not None else None
+                                                except (ValueError, TypeError):
+                                                    s2 = None
+                                                st2 = str(q.get("stem", "")).strip()
+                                                opts2 = q.get("options", [])
+                                                if isinstance(opts2, str):
+                                                    try:
+                                                        opts2 = json.loads(opts2)
+                                                    except (json.JSONDecodeError, TypeError):
+                                                        opts2 = []
+                                                if not isinstance(opts2, list):
+                                                    opts2 = []
+                                                opts2 = [str(o).strip() for o in opts2 if o and str(o).strip()]
+                                                d2 = q.get("difficulty")
+                                                if d2 and d2 not in (
+                                                    "easy", "basic", "medium", "hard", "very_hard",
+                                                ):
+                                                    d2 = None
+                                                kp2 = q.get("knowledge_points", [])
+                                                if not isinstance(kp2, list):
+                                                    kp2 = []
+                                                vision_normalized.append({
+                                                    "qno": qno2, "type": qtype2,
+                                                    "section": q.get("section", ""),
+                                                    "stem": st2, "options": opts2,
+                                                    "answer": a2,
+                                                    "explanation": str(q.get("explanation", "")).strip(),
+                                                    "score": s2, "difficulty": d2,
+                                                    "knowledge_points": [str(k).strip() for k in kp2],
+                                                })
+                                            vision_metadata = retry_parsed.get("metadata", {})
+                                            cv_valid = True
+                    except Exception as _vr_exc:
+                        logger.warning(
+                            "Vision retry failed: %s — keeping original",
+                            str(_vr_exc)[:200],
+                        )
+
+                elif cv_action == "reject":
+                    logger.warning(
+                        "Vision DeepSeek cross-validator: action=reject, "
+                        "issues=%s — falling back to text mode",
+                        cv_issues,
+                    )
+                    # Don't return rejected vision result; fall through to text
+
+                # Return vision result (unless rejected)
+                if cv_action != "reject":
+                    await self._log_step(
+                        task_id, "llm_annotate",
+                        f"Vision-first: {len(vision_normalized)} questions "
+                        f"(cross-validate: valid={cv_valid} action={cv_action} "
+                        f"ocr_est={cv_ocr_est})",
+                    )
+                    _pipeline_checkpoint(task_id, "vision_final", {
+                        "question_count": len(vision_normalized),
+                        "valid": cv_valid,
+                        "action": cv_action,
+                        "ocr_estimated": cv_ocr_est,
+                    })
+                    return {
+                        "metadata": vision_metadata,
+                        "questions": vision_normalized,
+                    }
+
+        # ── Text-mode flow (existing) ────────────────────────────
         # S#128: Full prompt — no truncation below 48K chars.
         # Session #125: MIMO V2.5 1M context — no truncation needed.
         markdown_text = full_markdown.strip()
+
+        # ── Session #137: Pipeline checkpoint — OCR markdown ──
+        _pipeline_checkpoint(task_id, "ocr_markdown", {
+            "chars": len(markdown_text),
+            "lines": markdown_text.count('\n') + 1,
+            "sample_first_200": markdown_text[:200],
+        })
 
         if len(markdown_text) < 100:
             logger.warning(
@@ -2266,6 +3808,17 @@ class _DocumentProcessing:
         # ── Session #125: Subject-specific Markdown pre-cleaning ──
         if subject_code:
             markdown_text = _pre_clean_markdown(markdown_text, subject_code)
+
+        # ── Session #137: LaTeX preprocessing ──────────────────────
+        # Convert Unicode math symbols to LaTeX before LLM annotation
+        markdown_text = _apply_latex_preprocessing(markdown_text)
+
+        # ── Session #137: Pipeline checkpoint — preprocessed markdown ──
+        _pipeline_checkpoint(task_id, "preprocessed_markdown", {
+            "chars": len(markdown_text),
+            "lines": markdown_text.count('\n') + 1,
+            "sample_first_200": markdown_text[:200],
+        })
 
         # ── Session #115 Phase 2: Body/answer splitting ──────────────
         body_md, answer_md = _split_markdown_at_answer_section(markdown_text)
@@ -2366,13 +3919,21 @@ class _DocumentProcessing:
                 result = await llm_gateway.generate(
                     mode=annotate_mode, prompt=prompt,
                     response_format={"type": "json_object"},
-                    max_tokens=65536,  # Session #131: 49K→65K — chemistry tables+LaTeX need more output
+                    max_tokens=131072,  # Session #137: 65K→128K — chemistry tables+LaTeX need more output
                     model=annotate_model,
                 )
             response_text = result.get("response", "")
             if not response_text:
                 logger.warning("LLM annotation: empty response")
                 return None
+
+            # ── Session #137: Pipeline checkpoint — LLM raw response ──
+            _pipeline_checkpoint(task_id, "llm_raw_response", {
+                "response_chars": len(response_text),
+                "model": annotate_model or annotate_mode,
+                "sample_first_500": response_text[:500],
+                "sample_last_200": response_text[-200:],
+            })
 
             # Parse JSON from response (handle markdown code fences)
             parsed = self._parse_llm_annotation_json(response_text)
@@ -2389,6 +3950,73 @@ class _DocumentProcessing:
             if not isinstance(questions, list) or len(questions) == 0:
                 logger.warning("LLM annotation: no questions in output")
                 return None
+
+            # ── Session #137: Pipeline checkpoint — parsed JSON ──
+            _pipeline_checkpoint(task_id, "parsed_json", {
+                "question_count": len(questions),
+                "metadata_keys": list(metadata.keys()),
+                "first_question_sample": {
+                    "qno": questions[0].get("qno"),
+                    "type": questions[0].get("type"),
+                    "stem_chars": len(str(questions[0].get("stem", ""))),
+                    "stem_first_100": str(questions[0].get("stem", ""))[:100],
+                    "options_count": len(questions[0].get("options", []) if isinstance(questions[0].get("options"), list) else []),
+                },
+            })
+
+            # Session #137: Detect truncation and retry if needed
+            if self._detect_truncation(response_text, questions):
+                logger.warning(
+                    "LLM annotation: truncation detected (%d questions), retrying...",
+                    len(questions),
+                )
+                try:
+                    retry_prompt = prompt + (
+                        "\n\nIMPORTANT: Previous response was truncated. "
+                        "Please ensure your JSON response is complete. "
+                        "If you cannot fit all questions, output fewer questions "
+                        "but ensure each one is complete with stem, answer, and explanation."
+                    )
+                    async with _LLM_ANNOTATION_SEM:
+                        retry_result = await llm_gateway.generate(
+                            mode=annotate_mode, prompt=retry_prompt,
+                            response_format={"type": "json_object"},
+                            max_tokens=131072,
+                            model=annotate_model,
+                        )
+                    retry_text = retry_result.get("response", "")
+                    if retry_text:
+                        retry_parsed = self._parse_llm_annotation_json(retry_text)
+                        if retry_parsed and isinstance(retry_parsed, dict):
+                            retry_qs = retry_parsed.get("questions", [])
+                            if isinstance(retry_qs, list) and retry_qs:
+                                # Use retry result if it has more complete questions
+                                if not self._detect_truncation(retry_text, retry_qs):
+                                    logger.info(
+                                        "Truncation retry improved: %dQ → %dQ",
+                                        len(questions), len(retry_qs),
+                                    )
+                                    parsed = retry_parsed
+                                    metadata = retry_parsed.get("metadata", {})
+                                    questions = retry_qs
+                                else:
+                                    logger.warning("Truncation retry also truncated")
+                except Exception as e:
+                    logger.warning("Truncation retry failed: %s", e)
+
+            # S#138: Validate option completeness for choice questions
+            _validate_option_completeness(questions)
+
+            # S#138: Supplement incomplete options from OCR markdown
+            _supplemented = _supplement_options_from_ocr(questions, full_markdown)
+            if _supplemented:
+                logger.info(
+                    "LLM annotation: supplemented %d questions with OCR options",
+                    _supplemented,
+                )
+
+            # S#138: Check Greek letter preservation (diagnostic)
+            _check_greek_preservation(full_markdown, questions)
 
             # Normalize and validate each question
             normalized = []
@@ -2419,6 +4047,12 @@ class _DocumentProcessing:
                 # Parse stem and options from LLM prompt output
                 stem = str(q.get("stem", "")).strip()
                 options = q.get("options", [])
+                # Session #137: options might be a JSON string from LLM
+                if isinstance(options, str):
+                    try:
+                        options = json.loads(options)
+                    except (json.JSONDecodeError, TypeError):
+                        options = []
                 if not isinstance(options, list):
                     options = []
                 options = [str(o).strip() for o in options if o and str(o).strip()]
@@ -2485,27 +4119,29 @@ class _DocumentProcessing:
                             if section_pos >= 0 else 0.0
                         )
 
-            # ── S#127: Question count sanity check + retry ──────────
-            # Compare LLM output count against regex-extracted QNOs
-            # from the original markdown.  If over-splitting detected,
-            # re-submit the full markdown with explicit retry instructions
-            # telling the LLM to respect the document's natural QNO count.
-            markdown_qnos = _extract_markdown_qno_count(full_markdown)
-            count_ok, count_msg = _check_question_count_sanity(
-                markdown_qnos, len(normalized),
+            # ── Cross-Validation ────────────────────────────────
+            # Text-mode path: MIMO V2.5 (mode="fast") validates the
+            # text extraction.  Vision-first subjects use DeepSeek
+            # instead (see vision-first routing above).
+            validator_verdict = await _cross_validate(
+                task_id, full_markdown, normalized,
             )
-            if not count_ok:
+            cv_action = validator_verdict.get("action", "pass")
+            cv_valid = validator_verdict.get("valid", True)
+            cv_issues = validator_verdict.get("issues", [])
+            cv_ocr_est = validator_verdict.get("ocr_estimated_total", len(normalized))
+
+            if cv_action == "retry" and cv_issues:
                 logger.warning(
-                    "LLM annotation QNO sanity: %s — retrying with full markdown",
-                    count_msg,
+                    "MIMO cross-validator: action=retry, issues=%s — retrying",
+                    cv_issues,
                 )
                 try:
-                    # Build retry prompt: retry prefix + V3 full-markdown
-                    # S#128: V1 removed; retry now uses V3 with full
-                    # markdown as body + placeholder for answers section
-                    # (no body/answer split — let the LLM re-examine everything).
-                    retry_prefix = _QNO_RETRY_PREFIX.format(
-                        llm_count=len(normalized), qno_count=markdown_qnos,
+                    issues_text = "\n".join(
+                        f"- {i}" for i in cv_issues
+                    )
+                    retry_prefix = _CROSS_VALIDATE_RETRY_PREFIX.format(
+                        issues_formatted=issues_text,
                     )
                     retry_prompt = retry_prefix + _LLM_ANNOTATION_PROMPT_V3.replace(
                         "{body}", full_markdown,
@@ -2520,7 +4156,7 @@ class _DocumentProcessing:
                         retry_result = await llm_gateway.generate(
                             mode=annotate_mode, prompt=retry_prompt,
                             response_format={"type": "json_object"},
-                            max_tokens=49152,
+                            max_tokens=131072,
                             model=annotate_model,
                         )
                     retry_text = retry_result.get("response", "")
@@ -2530,18 +4166,15 @@ class _DocumentProcessing:
                             retry_qs = retry_parsed.get("questions", [])
                             retry_md = retry_parsed.get("metadata", {})
                             if isinstance(retry_qs, list) and retry_qs:
-                                retry_q_count = len(retry_qs)
-                                retry_ok, retry_msg = _check_question_count_sanity(
-                                    markdown_qnos, retry_q_count,
+                                retry_has_more = len(retry_qs) > len(normalized)
+                                logger.info(
+                                    "Cross-validate retry: %dQ → %dQ (%s)",
+                                    len(normalized), len(retry_qs),
+                                    "more complete" if retry_has_more else "fewer",
                                 )
-                                # Use retry if it has fewer questions (closer to
-                                # markdown QNO count) — even if still above threshold,
-                                # fewer is an improvement over the original.
-                                if retry_q_count < len(normalized):
-                                    logger.info(
-                                        "QNO retry improved: %dQ → %dQ (%s)",
-                                        len(normalized), retry_q_count, retry_msg,
-                                    )
+                                # Accept retry if it produces more questions
+                                # (closer to validator's estimated total)
+                                if retry_has_more:
                                     # Re-normalize retry questions
                                     normalized = []
                                     for q in retry_qs:
@@ -2564,6 +4197,11 @@ class _DocumentProcessing:
                                             score = None
                                         stem = str(q.get("stem", "")).strip()
                                         options = q.get("options", [])
+                                        if isinstance(options, str):
+                                            try:
+                                                options = json.loads(options)
+                                            except (json.JSONDecodeError, TypeError):
+                                                options = []
                                         if not isinstance(options, list):
                                             options = []
                                         options = [str(o).strip() for o in options if o and str(o).strip()]
@@ -2591,26 +4229,46 @@ class _DocumentProcessing:
                                             "knowledge_points": kp_strs,
                                         })
                                     metadata = retry_md
-                                    count_ok = True
-                                    count_msg = f"retry {retry_msg}"
+                                    cv_valid = True
                                 else:
                                     logger.info(
-                                        "QNO retry no improvement: %dQ → %dQ, "
-                                        "keeping original",
-                                        len(normalized), retry_q_count,
+                                        "Cross-validate retry fewer questions — "
+                                        "keeping original (%d > %d)",
+                                        len(normalized), len(retry_qs),
                                     )
                 except Exception as retry_exc:
                     logger.warning(
-                        "QNO retry failed: %s — keeping original result",
+                        "Cross-validate retry failed: %s — keeping original",
                         str(retry_exc)[:200],
                     )
+            elif cv_action == "reject":
+                logger.warning(
+                    "MIMO cross-validator: action=reject, issues=%s",
+                    cv_issues,
+                )
 
             await self._log_step(
                 task_id, "llm_annotate",
                 f"LLM annotation: {len(normalized)} questions "
-                f"(markdown ~{markdown_qnos} QNOs, {count_msg}), "
-                f"metadata={list(metadata.keys())}",
+                f"(cross-validate: valid={cv_valid} action={cv_action} "
+                f"ocr_est={cv_ocr_est}), metadata={list(metadata.keys())}",
             )
+
+            # ── Session #137: Pipeline checkpoint — normalized questions ──
+            _pipeline_checkpoint(task_id, "normalized_questions", {
+                "question_count": len(normalized),
+                "questions_summary": [
+                    {
+                        "qno": q.get("qno"),
+                        "type": q.get("type"),
+                        "stem_chars": len(q.get("stem", "")),
+                        "stem_first_80": q.get("stem", "")[:80],
+                        "options_count": len(q.get("options", [])),
+                        "answer": q.get("answer", "")[:50],
+                    }
+                    for q in normalized[:5]  # First 5 questions
+                ],
+            })
 
             return {
                 "metadata": metadata,
@@ -2622,6 +4280,208 @@ class _DocumentProcessing:
             await self._log_step(
                 task_id, "llm_annotate",
                 f"LLM annotation error: {str(e)[:200]}",
+            )
+            return None
+
+    async def _step_llm_anchor_annotate(
+        self, task_id: str, full_markdown: str,
+        subject_code: str | None = None,
+    ) -> dict[str, Any] | None:
+        """锚点模式 LLM 标注 — LLM 只输出结构标注，代码从原文组装。
+
+        使用 ANCHOR_ANNOTATION_PROMPT_V1，配合 _anchor_assembler.py
+        实现零损失提取。
+
+        Args:
+            task_id: Redis task ID for logging
+            full_markdown: Complete OCR Markdown output
+            subject_code: Subject identifier for routing
+
+        Returns:
+            标准格式 dict: {metadata, questions} 或 None
+        """
+        # ── Mock 模式检查 ──
+        if settings.LLM_GATEWAY_MODE == "mock":
+            await self._log_step(
+                task_id, "llm_annotate",
+                "LLM anchor annotation skipped (mock mode)",
+            )
+            return None
+
+        # ── 预处理 ──
+        markdown_text = full_markdown.strip()
+        if len(markdown_text) < 100:
+            logger.warning(
+                "LLM anchor annotation: markdown too short (%d chars)",
+                len(markdown_text),
+            )
+            return None
+
+        # ── Session #137: Pipeline checkpoint — OCR markdown ──
+        _pipeline_checkpoint(task_id, "ocr_markdown", {
+            "chars": len(markdown_text),
+            "lines": markdown_text.count('\n') + 1,
+            "sample_first_200": markdown_text[:200],
+        })
+
+        # ── Session #125: Subject-specific Markdown pre-cleaning ──
+        if subject_code:
+            markdown_text = _pre_clean_markdown(markdown_text, subject_code)
+
+        # ── Session #137: LaTeX preprocessing ──
+        markdown_text = _apply_latex_preprocessing(markdown_text)
+
+        # ── Session #137: Pipeline checkpoint — preprocessed markdown ──
+        _pipeline_checkpoint(task_id, "preprocessed_markdown", {
+            "chars": len(markdown_text),
+            "lines": markdown_text.count('\n') + 1,
+            "sample_first_200": markdown_text[:200],
+        })
+
+        # ── Session #115 Phase 2: Body/answer splitting ──
+        body_md, answer_md = _split_markdown_at_answer_section(markdown_text)
+
+        # ── Build anchor prompt ──
+        from app.domains.document._anchor_prompt import build_anchor_prompt
+        prompt = build_anchor_prompt(body_md, answer_md)
+
+        # ── Session #137: Pipeline checkpoint — anchor prompt ──
+        _pipeline_checkpoint(task_id, "anchor_prompt", {
+            "body_chars": len(body_md),
+            "answer_chars": len(answer_md) if answer_md else 0,
+            "prompt_chars": len(prompt),
+            "subject": subject_code,
+        })
+
+        # ── Subject routing (reuse existing logic) ──
+        if subject_code and (
+            subject_code in _CHEM_LLM_SUBJECTS
+            or subject_code in _DEEPSEEK_LATEX_SUBJECTS
+        ):
+            annotate_mode = _DEEPSEEK_LATEX_MODE
+            annotate_model = _DEEPSEEK_LATEX_MODEL
+        else:
+            annotate_mode = "fast"
+            annotate_model = None
+
+        # ── Call LLM ──
+        try:
+            from app.gateway.router import llm_gateway
+
+            await self._log_step(
+                task_id, "llm_annotate",
+                f"Calling LLM anchor annotation: "
+                f"({len(body_md)} body + {len(answer_md or '')} answer chars)"
+                + (f" +{subject_code}" if subject_code else ""),
+            )
+
+            async with _LLM_ANNOTATION_SEM:
+                result = await llm_gateway.generate(
+                    mode=annotate_mode, prompt=prompt,
+                    response_format={"type": "json_object"},
+                    max_tokens=131072,
+                    model=annotate_model,
+                )
+            response_text = result.get("response", "")
+            if not response_text:
+                logger.warning("LLM anchor annotation: empty response")
+                return None
+
+            # ── Session #137: Pipeline checkpoint — LLM raw response ──
+            _pipeline_checkpoint(task_id, "anchor_llm_response", {
+                "response_chars": len(response_text),
+                "model": annotate_model or annotate_mode,
+                "sample_first_500": response_text[:500],
+                "sample_last_200": response_text[-200:],
+            })
+
+            # ── Parse JSON ──
+            parsed = self._parse_llm_annotation_json(response_text)
+            if parsed is None:
+                # S#141: Check if response was truncated (common with MIMO)
+                stripped = response_text.strip()
+                if stripped and not stripped.rstrip().endswith('}'):
+                    logger.warning(
+                        "LLM anchor response truncated (%d chars, ends with: %r)",
+                        len(stripped), stripped[-50:],
+                    )
+                    _pipeline_checkpoint(task_id, "anchor_parse_failed", {
+                        "reason": "truncated_response",
+                        "response_chars": len(response_text),
+                        "response_last_100": response_text[-100:],
+                    })
+                return None
+
+            # Validate structure
+            if not isinstance(parsed, dict):
+                logger.warning("LLM anchor annotation: root is not dict")
+                return None
+
+            metadata = parsed.get("metadata", {})
+            questions_data = parsed.get("questions", [])
+            if not isinstance(questions_data, list) or len(questions_data) == 0:
+                logger.warning("LLM anchor annotation: no questions in output")
+                return None
+
+            # ── Session #137: Pipeline checkpoint — parsed JSON ──
+            _pipeline_checkpoint(task_id, "anchor_parsed_json", {
+                "question_count": len(questions_data),
+                "group_count": len(parsed.get("groups", [])),
+                "metadata_keys": list(metadata.keys()),
+            })
+
+            # ── Assemble questions from anchors ──
+            from app.domains.document._anchor_assembler import assemble_questions
+            assembly_result = assemble_questions(parsed, full_markdown)
+
+            # ── Session #137: Pipeline checkpoint — assembly result ──
+            _pipeline_checkpoint(task_id, "anchor_assembly", {
+                "total_questions": len(assembly_result.questions),
+                "image_questions": assembly_result.image_questions,
+                "matched_anchors": assembly_result.matched_anchors,
+                "total_anchors": assembly_result.total_anchors,
+                "match_rate": f"{assembly_result.match_rate:.1%}",
+                "failed_anchors": len(assembly_result.failed_anchors),
+            })
+
+            # ── Convert to standard format ──
+            questions = []
+            for q in assembly_result.questions:
+                questions.append({
+                    "qno": q.question_number,
+                    "type": q.question_type,
+                    "stem": q.stem,
+                    "options": q.options,
+                    "answer": q.answer,
+                    "difficulty": q.difficulty,
+                    "difficulty_confidence": q.difficulty_confidence,
+                    "knowledge_points": q.knowledge_points,
+                    "kp_confidence": q.kp_confidence,
+                    "group_id": q.group_id,
+                    "text_source": q.text_source,
+                    "assembly_method": q.assembly_method,
+                    "stem_source": q.stem_source,
+                })
+
+            # ── Log summary ──
+            await self._log_step(
+                task_id, "llm_annotate",
+                f"Anchor annotation: {len(questions)} questions "
+                f"({assembly_result.image_questions} image), "
+                f"{assembly_result.matched_anchors}/{assembly_result.total_anchors} "
+                f"anchors matched ({assembly_result.match_rate:.1%})",
+            )
+
+            return {
+                "metadata": metadata,
+                "questions": questions,
+            }
+
+        except Exception as e:
+            logger.warning("LLM anchor annotation failed: %s", str(e)[:200])
+            await self._log_step(
+                task_id, "llm_annotate",
+                f"LLM anchor annotation error: {str(e)[:200]}",
             )
             return None
 
@@ -2747,6 +4607,41 @@ class _DocumentProcessing:
             len(text),
         )
         return None
+
+    @staticmethod
+    def _detect_truncation(response_text: str, questions: list) -> bool:
+        """Detect if LLM response was truncated.
+
+        Signs of truncation:
+        1. Response ends mid-JSON (no closing } or ])
+        2. Last question has very short stem (< 10 chars)
+        3. Last question is missing required fields (stem, answer)
+        """
+        if not response_text or not questions:
+            return False
+
+        # Check if response ends abruptly
+        text = response_text.rstrip()
+        if text and text[-1] not in ('}', ']'):
+            logger.warning("Truncation detected: response ends with %r", text[-20:])
+            return True
+
+        # Check last question quality
+        last_q = questions[-1]
+        stem = str(last_q.get("stem", "")).strip()
+        if len(stem) < 10:
+            logger.warning(
+                "Truncation detected: last question stem too short (%d chars): %r",
+                len(stem), stem[:50],
+            )
+            return True
+
+        # Check if last question has required fields
+        if not stem and not last_q.get("answer"):
+            logger.warning("Truncation detected: last question missing stem and answer")
+            return True
+
+        return False
 
     @staticmethod
     def _infer_type_from_section(section: str) -> str:
@@ -2988,6 +4883,12 @@ class _DocumentProcessing:
                 # _score_stem_quality can reduce short-stem penalties
                 # for choice/multi_choice questions.
                 _raw_opts = q.get("options") or []
+                # Session #137: options might be a JSON string from LLM
+                if isinstance(_raw_opts, str):
+                    try:
+                        _raw_opts = json.loads(_raw_opts)
+                    except (json.JSONDecodeError, TypeError):
+                        _raw_opts = []
                 if isinstance(_raw_opts, list):
                     _raw_opts = [
                         str(o).strip() for o in _raw_opts
@@ -2996,10 +4897,19 @@ class _DocumentProcessing:
                 else:
                     _raw_opts = []
                 stem_quality = _score_stem_quality(stem, _raw_opts)
-                total_stem_quality += stem_quality
-                stem_count += 1
 
-                if stem and stem_quality >= 0.3:  # S#136: relaxed from 0.5→0.3 for truncated options
+                # S#141: Anchor mode — image questions have empty stem
+                # but still need to be saved for VL post-processing
+                text_source = q.get("text_source", "text")
+                is_image_question = text_source == "image"
+
+                # B4: image questions have stem_quality=0.0 (empty stem),
+                # exclude from avg_quality to avoid dragging down the gate
+                if not is_image_question:
+                    total_stem_quality += stem_quality
+                    stem_count += 1
+
+                if is_image_question or (stem and stem_quality >= 0.6):  # S#147: raised 0.3→0.6 — reject short-no-option & option-marker-only
                     content = stem
                     # ── Session #115: Options formatting ──────────
                     # Force each option to its own line for readability.
@@ -3007,11 +4917,12 @@ class _DocumentProcessing:
                     # them on a single line despite _split_inline_options().
                     opts = _raw_opts
                     if opts:
-                        # Detect inline options: 3+ markers on one line
+                        # Detect truly inline options: 3+ markers on one
+                        # physical line (spaces/tabs only, NOT newlines).
                         _inline = bool(
                             re.search(
-                                r'[A-D][.、．]\s*.+?(?:\s+|$)'
-                                r'[A-D][.、．]\s*.+?(?:\s+|$)'
+                                r'[A-D][.、．]\s*.+?(?:[ \t]+|$)'
+                                r'[A-D][.、．]\s*.+?(?:[ \t]+|$)'
                                 r'[A-D][.、．]',
                                 content,
                             )
@@ -3021,7 +4932,9 @@ class _DocumentProcessing:
                             _m = re.search(r'(?:^|\n)([^\n]*?[A-D][.、．])',
                                            content)
                             if _m:
-                                content = content[:_m.start() + _m.start(1)].strip()
+                                # S#148: stop at newline before options,
+                                # NOT into option A's text body
+                                content = content[:_m.start()].strip()
                         if not any(
                             o.strip() in content for o in opts if o.strip()
                         ):
@@ -3033,8 +4946,8 @@ class _DocumentProcessing:
                     )
                     continue  # skip low-quality question
 
-                if not content and not answer:
-                    continue  # Skip empty questions
+                if not content and not answer and not is_image_question:
+                    continue  # Skip empty questions (but keep image questions for VL)
 
                 section = q.get("section", "")
 
@@ -3056,18 +4969,23 @@ class _DocumentProcessing:
                     )
                     await session.flush()
 
+                    # Session #115: Save LLM explanation when available.
+                    # Non-empty explanations arrive for teacher-edition
+                    # format docs with inline 【详解】 markers.
+                    # S#134: Apply text cleaning to answer + explanation
+                    # (same pipeline as stem, without QNO/option rules).
+                    # Session #142: Moved outside `if answer:` because
+                    # `saved.append()` at L3983 references llm_explanation
+                    # unconditionally — image questions (answer=null) cause
+                    # UnboundLocalError.
+                    llm_explanation = q.get("explanation", "")
+
                     # Save solution if answer exists
                     if answer:
                         from app.domains.question.solution_repository import (
                             SolutionRepository,
                         )
                         sol_repo = SolutionRepository(session)
-                        # Session #115: Save LLM explanation when available.
-                        # Non-empty explanations arrive for teacher-edition
-                        # format docs with inline 【详解】 markers.
-                        # S#134: Apply text cleaning to answer + explanation
-                        # (same pipeline as stem, without QNO/option rules).
-                        llm_explanation = q.get("explanation", "")
                         cleaned_answer = _clean_text_for_db(answer, is_stem=False) if answer else ""
                         cleaned_explanation = (
                             _clean_text_for_db(llm_explanation, is_stem=False)
@@ -3349,6 +5267,23 @@ class _DocumentProcessing:
                 f"Saved {len(saved)} annotated questions to DB "
                 f"(avg_quality={avg_quality:.2f})",
             )
+
+            # ── Session #137: Pipeline checkpoint — saved questions ──
+            _pipeline_checkpoint(task_id, "saved_questions", {
+                "saved_count": len(saved),
+                "avg_quality": round(avg_quality, 3),
+                "quality_pass": quality_pass,
+                "questions": [
+                    {
+                        "id": s.get("id"),
+                        "content_chars": len(s.get("content", "")),
+                        "content_first_100": s.get("content", "")[:100],
+                        "answer": s.get("answer", "")[:50],
+                        "has_image": s.get("has_image"),
+                    }
+                    for s in saved[:5]
+                ],
+            })
 
             return saved
 
@@ -3816,6 +5751,14 @@ class _DocumentProcessing:
         # StructuredQuestion.options are populated by the structurer but may
         # not have been merged into question_text by the upstream converter.
         opts = block.get("options") or []
+        # Session #137: options might be a JSON string from LLM
+        if isinstance(opts, str):
+            try:
+                opts = json.loads(opts)
+            except (json.JSONDecodeError, TypeError):
+                opts = []
+        if not isinstance(opts, list):
+            opts = []
         if opts and not any(
             o.strip() in q_text for o in opts if o.strip()
         ):

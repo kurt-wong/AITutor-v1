@@ -67,10 +67,10 @@ _SUBJECT_OCR_MODEL: dict[str, str] = {
 }
 
 # Session #78: aligned with official API docs (5s poll interval recommended).
-# 300s was ~15× normal latency (13p PDF ≈ 18-21s).  90s covers ~50-page docs;
-# for 1000-page API max, increase to 300s.
+# 90s was insufficient for PaddleOCR-VL-1.6 (chemistry PDFs timed out);
+# increased to 180s. PP-StructureV3 completes in ~20-40s, unaffected.
 _POLL_INTERVAL = 5.0       # seconds between status checks (official recommendation)
-_POLL_TIMEOUT = 90.0       # max seconds to wait for job completion
+_POLL_TIMEOUT = 180.0      # max seconds to wait for job completion
 
 # Session #78: global concurrency control for PP-StructureV3 API calls.
 # Without this, parallel document processing causes thundering herd:
@@ -333,24 +333,24 @@ class PaddleOCRVlClient:
                 if fn not in img_url_map:
                     img_url_map[fn] = url
 
-        # S#134 debug: log what we actually received
+        # S#134/S#147: debug log to logger instead of hardcoded file
         _total_pages = len(pages)
         _pages_with_imgs = sum(1 for p in pages if p.markdown_images)
         _sample_keys = list(img_url_map.keys())[:5] if img_url_map else []
-        with open("D:\\temp\\debug_img.txt", "a") as _df:
-            _df.write(
-                f"UPLOAD_IMAGES: entry — job={job_id}, "
-                f"pages={_total_pages}, pages_with_images={_pages_with_imgs}, "
-                f"unique_imgs={len(img_url_map)}, sample_keys={_sample_keys}\n"
-            )
+        logger.debug(
+            "PaddleOCR-VL: UPLOAD_IMAGES entry — job=%s pages=%d pages_with_images=%d unique_imgs=%d sample_keys=%s",
+            job_id, _total_pages, _pages_with_imgs, len(img_url_map), _sample_keys,
+        )
         if not img_url_map:
             # Also dump the first page's markdown keys to see what's available
             _sample_md_keys = []
             if pages:
                 _raw = pages[0].markdown_images
                 _sample_md_keys = list(_raw.keys()) if _raw else []
-            with open("D:\\temp\\debug_img.txt", "a") as _df:
-                _df.write(f"UPLOAD_IMAGES: NO IMAGES — sample page0 markdown_images keys={_sample_md_keys}\n")
+            logger.debug(
+                "PaddleOCR-VL: UPLOAD_IMAGES — NO IMAGES, sample page0 markdown_images keys=%s",
+                _sample_md_keys,
+            )
             logger.info("PaddleOCR-VL: no images in markdown.images for %s", job_id)
             return markdown
 
@@ -459,14 +459,16 @@ class PaddleOCRVlClient:
         md_obj = lr.get("markdown", {})
         markdown_text = md_obj.get("text", "") if isinstance(md_obj, dict) else ""
         markdown_images: dict[str, str] = md_obj.get("images", {}) if isinstance(md_obj, dict) else {}  # S#134
-        # S#134 debug: first page only
+        # S#134/S#147: debug log to logger instead of hardcoded file
         if line_num == 1 and isinstance(md_obj, dict):
             _md_keys = list(md_obj.keys())
-            with open("D:\\temp\\debug_img.txt", "a") as _df:
-                _df.write(f"PARSE_PAGE1: markdown keys={_md_keys}, images_type={type(markdown_images).__name__}, images_count={len(markdown_images)}\n")
-                if markdown_images:
-                    _sample = list(markdown_images.items())[:3]
-                    _df.write(f"PARSE_PAGE1: images sample={_sample}\n")
+            logger.debug(
+                "PaddleOCR-VL: PARSE_PAGE1 markdown keys=%s images_type=%s images_count=%d",
+                _md_keys, type(markdown_images).__name__, len(markdown_images),
+            )
+            if markdown_images:
+                _sample = list(markdown_images.items())[:3]
+                logger.debug("PaddleOCR-VL: PARSE_PAGE1 images sample=%s", _sample)
 
         width = pruned.get("width", 0)
         height = pruned.get("height", 0)

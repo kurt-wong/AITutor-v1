@@ -130,6 +130,20 @@ function parseMathContent(content: string): MathPart[] {
     });
   }
 
+  // ── HTML table from PP-StructureV3 OCR (S#162) ────────────
+  // PP-StructureV3 outputs <table>...</table> directly. Match and
+  // sanitize for safe rendering via dangerouslySetInnerHTML.
+  const htmlTableRegex = /<table[^>]*>[\s\S]*?<\/table>/gi;
+  let htmlTableMatch;
+  while ((htmlTableMatch = htmlTableRegex.exec(content)) !== null) {
+    allMatches.push({
+      start: htmlTableMatch.index,
+      end: htmlTableMatch.index + htmlTableMatch[0].length,
+      type: "table",
+      tableHtml: sanitizeHtmlTable(htmlTableMatch[0]),
+    });
+  }
+
   // ── LaTeX math patterns ──────────────────────────────────────
   const mathPatterns = [
     { regex: /\$\$([\s\S]*?)\$\$/g, display: true },
@@ -219,6 +233,62 @@ function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/**
+ * Sanitize HTML table from PP-StructureV3 OCR output.
+ *
+ * PP-StructureV3 outputs clean, predictable HTML:
+ *   <table border="1"><tr><td style='text-align: center'>...</td></tr></table>
+ *
+ * Strategy: strip wrapper tags, convert border attr to CSS,
+ * preserve text-align from td/th style, add cell borders.
+ */
+function sanitizeHtmlTable(html: string): string {
+  // Extract border value from original table tag
+  const borderMatch = html.match(/<table[^>]*\sborder\s*=\s*["']?(\d+)["']?[^>]*>/i);
+  const borderVal = borderMatch ? parseInt(borderMatch[1]) : 1;
+  const borderCss = borderVal > 0 ? `border:${borderVal}px solid #000` : "";
+
+  // Extract text-align from td/th style attributes before stripping
+  const alignMap = new Map<number, string>();
+  const cellTagRe = /<(td|th)(\s[^>]*)?>/gi;
+  let m;
+  while ((m = cellTagRe.exec(html)) !== null) {
+    const attrs = m[2] || "";
+    const alignMatch = attrs.match(/text-align\s*:\s*(left|center|right|justify)/i);
+    if (alignMatch) {
+      alignMap.set(m.index, alignMatch[1].toLowerCase());
+    }
+  }
+
+  // Strip wrapper tags
+  let sanitized = html
+    .replace(/<\/?(?:div|span|html|body|tbody|thead|p|section|article)[^>]*>/gi, "")
+    // Strip ALL attributes from table, td, th, tr (we'll apply our own styling)
+    .replace(/<(table|td|th|tr)(\s[^>]*)?>/gi, (_match, tag) => `<${tag}>`);
+
+  // Apply table-level style
+  sanitized = sanitized.replace(
+    /^<table>/i,
+    `<table style="border-collapse:collapse;width:100%;margin:8px 0;font-size:14px;${borderCss}">`
+  );
+
+  // Apply cell borders + preserved alignment to td/th
+  const cellTagRe2 = /<(td|th)>/gi;
+  let lastIdx = 0;
+  let result = "";
+  while ((m = cellTagRe2.exec(sanitized)) !== null) {
+    const originalIdx = html.indexOf(m[0], lastIdx);
+    const align = (originalIdx >= 0 && alignMap.get(originalIdx)) || "center";
+    const tag = m[1];
+    result += sanitized.slice(lastIdx, m.index);
+    result += `<${tag} style="border:1px solid #000;padding:4px 8px;text-align:${align}">`;
+    lastIdx = m.index + m[0].length;
+  }
+  result += sanitized.slice(lastIdx);
+
+  return result;
 }
 
 function convertTableToHtml(text: string): string {

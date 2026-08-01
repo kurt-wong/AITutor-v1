@@ -127,6 +127,13 @@ class Settings(BaseSettings):
     # LLM Annotation — 一次性标注完整试卷 Markdown（替代逐题正则拆分）
     LLM_ANNOTATION_ENABLED: bool = True  # Session #114: LLM 全量提取主路径（v3.0 默认启用）
 
+    # S#141: Anchor Mode — LLM 只输出结构标注，代码从原文组装（零损失）
+    ANCHOR_MODE_ENABLED: bool = True  # 启用锚点模式（替代 V3 全量重述）
+
+    # S#155: Question-Driven Extraction — LLM 按 section 边界语义识别题目
+    # 替代 regex QNO 预切分，是 question-driven pipeline 的核心开关
+    QUESTION_DRIVEN_EXTRACTION_ENABLED: bool = True
+
     # 题目结构化模式 (Phase 3+ / Session #99):
     #   regex  — 现有 structurer.py regex 解析（默认，稳定）
     #   hybrid — regex 切分 + LLM 组合标注（Phase 3 目标，最优组合）

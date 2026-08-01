@@ -158,6 +158,14 @@ class OpenAICompatibleProvider(LLMProvider):
                 content = msg.get("content") or msg.get("reasoning_content") or ""
                 usage = data.get("usage", {})
 
+                # S#141: Log finish_reason for truncation detection
+                finish_reason = data["choices"][0].get("finish_reason", "unknown")
+                if finish_reason != "stop":
+                    logger.warning(
+                        f"{self.name} non-stop finish_reason: {finish_reason} "
+                        f"(content_len={len(content)}, model={selected_model})"
+                    )
+
                 return {
                     "success": True,
                     "response": content,
@@ -230,7 +238,7 @@ def create_deepseek_provider(
         api_key=api_key or settings.DEEPSEEK_API_KEY,
         base_url=base_url or settings.DEEPSEEK_BASE_URL,
         timeout=120.0,
-        max_tokens=4096,
+        max_tokens=65536,
     )
 
 

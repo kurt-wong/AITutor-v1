@@ -194,11 +194,11 @@ export default function QuestionEditPage() {
             <Divider />
             <Title level={5}>解答</Title>
             <Text strong>答案:</Text>
-            <Paragraph style={{ background: "#fafafa", padding: 8, borderRadius: 4, minHeight: 32, whiteSpace: "pre-wrap" }}>
+            <Paragraph style={{ background: "#fafafa", padding: 8, borderRadius: 4, minHeight: 32, whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: "break-word", maxWidth: "100%" }}>
               <MathRenderer content={editAnswer || (question?.solution?.final_answer || "")} />
             </Paragraph>
             <Text strong>讲解:</Text>
-            <Paragraph style={{ background: "#fafafa", padding: 8, borderRadius: 4, minHeight: 32, whiteSpace: "pre-wrap" }}>
+            <Paragraph style={{ background: "#fafafa", padding: 8, borderRadius: 4, minHeight: 32, whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: "break-word", maxWidth: "100%" }}>
               <MathRenderer content={editExplanation || (question?.solution?.explanation || "")} />
             </Paragraph>
             <Space>

@@ -260,6 +260,136 @@ class DocumentService:
         await self.repo.session.commit()
         return True
 
+    async def get_ocr_markdown(self, doc_id: int) -> tuple[str | None, str | None]:
+        """Get ocr_markdown and subject for a document.
+
+        Returns (ocr_markdown, subject) or (None, None) if not found.
+        """
+        doc = await self.repo.get_by_id(doc_id)
+        if not doc:
+            return None, None
+        return doc.ocr_markdown, doc.subject
+
+    async def reprocess_qd_preview(
+        self, doc_id: int,
+    ) -> dict:
+        """Run QD extraction on a document's stored ocr_markdown.
+
+        Reads ocr_markdown from DB, runs extract_questions_from_markdown(),
+        normalizes results, and returns preview JSON.  Does NOT save to DB —
+        use for prompt iteration without re-uploading PDFs.
+
+        Returns:
+            {
+                "document_id": int,
+                "subject": str | None,
+                "markdown_chars": int,
+                "questions": [...],
+                "metadata": {...},
+                "error": str | None,
+            }
+        """
+        ocr_markdown, subject = await self.get_ocr_markdown(doc_id)
+        if not ocr_markdown or not ocr_markdown.strip():
+            return {
+                "document_id": doc_id,
+                "subject": subject,
+                "markdown_chars": 0,
+                "questions": [],
+                "metadata": {},
+                "error": "文档无 OCR markdown 数据，请先完成上传处理",
+            }
+
+        try:
+            from app.domains.question._question_driven_extractor import (
+                extract_questions_from_markdown,
+            )
+
+            qd_result = await extract_questions_from_markdown(
+                ocr_markdown,
+                subject_code=subject or "",
+            )
+            if qd_result is None:
+                return {
+                    "document_id": doc_id,
+                    "subject": subject,
+                    "markdown_chars": len(ocr_markdown),
+                    "questions": [],
+                    "metadata": {},
+                    "error": "QD extraction 返回 None",
+                }
+
+            questions = qd_result.get("questions", [])
+            metadata = qd_result.get("metadata", {})
+
+            # Normalize questions (same logic as _step_llm_annotate)
+            import json as _json
+            normalized = []
+            for q in questions:
+                qno = q.get("qno")
+                try:
+                    qno = int(qno) if qno is not None else None
+                except (ValueError, TypeError):
+                    qno = None
+
+                stem = str(q.get("stem", "")).strip()
+                passage = (q.get("passage") or "").strip()
+                if passage and stem:
+                    stem = passage + "\n\n" + stem
+                elif passage:
+                    stem = passage
+
+                options = q.get("options", [])
+                if isinstance(options, str):
+                    try:
+                        options = _json.loads(options)
+                    except (_json.JSONDecodeError, TypeError):
+                        options = []
+                if not isinstance(options, list):
+                    options = []
+                options = [str(o).strip() for o in options if o and str(o).strip()]
+
+                answer_raw = str(q.get("answer", "")).strip()
+                qtype = q.get("type", "calculation")
+
+                normalized.append({
+                    "qno": qno,
+                    "type": qtype,
+                    "stem": stem,
+                    "stem_chars": len(stem),
+                    "options": options,
+                    "answer": answer_raw,
+                    "section": q.get("section", ""),
+                    "score": q.get("score"),
+                    "difficulty": q.get("difficulty"),
+                    "knowledge_points": q.get("knowledge_points", []),
+                })
+
+            return {
+                "document_id": doc_id,
+                "subject": subject,
+                "markdown_chars": len(ocr_markdown),
+                "questions": normalized,
+                "metadata": {
+                    "sections_used": metadata.get("sections_used", 0),
+                    "model": metadata.get("model", ""),
+                    "total_questions_raw": len(questions),
+                },
+                "error": None,
+            }
+        except Exception as e:
+            from app.core.logging import get_logger
+            _logger = get_logger(__name__)
+            _logger.error(f"reprocess_qd_preview failed for doc {doc_id}: {e}", exc_info=True)
+            return {
+                "document_id": doc_id,
+                "subject": subject,
+                "markdown_chars": len(ocr_markdown) if ocr_markdown else 0,
+                "questions": [],
+                "metadata": {},
+                "error": f"QD extraction 失败: {type(e).__name__}: {e}",
+            }
+
     @staticmethod
     def _get_extension(filename: str) -> str:
         """Extract file extension from filename."""

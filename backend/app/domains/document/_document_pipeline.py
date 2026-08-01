@@ -270,7 +270,7 @@ class DocumentPipeline:
             22, "extract", f"并行提取中 ({len(pages_to_process)} 页)..."
         )
         (
-            merged_blocks, paddleocr_markdown, paddleocr_job_id,
+            merged_blocks, paddleocr_markdown, paddleocr_job_id, paddleocr_result,
         ) = await self._service._step_parallel_extract(
             ctx.task_id, ctx.data, pages_to_process, subject=ctx.subject_code,
         )
@@ -290,6 +290,14 @@ class DocumentPipeline:
                     ctx.task_id, "markdown_save",
                     f"OCR Markdown 已保存 ({len(paddleocr_markdown)} 字符)",
                 )
+                # Session #137: Pipeline checkpoint — OCR markdown persisted
+                from app.domains.document.async_document import _pipeline_checkpoint
+                _pipeline_checkpoint(ctx.task_id, "ocr_markdown_persisted", {
+                    "doc_id": ctx.doc_id,
+                    "chars": len(paddleocr_markdown),
+                    "blocks": len(merged_blocks),
+                    "sample_first_300": paddleocr_markdown[:300],
+                })
             except Exception as _mde:
                 logger.warning("Failed to save OCR Markdown for doc %d: %s", ctx.doc_id, _mde)
 
@@ -301,6 +309,8 @@ class DocumentPipeline:
             await ctx.update_progress(40, "llm_annotate", "LLM 全量提取中...")
             annotation = await self._service._step_llm_annotate(
                 ctx.task_id, paddleocr_markdown, subject_code=ctx.subject_code,
+                page_images=ctx.page_images if ctx.is_pdf else None,
+                paddleocr_result=paddleocr_result,
             )
             if annotation:
                 await self._service._save_document_metadata(
@@ -361,7 +371,7 @@ class DocumentPipeline:
         logger.warning(
             "LLM full extraction quality gate failed — merging LLM stem + annotations into regex blocks",
         )
-        from app.domains.document._document_processing import (
+        from app.domains.document.async_document import (
             _clean_stem_for_db, _score_stem_quality,
         )
 

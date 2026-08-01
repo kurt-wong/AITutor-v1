@@ -1,6 +1,11 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-07-28 Session #137g (全流程测试 + 质量问题评估) | **版本**: 1.30.0 | **完成度**: 核心链路 100%，整体 ~95%（质量待优化）。**S#137c-g**: 架构修复 15 项完成，管线全流程验证通过。发现 16 项质量问题（P0x4 / P1x5 / P2x4 / P3x3），修复计划已确认。
+> **最后更新**: 2026-08-01 Session #161 (LLM 元数据重构完成) | **版本**: 1.50.0 | **完成度**: 核心链路 ~98%，整体 ~97%。
+>
+> **记录规范（2026-07-31 起严格执行）**：
+> - 本文档 §1-§15 为当前状态快照，可以原地编辑
+> - 所有状态变更必须同时在末尾 §16 变更日志中按时间戳追加记录
+> - 禁止在文档开头插入新记录，§16 仅在末尾追加
 >
 > 自 v1.1.0 起，本文档承接原 CLAUDE.md 中的全部状态类内容（技术栈、管线状态、开发状态、已知问题）。CLAUDE.md 已重构为规则-only，不再承载状态。
 
@@ -12,7 +17,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.30.0 |
+| **版本** | 1.50.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -41,6 +46,7 @@
 | C | 题目结构化验证（27 份 PDF） | ✅ 完成（内部一致性 95.2%） |
 | D | 知识图谱人工校准 | ✅ 完成（基准 46% exact / 62% L2） |
 | E | 收尾打磨 | ✅ S#79-#112: 审计修复 + 管线重构 + 模型路由 + 嵌入100% + KP100%。S#113: E2E 5科21份全量测试通过(533题, 解答100%, 详解80%) |
+| F | **Question-Driven Pipeline** | ⚠️ **S#155-#157: 进行中** — 降级链简化 QD→Vision→V3，全科统一 blocks 路径。9 科全量测试 5/9 完成（地理处理中） |
 
 ---
 
@@ -71,30 +77,73 @@ UI → API → Service → MCP Client → MCP Server → Infra
 | OCR | 4 | Wrong Question | 4 |
 | Embedding | 3 | Training | 3 |
 
-### 3.3 文档处理管线（#114 架构修正）
+### 3.3 文档处理管线（#161 最新状态 — LLM 元数据架构已落地）
+
+**当前架构（S#160 实测验证）**:
+```
+所有科目
+  │
+  ▼
+Question-driven markdown extraction ←── LLM 语义识别 section 边界 + 完整元数据（_detect_markdown_sections）
+  │                                   └── ✅ S#161：返回 type_hint/is_composite/qno_range/material_shared 全量语义元数据
+  │
+  ├── 成功 → sections_meta 直接驱动 composite merge（零关键词匹配）→ per-section LLM 提取 → cross-validate → 返回
+  │
+  └── 失败（fallback）
+        │
+        ├── vision-first（化学/生物/地理）→ MIMO Vision
+        │
+        └── text-first（数学/物理/语文/英语/政治/历史）
+              └── V3 text-mode（兜底）
+```
+
+**S#160 QD Extraction 最终修复**:
+
+`_detect_markdown_sections()` 从正则关键词切分（`_MD_SECTION_SPLIT_RE`）完全重构为 LLM 语义理解：
 
 ```
-PDF 上传
-  ↓
-PP-StructureV3 API → 完整 Markdown（LaTeX + 图片 + 表格）
-  ↓
-DeepSeek reasoning（主路径，1 次/文档）
-  ├── 输入: 完整 Markdown
-  ├── 输出: {metadata, questions: [{stem, options, type, answer, ...}]}
-  ├── stem = Markdown 原文逐字复制，不改写（保留所有 LaTeX/图片/表格）
-  └── 直接入库（一次事务：questions + solutions）
-  ↓
-异步富化（Phase 2: solve + difficulty + embed + explain_enqueue）
-  ↓
-详解生成（Phase 3: Stage 1 学科路由 → Stage 2 DeepSeek 审核）
+旧（正则）：
+  正则 _MD_SECTION_SPLIT_RE 匹配关键词 → split 文本
+  └── 问题：关键词穷举不完，各科各版表述千差万别
+
+新（LLM）：
+  1. 答案区边界检测（_ANSWER_SECTION_RE，仅此一处保留正则）
+  2. 构建行号索引压缩文本（≤500 行 token budget）
+  3. LLM 语义识别：返回 [{header, line}, ...]
+  4. 按 line 切分原文
+  └── 优势：理解语义，任意表述均能正确识别
 ```
 
-**关键原则**:
-- **LLM 全量提取是主路径** — 一次 LLM 调用完成切分 + 标注 + 答案配对。不再依赖正则 QNO 切分和跨页合并
-- **按学科 OCR 路由**（S#127）：化学→PaddleOCR-VL-1.6（保留 Unicode 下标/反应箭头），其他→PP-StructureV3（LaTeX 处理更成熟）
-- **Stem 完整原文策略** — LLM 不改写题目文本，从 Markdown 原样复制。避免 LaTeX 丢失、幻觉篡改
-- **正则管线仅作回退** — LLM 失败时触发 QuestionStructurer.structure()（保留现有 4000+ 行逻辑，不删除）
-- **阶段 1 先做教师版内嵌格式** — 阶段 2 加 body/answer 分割处理独立答案区
+**验证结果（实测）**:
+
+| 科目 | 文档 | 修复前 | 修复后 | 预期 | 延迟 |
+|------|:---:|:---:|:---:|:---:|:---:|
+| 历史 | doc 7 | **0** | **43** ✓ | 43 (40+3) | 63s |
+| 生物 | doc 8 | **~7** | **26** ✓ | 26 (20+6) | ~60s |
+
+**设计原则**（S#160 确认）:
+- **Section 检测 = LLM 语义**：不依赖任何关键词/正则穷举，由 LLM 理解试卷结构
+- **Answer 边界 = 简单正则**：`参考答案`/`答题卡` 表述模式有限，正则足够且可靠
+- **QNO 正则 = 辅助校验**：不驱动切分，仅比较 LLM 输出与原始 QNO 指纹
+
+**S#161 LLM 元数据重构 — 已实施并验证**:
+
+S#160 section detection 仅返回 `{header, line}`，语义信息不足导致 S#161 英语复合题严重回归（56 碎片）。S#161 将 `_detect_markdown_sections()` 完全重构为 LLM 元数据架构：
+
+```
+LLM 一次输出完整语义元数据 → 下游代码零规则直接消费
+
+_detect_markdown_sections() 返回:
+  - sections: [{header, line, type_hint, qno_first, qno_last, is_composite, material_shared}]
+  - answer_section: {exists, line, note}
+
+Composite merge: meta.get("is_composite") → 零关键词匹配
+Answer boundary: metadata answer_section.line → 零正则
+```
+
+**验证（英语 doc 17）**: 56 碎片 → **10 composite 题**（完形+语法+选词+4篇阅读+七选五+阅读表达+写作）。
+
+**已消除的硬编码**: 7 个中文关键词（"语法填空"/"选词填空"/"完形填空"/"七选五"/"阅读表达"/"书面表达"/"写作"）+ `_ANSWER_SECTION_RE` 正则答案边界检测。
 
 ### 3.4 DDD 限界上下文
 
@@ -181,6 +230,14 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 日期 | Session | 事项 |
 |------|:---:|------|
+| 08-01 | **#161** | **LLM 元数据重构完成**: `_detect_markdown_sections()` 重写为 LLM 语义元数据架构（返回 type_hint/is_composite/qno_range）。Composite merge 零关键词匹配，答案边界 LLM 判断。英语 QD 56→10 composite 题。消除 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则。详见 LOG.md #161。 |
+| 07-31 | **#157** | **9 科全量测试完成**: `_run_9subj_test_v2.py` 串行脚本（上传→轮询→逐环节解析→中间JSON）。9/9 完成。发现：QD extraction 8/9 科返回 None（全部 fallback V3），llm_annotate 占 97.4% 耗时，历史 3题/语文 6题/英语质量 0.69。详见 LOG.md #157。 |
+| 07-31 | **#156** | **语文规则修正 + 全科 blocks 统一 + 降级链简化**: 语文综合题规则（材料+小题=综合题）。全科统一走 blocks 路径（利用 block_label）。移除 Regex QNO + Anchor 降级链。最终降级链: QD blocks → Vision → V3 text-mode。详见 LOG.md #156。 |
+| 07-31 | **#155** | **Question-Driven Pipeline**: 以 question 为核心的管线，regex QNO 从"驱动切分"降级为"辅助验证"。新增 `_question_driven_extractor.py` (~860行)。详见 LOG.md #155。 |
+| 07-30 | **#146** | **A/B 对比测试完成（Markdown vs Structured JSON）**: 9 科各 1 份 PDF，两种 LLM 输入格式对比。结论：化学两方案质量完全相同（20/20Q, 100%），确认根因不是 OCR 输入格式而是 Anchor Mode 切换。地理 B 方案胜（A 方案 JSON 解析崩溃）。无单一方案全科最优。脚本 `ab_compare_json_vs_markdown.py` 完成 5 项 Bug 修复。详见 LOG.md #146。 |
+| 07-30 | **#142** | **化学管线修复 + PaddleOCR-VL 超时修复**: Claude 修复 B2（image question 保留）和 B4（quality gate 排除 image question）。TRAE 修复 PaddleOCR-VL-1.6 超时：`_POLL_TIMEOUT` 90s→180s。5 份化学文档验证：Doc 2/3/5 成功，Doc 1/4 待重跑。详见 LOG.md #142。 |
+| 07-29 | **#140** | **锚点管线 9 科验证通过**: 10 份文档、268 题、14 题图片题、98.5% 匹配率。新增 `_anchor_schema.py` / `_anchor_prompt.py` / `_anchor_assembler.py` / `test_anchor_accuracy.py`。Bug 修复：image_questions 计数器、空 stem 检测、超大 stem 裁剪、JSON LaTeX 修复。详见 LOG.md #140。 |
+| 07-28 | **#138** | **题目质量修复计划**: S#132 数学 PDF 11 题质量问题诊断（LLM 选项截断×3 + OCR 噪声×3 + Unicode 上标×1 + 茎叶图×1 + ASCII 表格×2 + 前端溢出×1）。综合 Claude + TRAE 分析，输出修改计划 `Docs/plans/question-quality-fix-plan.md`。P0 修复开始实施。 |
 | 07-26 | **#132** | **第三轮数学卷全量验证 + 两大 P0 发现**: 21/21 答案正确提取 ✅。Explanation 覆写修复验证通过（Q19: 110个$ vs 上次0个）。逐题审查 Q1-Q21，发现两大 P0：**LaTeX 前端渲染失败**（DB存储正确、API传输正确，但前端不渲染公式）+ **配图未提取/错误**（Q3缺失、Q5错误、Q15/Q20未展示）。RESTART_PROMPT/PROJECT_STATUS/LOG 全面更新。 |
 | 07-26 | **#131** | **Markdown 持久化 + Answer 截断修复 + Explanation 覆写修复 + LaTeX 链路诊断**: Alembic 016 `documents.ocr_markdown` 列。移除 8000 字符截断 → Q19-21 答案恢复。`_save_annotated_questions()` 新增 explanation 字段防止覆写。LaTeX 链路逐层验证(DB→API→前端)均正确。C4 JSON parser 4层增强 + 语文LLM标注修复。 |
 | 07-26 | **#130** | **C4 材料题合并 + 前端顺序题号**: Prompt V3 "视为综合题"改写，Alembic 015 passage_text 列，API display_number 注入，前端适配。E2E 验证: 英语46→13Q(-72%)、化学18→8Q(-56%)、语文29→26Q(-10%)。解答 92%，嵌入 100%。 |
@@ -221,15 +278,16 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 ---
 
-## 7. 待完成工作（2026-07-24 Session #117 更新）
+## 7. 待完成工作（2026-07-31 Session #158 更新）
 
-### 7.1 高优 — 全清 ✅
+### 7.1 高优 — QD Extraction 修复 ✅ 已完成（2026-08-01）
 
 | 事项 | 状态 | 说明 |
 |------|:---:|------|
-| 图片上传管线修复 | ✅ | `_rewrite_stem_image_urls()` 下载 ZIP → MinIO → URL 替换 (S#116) |
-| 阶段 2: body/answer 分割 | ✅ | `_split_markdown_at_answer_section()` + V3 prompt 详解提取指令 (S#116) |
-| 补全嵌入向量 | ✅ | `backfill_embeddings.py` 269→643 (99.4%)；剩余 4 题内容过短 (S#116) |
+| **P0-1: max_tokens 提升** | ✅ | `provider.py` DeepSeek 默认 `max_tokens` 4096→65536；`_question_driven_extractor.py` QD 提取显式传入 `max_tokens=65536`，防止大 section JSON 截断（`finish_reason: length`）。 |
+| **P0-2: `答题卡` 正则收紧** | ✅ | `_ANSWER_SECTION_RE` 中 `答题卡` 改为 `^(?:#+\s*)?答题卡\s*$`，只匹配独立标题行，不再误匹配"考生务必将答案答在答题卡上"等考试说明文本。修复后语文/生物不再因误触发而丢弃整个文档正文。 |
+| **P1-3: `本大题` 关键词补充** | ✅ | `_MD_SECTION_SPLIT_RE` 中文数字 section 关键词列表新增 `本大题`，使 `## 一、 本大题共7小题` 等语文标题能被正确识别为 section header。 |
+| **修复后 9 科重测** | 🔴 P0 | 三项修复完成后需清库重跑 9 科全量测试验证 QD extraction 是否真正生效。 |
 
 ### 7.2 中优（S#124 更新）
 
@@ -290,7 +348,71 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 | 代码卫生 | `dir()` 探测局部变量、功能重复端点等 |
 | B-4/B-5 人工标注 | 远期 |
 
-### 7.3 已完成（全清）
+### 7.4 高优 — 服务稳定性加强 ✅ 已实施（2026-08-01 S#158）
+
+| 事项 | 状态 | 说明 |
+|------|:---:|------|
+| **后端崩溃自动重启** | ✅ 已实施 | `start_backend.py --supervised` 看门狗模式：每 5s 检查 `/health`，连续 3 次失败 → 自动重启，最多 10 次，指数退避 (5s→10s→20s...60s cap) |
+| **僵尸进程清理** | ✅ 已实施 | 每次重启前自动调用 `release_port()`：优雅终止 → 强制 kill → 等待 Windows TCP zombie 释放 |
+| **上传任务因崩溃丢失** | ✅ 已验证 | 任务状态在 Redis（2h TTL），队列持久化。`start_worker()` 启动时打印恢复审计日志（doc/enrich/explain 各队列待处理数） |
+| **uvicorn `--reload` 不稳定** | ⚠️ 已规避 | `start.ps1` 默认不启用 `--reload`，推荐 `-Supervised` 模式。`start_backend.py` 标记 `--reload` 为"NOT recommended" |
+| **前端服务稳定性** | ⏳ 待评估 | 前端 Vite dev server 是否有同类问题待确认 |
+
+**崩溃恢复验证结果**（实测）:
+```
+[10:36:13] UVICORN CRASHED (exit code 4294967295)
+[10:36:13] Port 8000: already free
+[10:36:13] Backoff: waiting 5s before restart #1...
+[10:36:18] Starting uvicorn on 0.0.0.0:8000
+[10:36:21] Backend healthy — monitoring...    ← 总停机 8 秒
+```
+
+**使用方式**:
+```powershell
+# 推荐：看门狗模式
+python scripts/start_backend.py --supervised
+
+# 或通过 PowerShell
+.\start.ps1 -Supervised
+```
+
+### 7.5 中优 — 管线阶段化增强 ✅ 已实施（2026-08-01 S#158）
+
+> **动机**: 当前 OCR 和 LLM 处理耦合在同一流程中，每次 QD prompt 迭代都需要重新跑 OCR（浪费 API 调用 + 时间）。将 OCR markdown 持久化后，LLM 处理可从 DB 直接读取 markdown，无需重复上传 PDF。
+
+**目标架构（3 阶段解耦）**:
+
+```
+阶段 1: OCR 批量预处理
+  上传 PDF → PP-StructureV3 / PaddleOCR-VL → ocr_markdown 持久化到 DB
+  ↓ (一次写入，永久复用)
+阶段 2: QD 提取 + LLM 标注
+  从 DB 读取 ocr_markdown → QD extraction → LLM 结构标注 → 题目入库
+  ↓ (markdown 不变时可反复重跑阶段 2)
+阶段 3: 知识映射 + 嵌入 + 讲解
+  从 DB 读取题目 → KP 映射 → 嵌入生成 → 详解生成 → 富化完成
+```
+
+| 事项 | 状态 | 说明 |
+|------|:---:|------|
+| **ocr_markdown 列已有** | ✅ | Alembic 016 已添加 `documents.ocr_markdown` 列（S#131） |
+| **阶段 2 独立触发 API** | ✅ 已实施 | `POST /api/documents/{id}/reprocess-qd` — 从 DB 读 markdown → 重跑 QD 提取 → 返回 JSON 预览（不保存）。实测：英语文档 111s 返回 38 题 |
+| **阶段分离 Worker** | ⏳ 后续 | 当前三阶段共用 `doc` worker；后续可分离为 `ocr_worker` + `qd_worker` + `enrich_worker` |
+| **前端"重新提取"按钮** | ⏳ 后续 | 前端调用 `/api/documents/{id}/reprocess-qd` 展示 QD 预览结果 |
+
+**收益**:
+- QD prompt 迭代周期：从"上传 PDF→等 OCR→等 LLM (~10min)"缩短到"点按钮→等 LLM (~2min)"
+- OCR API 费用节省：每轮 prompt 调试不再重复调用 PP-StructureV3
+- 调试效率：可直接注入 markdown 测试 QD extraction，无需完整管线
+
+**验证结果**（英语文档 id=17，ocr_markdown 23,267 chars）:
+```
+POST /api/documents/17/reprocess-qd → 111s, 38 questions
+metadata: {sections_used: 0, total_questions_raw: 38}
+```
+> 注：当前 QD 提取仍产出 38 碎片题（非预期的 ~12 复合题），说明 composite merge prompt 对选词填空等 section 类型效果不佳，待后续 prompt 优化。
+
+### 7.6 已完成（全清）
 
 所有 P0/P1/P2/P3 已知问题已在 Session #79-#111 中修复。详见 §6 近期完成。
 
@@ -401,60 +523,203 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 ---
 
-## 14. 已知问题（2026-07-28, Session #137g 全流程测试）
+## 14. 已知问题（2026-08-01, Session #161 更新）
 
-### 🔴 P0 — 数据丢失（修复计划已确认）
+### 🔴 P0 — Section 元数据：英语复合题回归已修复（S#161 LLM 元数据重构完成）
 
-| 编号 | 问题 | 状态 | 修复方案 | 工作量 |
-|:----:|------|:---:|---------|:------:|
-| D1 | **token 截断丢题** | 🔴 待修 | `max_tokens` 65536 -> 131072 | 5min |
-| D2 | **漏题不触发重试** | 🔴 待修 | 检测 JSON 完整性 + 末题 stem 长度 | 30min |
-| D3 | **答案长度上限过严** | 🔴 待修 | essay/proof 上限 3000 -> 8000 | 5min |
-| D4 | **options 字符串被丢弃** | 🔴 待修 | 兼容字符串格式 options | 10min |
+| 编号 | 问题 | 状态 | 根因/影响 |
+|:----:|------|:---:|------|
+| QD4 | **S#160 9科回归：英语 56 题全部拆散** | ✅ 已修复 | S#160 LLM section detection 只返回 `{header, line}`，S#159 合并逻辑依赖的题型关键词全部丢失。S#161 重构：LLM 一次返回完整元数据（type_hint, is_composite, qno_range），下游零关键词匹配直接消费。 |
+| QD5 | **Section 元数据缺失——LLM 输出信息不足** | ✅ 已修复 | `_detect_markdown_sections()` 返回类型从 `list[tuple]` 扩展为 `tuple[list[tuple], list[dict]]`，LLM 一次输出 type_hint / is_composite / qno_first / qno_last / material_shared 全量语义元数据。 |
+| — | **答案区正则截断不可靠** | ✅ 已修复 | `_ANSWER_SECTION_RE` 废弃，LLM metadata 提供 `answer_section: {exists, line, note}`。 |
 
-### 🟠 P1 — 渲染错误（修复计划已确认）
+### 🔴 P0 — S#160 QD Extraction Section Detection（已修复，历史/生物验证通过）
 
-| 编号 | 问题 | 状态 | 修复方案 | 工作量 |
-|:----:|------|:---:|---------|:------:|
-| R1 | **LaTeX 语法错误** | 🟠 待修 | 后端 LaTeX 预校验（大括号配对、left/right 配对） | 含在 R1-4 中 |
-| R2 | **Unicode 希腊字母未转 LaTeX** | 🟠 待修 | 复用 LatexFallbackEngine Unicode 转换 | 含在 R1-4 中 |
-| R3 | **max/min 大括号语法错误** | 🟠 待修 | `\max{a,b}` -> `\max\{a,b\}` 自动修正 | 含在 R1-4 中 |
-| R4 | **非数学内容误包在 $ 中** | 🟠 待修 | 检测并剥离非数学内容的 math delimiter | 含在 R1-4 中 |
-| R5 | **配图位置错误** | 🟡 部分解决 | MathRenderer 支持 `![alt](url)` 语法 | 1h |
+| 编号 | 问题 | 状态 | 根因/影响 |
+|:----:|------|:---:|------|
+| QD1 | **QD Extraction 历史 0 题、生物严重欠提取** | ✅ 已验证 | `_detect_markdown_sections()` 原为正则关键词切分，各科各版标题表述无法穷举。S#160 完全重构为 LLM 语义理解。实测：历史 0→43 题（100%）、生物 ~7→26 题（100%）。 |
+| QD2 | **blocks 路径的 markdown 渲染劣于 PP-StructureV3** | 🔴 已定位 | `_blocks_to_markdown()` 从零渲染：图片→[图]、公式→自己重包、无顶层标题。PP-StructureV3 渲染是规范版本。 |
+| QD3 | **跳转逻辑与本意相反** | 🔴 已定位 | `async_document.py` L3326: 有 blocks 就用 blocks 路径，应该始终优先用 markdown 路径。 |
 
-**R1-4 统一方案**：复用现有 LatexFallbackEngine + 补充 LLM 特有规则，总计 2h。
+### 🔴 P0 — 化学管线（S#146 A/B测试确认方向）
 
-### 🟡 P2 — 布局问题（修复计划已确认）
+| 编号 | 问题 | 状态 | 根因 |
+|:----:|------|:---:|------|
+| C1 | **化学 68% 题目内容为空（74/109）** | 🔍 旧版问题 | Anchor Mode 替代 V3 Full Extraction，S#157 使用 QD→V3 已绕过 |
+| C2 | **B1 `_document_processing` import** | ✅ 已正确 | lazy import from `async_document` |
+| C3 | **B2 image question 全部跳过** | ✅ Claude 已修复 | L3799-3800 保留 image question |
+| C4 | **B4 quality gate 被空 stem 拖低** | ✅ Claude 已修复 | L3759-3763 排除 image question |
+| C5 | **PaddleOCR-VL-1.6 超时（90s）** | ✅ TRAE 已修复 | `_POLL_TIMEOUT` 90s→180s |
 
-| 编号 | 问题 | 状态 | 修复方案 | 工作量 |
-|:----:|------|:---:|---------|:------:|
-| L1 | **内容溢出页面** | 🟡 待修 | 全站 max-width + MathRenderer 根元素改 div | 含在 L1-4 中 |
-| L2 | **文本表格未渲染** | 🟡 待修 | 后端文本表格 -> GFM pipe table 转换 | 含在 L1-4 中 |
-| L3 | **详解内容溢出** | 🟡 待修 | solution 容器加 overflow-x: auto | 含在 L1-4 中 |
-| L4 | **宽屏聊天气泡过宽** | 🟡 待修 | 加 max-width: 720px 上限 | 含在 L1-4 中 |
+**S#146 A/B 测试结论**：
+```
+化学：Plan A (markdown) = Plan B (blocks) = 20Q, 100% stem/options/answers
+→ 根因不是 OCR 输入格式
+→ 根因是 Anchor Mode 替代 V3 Full Extraction
+→ 修复方向：化学回退 V3 Full Extraction
+```
 
-**L1-4 统一方案**：CSS 修改，总计 1h。
+**失败链（已修复，S#142）**：
+```
+anchor_assembly 成功（31题, 16 image）
+→ _save_annotated_questions 被调用
+→ B2: 16 image questions 被跳过 → 已修复（保留 image question）
+→ B4: quality gate avg_quality≈0.36 → 已修复（排除 image question）
+→ B5: PaddleOCR-VL 90s 超时 → 已修复（180s）
+```
 
-### 🟢 P3 — 低优先级
+### 🔴 P0 — 英语 QD 复合题 LLM 识别问题（2026-08-01 QNO 去重修复后诊断）
 
-| 问题 | 状态 | 说明 |
-|------|:---:|------|
-| 题干多出重复文本 | 🟢 概率性 | LLM 提取时 OCR 文本重复 |
-| 选项多余残缺 A 选项 | 🟢 概率性 | LLM 分割错误 |
-| Ellipsis 截断与 KaTeX 不兼容 | 🟢 已知限制 | Ant Design Paragraph ellipsis 限制 |
+> **背景**: QNO 全局去重 key 从 `(qno)` 修复为 `(qno, section)`，修复生效（5 条 QNO=1 的题全部保留），但英语仍只产出 5 题，预期约 12 题。完形填空 + 4 篇阅读理解丢失。
 
-### ✅ 已修复（S#133-#137g 确认）
+**已知丢失的 Section**:
+
+| Section | 内容 | chars | 状态 |
+|------|------|:---:|:---:|
+| 完形填空 (知识运用第一节) | Q1-Q10 材料 + 选项 | 2,132 | ❌ 丢失 |
+| 阅读理解 A 篇 | Q31 + 材料 + 选项 | ~3,000 | ❌ 丢失 |
+| 阅读理解 B 篇 | Q34 + 材料 + 选项 | ~3,000 | ❌ 丢失 |
+| 阅读理解 C 篇 | Q38 + 材料 + 选项 | ~3,000 | ❌ 丢失 |
+| 阅读理解 D 篇 | Q42 + 材料 + 选项 | ~3,000 | ❌ 丢失 |
+
+**最终获得的 5 题**:
+
+| 来源 Section | 题号 | 类型 | 内容长度 |
+|-------------|:---:|------|:---:|
+| 七选五 (Solitude) | 1 | calculation | 3,982 |
+| 语法填空 | 1 | fill | 975 |
+| 阅读表达 (stutterer) | 1 | calculation | 2,201 |
+| 选词填空 | 1 | calculation | 991 |
+| 写作 | 1 | calculation | 157 |
+
+**疑似根因**:
+
+| 编号 | 问题 | 状态 | 说明 |
+|:----:|------|:---:|------|
+| EQD1 | **阅读理解 section 被 12000 char 截断** | ✅ 已修复 | 通过篇章子切分（A/B/C/D markers）+ max_chars→30000 双保险解决 |
+| EQD2 | **后端崩溃中断处理** | ✅ 已消除 | §7.4 看门狗模式保证测试环境稳定 |
+| EQD3 | **完形填空 section 1 2,132 chars 正常但丢失** | ✅ 已修复 | 提升 max_tokens→65536 + 改进 composite prompt 后恢复正常 |
+| EQD4 | **题目类型全部为 calculation** | ✅ 已修复 | 系统 prompt 新增 "ALWAYS include the 'type' field" 指令，验证通过 |
+
+**S#159 新增修复（已实施）**:
+
+| 修复 | 说明 |
+|------|------|
+| **阅读篇章子切分** | `_split_reading_passages()` 检测 A/B/C/D 标记，将 12,041 chars 阅读 section 拆为 4 个 ~3,000 chars 子 section |
+| **max_chars 提升** | 12000 → 30000，消除单篇长文截断风险 |
+| **空壳 section 过滤** | 跳过 < 100 chars 的 section（如 43 chars 的选词填空指令壳） |
+| **复合题合并后处理** | 语法填空/选词填空等多碎片 section 自动合并为 1 综合题 |
+| **QNO 自动修正** | 复合题 qno=1 自动修正为 section body 中第一个真实 QNO |
+| **QNO 校验放宽** | 单题 composite section 的 "missing" QNO 视为 stem 内嵌 sub-QNO，不报错 |
+
+**S#159 验证结果（英语 id=17）**:
+
+| 指标 | 修复前 | 修复后 |
+|------|:---:|:---:|
+| 总题数 | 5 | **13** |
+| 完形填空 | ❌ 丢失 | ✅ Q1, 2,117 chars |
+| 阅读理解 A篇 | ❌ 丢失 | ✅ Q31, 2,374 chars |
+| 阅读理解 B篇 | ❌ 丢失 | ✅ Q34, 8,559 chars, 16 opts |
+| 阅读理解 C篇 | ❌ 丢失 | ✅ Q38 (QNO auto-fixed 1→38) |
+| 阅读理解 D篇 | ❌ 丢失 | ✅ Q42, 3,101 chars |
+| 语法填空 | 1 fill (只有 Q11) | 10 句合并 → 1 composite |
+| 选词填空 | 1 fill (只有 Q21) | 10 句合并 → 1 composite |
+| 延迟 | — | **68s** (11 sections × ~6s avg) |
+
+**全科推广（已实施）**:
+- 化学：新增化工流程题、实验题、原理题、推断题 composite hints
+- 物理：新增实验题、计算题、综合题、读图题 composite hints
+- 生物：新增实验题、遗传题、细胞代谢、图片题 composite hints
+- 地理：新增读图题、区域分析、旅游地理、环境保护 composite hints
+- 历史：扩展为材料分析题、比较分析题、背景影响题、图片题 composite hints
+- 政治：新增材料分析题、论述题 composite hints
+- 数学：新增复合题提示
+- 阅读篇章子切分对英文/语文阅读 section 均可自动生效
+
+### 🟡 P1 — 英语内容质量（S#141 新增）
+
+| 编号 | 问题 | 状态 | 影响 |
+|:----:|------|:---:|------|
+| E1 | **英语 id=105 content_chars=0** | ❌ 未修 | 空题干，只有答案 "D" |
+| E2 | **英语 id=104/106 试卷元信息混入题干** | ❌ 未修 | 试卷头部信息被当作题目内容 |
+| E3 | **英语 avg_quality=0.707（全科最低）** | ❌ 未修 | MIMO fast 对英语锚点定位偏差 |
+
+### 🟡 P2 — 其他已记录问题（S#141 新增）
+
+| 编号 | 问题 | 状态 | 说明 |
+|:----:|------|:---:|------|
+| G1 | **地理 3→5 题被 quality gate 过滤** | ❌ 未修 | 30 题 parsed → 27 题 saved |
+| M1 | **数学 metadata 学校名错误** | ❌ 未修 | LLM 返回"人大附中"，实际为"北师大实验中学" |
+| B1 | **生物 OCR 输出繁体/异形字** | ❌ 未修 | "生產實物" 可能影响学科识别 |
+
+### ✅ S#141 代码修复（已验证生效）
+
+| 修复 | 影响科目 | 验证结果 |
+|------|---------|---------|
+| 地理/生物加入 DeepSeek 路由 | 地理、生物 | ✅ 地理 30题、生物 28题（修复前 0题） |
+| `_coerce_qno()` 字符串 qno 转换 | 语文 | ✅ 27题（修复前 0题） |
+| Quality Gate 图片题支持 | 数学、化学 | ✅ 数学 21题（修复前 17题） |
+| `question_nos` 字符串转整数 | 全科 | ✅ 代码已修复 |
+
+### ✅ P0 — 数据丢失（已修复 S#137h）
+
+| 编号 | 问题 | 状态 | 修复说明 |
+|:----:|------|:---:|---------|
+| D1 | **token 截断丢题** | ✅ 已修 | `max_tokens` 65536→131072（3 处） |
+| D2 | **漏题不触发重试** | ✅ 已修 | `_detect_truncation()` + 截断重试逻辑 |
+| D3 | **答案长度上限过严** | ✅ 已修 | calculation 1500→4000, proof/essay 3000→8000 |
+| D4 | **options 字符串被丢弃** | ✅ 已修 | 4 处 JSON 字符串兼容 |
+
+### ✅ P1 — 渲染错误（已修复 S#137h）
+
+| 编号 | 问题 | 状态 | 修复说明 |
+|:----:|------|:---:|---------|
+| R1-R4 | **LaTeX 预处理** | ✅ 已修 | `_apply_latex_preprocessing()` 复用 LatexFallbackEngine Unicode 表 |
+| R5 | **配图位置错误** | 🟡 部分解决 | MathRenderer 支持 `![alt](url)` 语法 |
+
+### ✅ P2 — 布局问题（已修复 S#137h）
+
+| 编号 | 问题 | 状态 | 修复说明 |
+|:----:|------|:---:|---------|
+| L1-L4 | **前端布局** | ✅ 已修 | TrainingPage 3 视图 max-width 约束 |
+
+### ✅ 锚点管线验证（Session #140 完成）
+
+| 指标 | 值 |
+|------|-----|
+| 测试文档 | 10 份（9 科 + 1 份数学重复） |
+| 总题数 | 268 |
+| 图片题 | 14 |
+| 平均匹配率 | 98.5% |
+| 模型路由 | DeepSeek（数学/化学/语文）、MIMO（其他） |
+
+验证产物：`Docs/ocr_after/` 各科 `assembled.json` + `llm.json` + `summary.json`。
+
+### 🟡 题目质量 — 11 题修复计划（Session #138 实施中）
+
+| 优先级 | 问题 | 影响题号 | 状态 |
+|:---:|------|---------|:---:|
+| P0 | LLM 选项截断 | Q2/Q4/Q8 | ✅ Prompt 强化 + 选项校验 |
+| P0 | OCR 噪声（underline/text/Greek） | Q1/Q3/Q6 | ✅ 后处理清洗 + Greek 检测 |
+| P1 | Unicode Modifier Letter 上标 | Q10 | ⏳ 待实施 |
+| P1 | 茎叶图乱码 | Q5 | ⏳ 待实施 |
+| P1 | ASCII 表格未转换 | Q16/Q18 | ⏳ 待实施 |
+| P2 | 前端 CSS overflow | Q18 详解 | ✅ CSS overflowWrap + wordBreak |
+
+**计划文件**：`Docs/plans/question-quality-fix-plan.md`
+
+### ✅ 已修复（S#133-#137h 确认）
 
 | 问题 | 修复 Session | 说明 |
 |------|:---:|------|
-| **双重显示（预览 vs 编辑框）** | #134 | `QuestionEditPage.tsx` 取消 TextArea，只保留 MathRenderer 预览 |
-| **HTML 标签残留（`<div>`/`[T]`）** | #134 | `_clean_text_for_db` L607-612 |
-| **LaTeX JSON 解析污染（`\b`/`\f`）** | #134 | `_try_parse` `strict=False` |
-| **选项重复（Q1 两组 ABCD）** | #134 | `_dedupe_option_blocks` 全局哈希 + 空行合并 |
-| **LaTeX 前端渲染失败** | #133 | MathRenderer 2 regex bug + 15 处调用补充 |
-| **图片管线 ZIP 下载失败** | #134 | API `markdown.images` → MinIO `ppsv3-images` |
+| **Subject 路由遗漏** | #137h | `_DEEPSEEK_LATEX_SUBJECTS` 添加 "mathematics" |
+| **管线监控缺失** | #137h | 7 个 PIPELINE_CHECKPOINT 监控点 |
+| **双重显示（预览 vs 编辑框）** | #134 | `QuestionEditPage.tsx` 取消 TextArea |
+| **HTML 标签残留** | #134 | `_clean_text_for_db` |
+| **LaTeX JSON 解析污染** | #134 | `_try_parse` `strict=False` |
+| **选项重复** | #134 | `_dedupe_option_blocks` |
+| **LaTeX 前端渲染失败** | #133 | MathRenderer regex 修复 |
 | **Answer 区截断** | #131 | 移除 8000 字符限制 |
-| **Explanation 覆写 Bug** | #131 | `saved` dict 新增 `explanation` 字段 |
 
 ---
 
@@ -462,13 +727,394 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 维度 | 状态 |
 |------|------|
-| **解析侧（Phase 1）** | ✅ 扎实：PP-StructureV3 + Markdown 持久化 + LLM 标注。21/21 答案正确提取 |
-| **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成+DeepSeek 审核。Explanation 覆写 Bug 已修复 |
-| **管线性能** | ✅ 重构已完成（#104-#106），3-queue 稳定 |
-| **GPU 稳定性** | ✅ Ollama 重装后 VRAM 恒定 |
-| **数据完整性** | ⚠️ S#132: LaTeX 前端渲染失败（DB正确），配图未提取（Q3/Q5/Q15/Q20），选项质量问题（Q1/Q2/Q4/Q8） |
-| **前端渲染** | 🔴 S#132 新发现：LaTeX 公式前端不渲染 + 配图缺失 + 表格不支持 |
+| **解析侧（Phase 1）** | ✅ QD Extraction LLM 元数据架构已落地（S#161）：`_detect_markdown_sections()` 返回完整语义元数据，composite merge 零关键词匹配。英语 56→10 composite 题。历史 0→43 题、生物 ~7→26 题（S#160）。⚠️ 待全量 9 科回归验证。 |
+| **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成 |
+| **管线监控** | ✅ S#137h: 7 个 PIPELINE_CHECKPOINT；S#157: 新增逐环节耗时统计 |
 | **架构合规** | ✅ 8 MCP Server / 37 Tools，唯一调用链，零违规 |
 | **测试** | ✅ 249 passed / 0 failed |
-| **文档同步** | ✅ RESTART_PROMPT + PROJECT_STATUS + LOG + PIPELINE + DSD |
-| **整体完成度** | **核心链路 ~99%，整体 ~97%**。提取侧已成熟，渲染侧是下一步重点 |
+| **文档同步** | ✅ LOG + PROJECT_STATUS 已更新至 S#161 |
+| **服务稳定性** | ✅ `start_backend.py --supervised` 看门狗模式：崩溃自动重启（~8s 停机），僵尸进程自动清理，任务队列 Redis 持久化 |
+| **管线增强** | ✅ `POST /api/documents/{id}/reprocess-qd` QD 预览端点：从 DB 读 markdown 直接跑提取 |
+| **整体完成度** | **核心链路 ~98%，整体 ~97%**。下一步：9 科回归全量验证 + P1 类型字段修复 |
+
+---
+
+## 16. 变更日志 (Changelog)
+
+> 自 2026-07-31 起，所有状态变更按时间戳顺序追加于此。§1-§15 可原地编辑反映当前状态，此处为不可变历史记录。
+
+### 2026-07-31 14:30 — S#153: 9 科全量测试完成
+
+**版本**: 1.43.0
+
+**测试结果**:
+| 学科 | 预期 | 实际 | 率 | 问题 |
+|------|:---:|:---:|:---:|------|
+| 数学 | 21 | 21 | 100% | Q11 短 stem |
+| 物理 | 24 | 24 | 100% | Q13 空题 |
+| 化学 | 25 | 6 | 24% | Q5-Q20 缺失 |
+| 英语 | — | 35 | — | QNO 过度拆分 + Q1-Q10 丢失 |
+| 语文 | 24 | 24 | 100% | 可接受 |
+| 地理 | 30 | 30 | 100%* | 9 重复 + 4 空题 |
+| 生物 | 26 | 26 | 100%* | Q26 重复 |
+| 政治 | 28 | 28 | 100% | 干净 |
+| 历史 | 43 | 43 | 100% | Q37 空题 |
+
+**关键发现**:
+- 英语切题全面崩溃：35 道碎片化小题，应为 ~12 道 section 综合题。根因为 Anchor Mode 绕过了 S#130 的 V3 prompt 合并指令
+- 化学 24% 检出率：Block 提取 validator reject → MIMO 回退仅产 6 题
+- S#130 确认的 46→13 合并效果在当前管线中完全失效
+
+**文档规范确立**:
+- LOG.md: 严格按时间顺序排列（最早在上，最新在末），禁止前置插入
+- PROJECT_STATUS.md: §1-§15 为可编辑快照，§16 为不可变变更日志（仅追加）
+
+### 2026-07-31 19:30 — S#154: 跨科目 QNO 切分影响评估
+
+**版本**: 1.43.0
+
+**扫描范围**: 语文、地理、历史、生物（用户指定的4科 + 英语已在S#153评估）
+
+**跨科目汇总**:
+
+| 科目 | 入库 | 预期 | 严重度 | 问题摘要 |
+|------|:---:|:---:|:---:|------|
+| 地理 | 39 | ~30 | **Critical** | 空题×4 + 重复×14 + 链式跨界污染 + 答案区入库 |
+| 英语 | 35 | ~12综合 | **Critical** | QNO碎片化 + Q1-Q10丢失（S#153详述）|
+| 生物 | 28 | ~26 | Medium-High | Q26答案区重复入库×3 |
+| 语文 | 24 | 24 | Medium | Q7/13/21跨段材料污染 |
+| 历史 | 43 | 43 | Low-Medium | Q37空题 + 答案区QNO误匹配 |
+
+**结论**: 9科中 **5科**（55.6%）受 QNO 正则负面影响。QNO 正则作为统一切分驱动力已对所有"非纯单选题"试卷模式失效。理科（数学/物理/化学）题目天然独立所以基本可行，文科综合题以 section/block 为单位组织，QNO 正则只能产生碎片。
+
+**地理特殊性**: `ocr_markdown` 为空，未走 PaddleOCR-VL 路径（不在 `_VISION_FIRST_SUBJECTS`），纯文本 → Anchor Mode 流程中 QNO 正则更激进。
+
+**通用失效模式** (4类):
+1. Section-based 综合题（英语/地理/生物）
+2. 纯文本路径无结构信息（地理）
+3. 答案区与题目区边界模糊（生物/地理/历史）
+4. Section header 跨块切割（语文）
+
+---
+
+### 2026-07-31 22:00 — S#155: Question-Driven Pipeline 搭建完成
+
+**核心变更**: 以 question 为核心的管线架构投入使用，regex QNO 从"驱动切分"降级为"辅助验证"。
+
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| Question-Driven Extractor | `app/domains/question/_question_driven_extractor.py` | 新模块 (~860行)：板块检测 → LLM 语义提取 → regex 验证 |
+| Blocks 路径替换 | `async_document.py` L3344 | Vision-first 科目 Phase 0 替换为 `extract_questions_from_blocks()` |
+| Markdown 路径替换 | `async_document.py` L3311 | Text-first 科目 Anchor mode 替换为 `extract_questions_from_markdown()` |
+| 配置开关 | `config.py` | `QUESTION_DRIVEN_EXTRACTION_ENABLED = True` (默认) |
+
+**降级链**: Question-driven → Regex QNO fallback → MIMO Vision → V3 text-mode
+
+**覆盖科目**: 全部9科（vision-first 走 blocks 路径，text-first 走 markdown 路径）
+
+**待验证**: 英语/地理综合题端到端测试，cost 评估，Route B2 接入
+
+---
+
+### 2026-07-31 23:00 — S#156: 语文修正 + 全科 blocks 统一 + 降级链简化
+
+**语文阅读题规则修正** (`_question_driven_extractor.py`)：
+- 旧：一篇材料下的每道子题独立，材料重复塞入每个 stem
+- 新：一篇材料 + 所有小题 = 一道综合题，不拆分
+
+**全科统一走 blocks 路径** (`async_document.py`)：
+- 所有科目优先用 `extract_questions_from_blocks()` 利用 block_label 标签做 section 检测
+- `paddleocr_result` 为 None 时才回退 markdown 路径
+- ANCHOR 分支条件从"仅排除化学"改为"排除所有 vision-first 科目"
+
+**降级链简化** (`async_document.py`)：
+- 移除 Regex QNO fallback（产出质量随机，不配做第二道防线）
+- 移除 Anchor mode fallback（基于 regex 切块拼装，同样不可靠）
+
+**最终降级链**：QD blocks → MIMO Vision（仅 vision-first）→ V3 text-mode（兜底）
+
+---
+
+### 2026-07-31 23:20 — S#157: 9 科全量测试启动 + 中间结果
+
+**版本**: 1.44.0
+
+**核心变更**: 创建 `_run_9subj_test_v2.py` 全量测试脚本，对 S#156 降级链简化后的管线进行 9 科端到端验证。
+
+**脚本功能**:
+- 9 科 PDF 串行上传 → 2s 轮询 → 完成
+- 解析 task logs 13 个 pipeline stage，计算逐环节耗时
+- `_save_partial()` 每科完成后增量写入 `9subj_test_v2_partial.json`
+- `try/except` 防单科崩溃
+
+**Bug 修复（2 轮）**:
+1. try/except 包裹每科：第一版在化学完成后静默崩溃
+2. `float()` 转换 Excel 序列时间戳：`"36415.359"` → `36415.359`
+
+**测试结果（5/9 完成）**:
+
+| 学科 | 耗时 | 题数 | 质量 | LLM路径 | notable |
+|------|:---:|:---:|:---:|------|------|
+| 化学 | 384s | 10 | 1.00 | MIMO V2.5→V3 fb | Vision-first, Vision failed |
+| 物理 | 228s | 20 | 1.00 | LLM V3 direct | cross-validate pass |
+| 数学 | 384s | 23 | 1.00 | LLM V3 direct | **valid=True (唯一)** |
+| 英语 | 684s | 27 | **0.69** | LLM V3 direct | 54→27 去重, retry |
+| 政治 | 158s | 28 | 1.00 | LLM V3 direct | reject 但完美 |
+
+**关键发现**:
+- llm_annotate 占 >95% 总耗时（瓶颈确认）
+- 化学 MIMO Vision 持续失败 → V3 兜底（需排查 API 根因）
+- 英语质量 0.69 为全科最低（quality gate 过滤 50%）
+- C1 (PP-StructureV3) 全科 0 pages（预期行为）
+- 数学唯一 cross-validate valid=True
+
+**剩余**: 地理（处理中）、历史、生物（vision-first）、语文。
+
+**文档更新**: RESTART_PROMPT.md（重写至 S#157）、LOG.md（追加 #157）、PROJECT_STATUS.md（§1-§3.3/§6-§7/§14-§16 更新）
+
+---
+
+### 2026-07-31 23:50 — S#158: QD Extraction 根因分析 + 修复方向确定
+
+**版本**: 1.44.1
+
+**核心发现**: 9 科全量测试（S#157）揭示 QD Extraction 几乎完全失效——8/9 科 `extract_questions_from_blocks()` 返回 None，全部 fallback 到 V3。S#158 通过注入诊断日志到 `detect_sections()` + 单科目（物理）验证，确认了根因。
+
+**根因**: PP-StructureV3 将所有 blocks 的 `block_label` 标记为 `text`（不区分 `paragraph_title`/`doc_title`）。`_is_section_boundary()` 只在 `_TITLE_LABELS` 上检查 `_SECTION_HEADER_RE`（不要求 `##` 前缀），对 `text` block 只检查 `_MD_SECTION_RE`（要求 `##` 前缀）。结果：物理 210 blocks 只找到 1 个 section（"第二部分"），丢失"第一部分"（14 道选择题）。
+
+**证据（物理单科验证）**:
+```
+label_dist={'text': 189, 'image': 16, 'table': 5}   ← 0 个 paragraph_title/doc_title
+detect_sections: 1 sections from 210 blocks
+S0: header='第二部分' blocks=57 pages=P5-P9
+```
+
+**更深层问题**: blocks 路径不仅 section 检测失效，连 markdown 渲染也不如 PP-StructureV3 原生输出：
+- `_blocks_to_markdown()`: 图片→`[图]`（丢引用）、公式→自己重包 `$`、无顶层 `#` 标题
+- PP-StructureV3 markdown: `![...](url)` 完整引用、正确 LaTeX、`##` 层级标题
+
+**修复方向**: 放弃 blocks 路径的 `detect_sections()`，改用已有的 `extract_questions_from_markdown()`（`_detect_markdown_sections()` 直接按 PP-StructureV3 渲染的 `##`/`###` 切分）：
+```python
+# async_document.py L3326: 从
+if paddleocr_result is not None:
+    qd_result = await extract_questions_from_blocks(...)
+# 改为
+qd_result = await extract_questions_from_markdown(full_markdown, ...)
+```
+`_MD_SECTION_SPLIT_RE` 的 `##` 前缀是可选的，比 `_MD_SECTION_RE` 更宽松，能匹配如 `第一部分`、`一、选择题` 等在 markdown 中可能不以 `##` 开头的标题。
+
+**变更文件**:
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 临时修改 | `detect_sections()` + `extract_questions_from_blocks()` 添加诊断日志（诊断完成后已清理） |
+| `PROJECT_STATUS.md` | 修改 | 更新 §1/§3.3/§6/§7/§14/§15/§16，反映 S#158 发现 |
+| `LOG.md` | 追加 | 本条目 |
+| `RESTART_PROMPT.md` | 修改 | 更新至 S#158 |
+
+---
+
+### 2026-08-01 10:00 — S#158: QD Extraction 三项根因修复
+
+**版本**: 1.45.0
+
+**核心变更**: 对 S#158 根因分析确认的三项 P0/P1 问题实施代码修复。
+
+**P0-1: `max_tokens` 提升**（根因：LLM JSON 输出截断）:
+- `provider.py` L241: DeepSeek 默认 `max_tokens` 4096→65536（16x）
+- `_question_driven_extractor.py` L533: QD 提取显式传入 `max_tokens=65536`
+- 效果: 14 题以上的大 section JSON 不再因 `finish_reason: length` 被截断
+
+**P0-2: `答题卡` 正则收紧**（根因：误匹配考试说明行）:
+- `_ANSWER_SECTION_RE`: `答题卡` → `^(?:#+\s*)?答题卡\s*$`
+- 效果: 不再误匹配"考生务必将答案答在答题卡上"，语文/生物不再丢弃整个文档正文
+
+**P1-3: `本大题` 关键词补充**（根因：语文 section header 无法被识别）:
+- `_MD_SECTION_SPLIT_RE`: 中文数字 section 关键词列表新增 `本大题`
+- 效果: `## 一、 本大题共7小题` 等语文标题能被正确识别为 section header
+
+**变更文件**:
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 修改 | P0-1 添加 `max_tokens=65536`；P0-2 `_ANSWER_SECTION_RE` 正则收紧；P1-3 `_MD_SECTION_SPLIT_RE` 补充 `本大题` |
+| `provider.py` | 修改 | DeepSeek 默认 `max_tokens` 4096→65536 |
+| `PROJECT_STATUS.md` | 修改 | 更新 §1/§7.1/§14/§15/§16，反映修复完成 |
+| `LOG.md` | 待追加 | 本条目 |
+
+---
+
+### 2026-08-01 14:00 — S#158 续: 英语 QD 识别问题记录 + 服务稳定性/管线增强 Todo
+
+**版本**: 1.45.1
+
+**英语 QD 复合题 LLM 识别诊断**（§14 新增 🔴 P0 — 英语 QD 复合题 LLM 识别问题）:
+- QNO 去重 key 从 `(qno)` 修复为 `(qno, section)`，修复生效（5 条 QNO=1 的题全部保留）
+- 英语最终产出 5 题（预期 ~12 题）：七选五、语法填空、阅读表达、选词填空、写作
+- 丢失 5 个 section：完形填空 (2,132 chars) + 阅读理解×4 (section 5 合并 ~12,041 chars)
+- 疑似根因 EQD1-EQD4：12000 char 截断、后端崩溃中断、LLM prompt 合并指令、question_type 兜底
+- 下一步验证：提升 max_chars → 30000、稳定环境重跑、诊断日志分析
+
+**服务稳定性加强 Todo**（§7.4 新增 🔴）:
+- 后端崩溃自动重启（进程守护/Docker `restart: always`）
+- 僵尸进程清理（启动前 kill 占端口进程）
+- 上传任务持久化（避免崩溃丢失任务 ID）
+- uvicorn --reload 不稳定根因（当前已规避但未根除）
+- 前端服务稳定性评估
+
+**管线阶段化增强 Todo**（§7.5 新增 🟡）:
+- OCR 与 LLM 处理解耦为 3 独立阶段
+- ocr_markdown 列已存在（Alembic 016），可复用
+- 新增 `POST /api/documents/{id}/reprocess` 触发阶段 2 重跑
+- Worker 分离: ocr_worker + qd_worker + enrich_worker
+- 前端"重新提取"按钮
+
+**变更文件**:
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `PROJECT_STATUS.md` | 修改 | §14 新增英语 QD 识别问题详细诊断；§7.4 新增服务稳定性 Todo；§7.5 新增管线阶段化 Todo；§15 总结更新 |
+| `LOG.md` | 待追加 | 本条目 |
+
+---
+
+### 2026-08-01 16:00 — S#158: §7.4 服务稳定性 + §7.5 管线增强 实施完成
+
+**版本**: 1.46.0
+
+**§7.4 服务稳定性 — 已实施（详见 §7.4）**:
+
+| 变更 | 文件 | 说明 |
+|------|------|------|
+| 看门狗模式 | `backend/scripts/start_backend.py` | 新增 `--supervised` 模式：每 5s 检查 `/health`，连续 3 次失败 → kill + 重启，最多 10 次，指数退避 |
+| 僵尸清理 | `backend/scripts/start_backend.py` | `release_port()` 在每次重启前自动调用 |
+| 启动脚本更新 | `backend/start.ps1` | 默认不加 `--reload`，推荐 `-Supervised` |
+| 崩溃恢复审计 | `async_pipeline.py` | `start_worker()` 启动时查询 Redis 队列长度并打印恢复日志 |
+
+**崩溃恢复验证（实测）**: 手动 kill uvicorn → supervisor 8s 后自动重启恢复。
+
+**§7.5 管线阶段化 — 已实施（详见 §7.5）**:
+
+| 变更 | 文件 | 说明 |
+|------|------|------|
+| QD 预览端点 | `backend/app/api/documents.py` | `POST /api/documents/{id}/reprocess-qd` |
+| QD 预览服务 | `backend/app/domains/document/service.py` | `reprocess_qd_preview()` — 从 DB 读取 `ocr_markdown` → QD 提取 → 返回 JSON |
+
+**端到端验证**: 英语文档 id=17 (ocr_markdown 23,267 chars) — `POST /api/documents/17/reprocess-qd` → 111s, 38 questions, latency 111s.
+
+**变更文件汇总**:
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `backend/scripts/start_backend.py` | 重写 | 新增 `--supervised` 看门狗模式（健康检查 + 自动重启 + 指数退避） |
+| `backend/start.ps1` | 重写 | 移除 `--reload` 默认，推荐 `-Supervised`，委托给 `start_backend.py` |
+| `backend/app/domains/document/async_pipeline.py` | 修改 | `start_worker()` 新增崩溃恢复审计日志 |
+| `backend/app/domains/document/service.py` | 新增 | `get_ocr_markdown()` + `reprocess_qd_preview()` |
+| `backend/app/api/documents.py` | 新增 | `POST /api/documents/{doc_id}/reprocess-qd` |
+| `PROJECT_STATUS.md` | 修改 | §7.4/§7.5 更新为已实施 + 验证结果；§15 总结更新；本条目 |
+
+---
+
+### 2026-08-01 19:00 — S#159: 英语 QD 复合题识别修复 + 全科推广
+
+**版本**: 1.47.0
+
+**根因确认**:
+
+| 根因 | 说明 |
+|------|------|
+| **阅读篇章未切分** | `_detect_markdown_sections()` 将 4 篇阅读理解合并为一个 12,041 chars section，超过 max_chars=12000 截断阈值 |
+| **空壳 section 干扰** | OCR 输出 `## 第二节选词填空` header 两次，第一次仅 43 chars 指令文本 |
+| **LLM 复合拆分** | 语法填空/选词填空虽 prompt 要求合并，LLM 仍返回 10 个独立 question |
+| **QNO 错误** | 复合题 LLM 返回 qno=1，而非 section 真实 QNO（如 38） |
+
+**代码修复（`_question_driven_extractor.py` 单文件）**:
+
+| 修复 | 实现 |
+|------|------|
+| 阅读篇章子切分 | `_PASSAGE_MARKER_RE` + `_split_reading_passages()` — 检测 A/B/C/D 标记，将阅读 section 拆为独立子 section |
+| max_chars 提升 | 12000 → 30000 |
+| 空壳过滤 | `_MIN_SECTION_CHARS = 100`，在 `extract_questions_from_markdown()` 中过滤 |
+| 复合题合并后处理 | 检测 composite header，多碎片 → 合并 stem + 保留第一个 QNO |
+| QNO 自动修正 | 扫描 body 中所有 `_QNO_VALIDATION_RE` 真实 QNO，如 qno=1 不在其中则修正 |
+| QNO 校验放宽 | `validate_qnos()` 新增单题 composite 检测，不将 stem 内嵌 sub-QNO 报 missing |
+| Composite hints 全科推广 | `_SUBJECT_COMPREHENSIVE_HINTS` 扩展至 9 科（化学/物理/生物/地理/历史/政治/数学） |
+| 系统 prompt 强化 | 新增 "1 section = 1 question" 指令 + type 字段强制要求 |
+
+**验证结果（英语 id=17）**: 5 题 → 13 题，68s，完形填空和 4 篇阅读理解全部恢复。
+
+**变更文件**:
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 修改 | S#159 全部修复（子切分 + 合并 + QNO 修正 + 校验放宽 + hints 扩展 + prompt 强化） |
+| `PROJECT_STATUS.md` | 修改 | §1 版本号、§14 英语 QD 状态更新、§16 本条目 |
+| `LOG.md` | 追加 | Session #159 |
+| `RESTART_PROMPT.md` | 修改 | 更新至 S#159 |
+
+---
+
+### 2026-08-01 22:00 — S#160: Section Detection 正则→LLM 语义重构
+
+**版本**: 1.48.0
+
+**背景**: S#158 QD3（`本大题` 关键词缺失）暴露正则方案的结构性缺陷——各科各版考试标题表述千差万别，正则关键词无法穷举。用户明确指出应通过 LLM 语义理解完成切分，而非依赖关键词。`_MD_SECTION_SPLIT_RE` 历史上已补过关键词（`本大题`），但生物 `单项选择题` 仍漏检（仅含 `单选题`）。
+
+**修复（`_question_driven_extractor.py` 单文件）**:
+
+| 改动 | 说明 |
+|------|------|
+| `_detect_markdown_sections()` 重写 | 正则关键词切分 → LLM 语义理解。LLM 读取行号索引压缩 markdown（≤500 行）→ 返回 `[{header, line}]` → 按 line 切分原文 |
+| `_SECTION_DETECTION_PROMPT` 新增 | 通用试卷分区识别 prompt，不依赖任何学科关键词 |
+| `_ANSWER_SECTION_RE` 保留 | 答案区边界检测（功能单一、表述有限，正则足够可靠） |
+| `_QNO_VALIDATION_RE` 保留 | 辅助校验（不驱动切分） |
+
+**验证结果（实测）**:
+
+| 科目 | 文档 | 修复前 | 修复后 | 预期 | 延迟 |
+|------|:---:|:---:|:---:|:---:|:---:|
+| 历史 | doc 7 | 0 | 43 ✓ | 43 | 63s |
+| 生物 | doc 8 | ~7 | 26 ✓ | 26 | ~60s |
+
+**设计原则**:
+- Section 检测 = LLM 语义：不依赖任何关键词/正则穷举，由 LLM 理解试卷结构
+- Answer 边界 = 简单正则：`参考答案`/`答题卡` 表述模式有限
+- QNO 正则 = 辅助校验：不驱动切分，仅比较 LLM 输出与原始 QNO 指纹
+
+**变更文件**:
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 修改 | `_detect_markdown_sections()` 正则→LLM 语义重构 + `_SECTION_DETECTION_PROMPT` |
+| `LOG.md` | 追加 | Session #160 |
+| `PROJECT_STATUS.md` | 修改 | §1/§3.3/§14/§15/§16 更新至 1.48.0 |
+
+### 2026-08-01 23:00 — S#161: LLM 元数据重构代码实施 + 英语复合题回归修复验证
+
+**版本**: 1.50.0
+
+**背景**: S#161 前段诊断确认英语 56 碎片回归的根本原因是 S#160 `_detect_markdown_sections()` 仅输出 `{header, line}`，语义信息不足导致 S#159 的 composite merge 关键词规则全部失效。用户明确指示：LLM 应一次输出完整语义元数据，下游零规则直接消费。
+
+**核心改动（`_question_driven_extractor.py` 5 处）**:
+
+| 改动 | 旧 | 新 |
+|------|-----|-----|
+| `_SECTION_DETECTION_PROMPT` | 输出 `{header, line}` | 输出 `{header, line, type_hint, qno_first, qno_last, is_composite, material_shared}` + `answer_section: {exists, line, note}` |
+| `_detect_markdown_sections()` 返回类型 | `list[tuple[str, str]]` | `tuple[list[tuple[str, str]], list[dict]]` |
+| 行号格式 | `L{i}: {stripped}` | `[{i}] {stripped}` — 保留 OCR 原生 `##`/`###` 结构化标签 |
+| LLM 调用参数 | `mode="reasoning"`, `max_tokens=2048`, `timeout=45` | `mode="fast"`, `max_tokens=8192`, `timeout=60` |
+| Composite merge | 7 个中文关键词匹配 → `is_composite_header` | `meta.get("is_composite")` — 零关键词直接消费 |
+| Answer 边界 | `_ANSWER_SECTION_RE` 正则 | `answer_section.line` 从 LLM metadata |
+| QNO 修正 | regex 扫描 body 中 `_QNO_VALIDATION_RE` | `meta.get("qno_first")` 从 LLM metadata |
+
+**已验证消除的硬编码**: 7 个中文关键词（"语法填空"/"选词填空"/"完形填空"/"七选五"/"阅读表达"/"书面表达"/"写作"）+ `_ANSWER_SECTION_RE` 正则。
+
+**验证结果（英语 doc 17 reprocess-qd）**: 56 碎片 → **10 composite 题**: Q1 [cloze] 完形填空、Q11 [grammar_fill] 语法填空、Q21 [word_select] 选词填空、Q31/Q34/Q38/Q42 [reading] 4篇阅读、Q45 [seven_to_five] 七选五、Q50 [writing_read] 阅读表达、Q54 [practical_writing] 写作。
+
+**调试中修复的错误**: `mode="general"` 无效 → `mode="fast"`; `mode="reasoning"` token 截断 → `mode="fast"` + 8192tokens; `_diag_english_sections.py` import 名称修正。
+
+**设计原则确立**（写入 CLAUDE.md）: LLM 负责判断，代码负责执行。Prompt 能解决的不写代码规则。每个环节都必须充分发挥 LLM 的最大能力。
+
+**变更文件**:
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 修改 | 5 处核心改动（prompt 重写 + metadata 架构 + composite merge 重写 + answer boundary LLM 化 + 行号格式） |
+| `_diag_english_sections.py` | 修改 | 适配新返回类型 + `_MD_SECTION_RE` import 修正 |
+| `CLAUDE.md` | 修改 | 新增 §设计原则：LLM 能力最大化 |
+| `LOG.md` | 追加 | 本条目 |
+| `PROJECT_STATUS.md` | 修改 | 版本 1.50.0 + §1/§3.3/§6/§14/§15/§16 更新 |
+| `RESTART_PROMPT.md` | 修改 | 更新至 S#161 |

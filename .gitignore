@@ -99,6 +99,21 @@ backend/tests_archive/
 .coverage.*
 htmlcov/
 
+# ===== A/B comparison test artifacts =====
+backend/ab_compare_output/
+
+# ===== OCR test data =====
+Docs/ocr_after/
+Docs/ocr_before/
+Docs/ocr_sample_*.md
+
+# ===== Debug artifacts =====
+.dbg/
+debug-*.md
+
+# ===== Plans (not core code) =====
+Docs/plans/
+
 # ===== Misc =====
 *.tmp
 *.temp

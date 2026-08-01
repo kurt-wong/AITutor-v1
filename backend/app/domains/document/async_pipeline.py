@@ -488,6 +488,29 @@ class AsyncPipeline(_DocumentProcessing):
             logger.warning("AsyncPipeline worker already running")
             return
 
+        # ── Crash recovery audit (S#158 §7.4.4) ──
+        # Log pending task counts at startup to confirm queue persistence
+        # across restarts.  Tasks survive in Redis; only in-memory worker
+        # state is lost on crash.
+        queue_keys = {
+            "doc": QUEUE_KEY,
+            "enrich": ENRICH_QUEUE_KEY,
+            "explain": EXPLAIN_QUEUE_KEY,
+        }
+        recovery_summary = {}
+        for label, key in queue_keys.items():
+            try:
+                count = await redis_client.llen(key)
+                recovery_summary[label] = count
+            except Exception:
+                recovery_summary[label] = -1  # Redis error
+        logger.info(
+            "Crash recovery audit: doc=%d enrich=%d explain=%d pending tasks",
+            recovery_summary.get("doc", 0),
+            recovery_summary.get("enrich", 0),
+            recovery_summary.get("explain", 0),
+        )
+
         self._running = True
         num_workers = getattr(settings, "PIPELINE_WORKERS", 4)
         # Session #104: 3-queue allocation (doc + enrich + explain).

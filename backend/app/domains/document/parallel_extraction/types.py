@@ -146,6 +146,7 @@ class ParallelExtractionResult:
     paddleocr_job_id: str = ""  # PP-StructureV3 API job ID (for image ZIP download)
     paddleocr_display_formulas: dict[str, list[str]] = field(default_factory=dict)
     paddleocr_tables: list = field(default_factory=list)
+    paddleocr_result: Any | None = None  # Raw PaddleOCRResult with structured pages[].blocks[]
 
     @property
     def full_text(self) -> str:

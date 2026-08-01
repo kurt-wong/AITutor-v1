@@ -1,7 +1,7 @@
 # AI Tutors 系统重启提示词
 
 > **使用方式**：将此文件全部内容复制粘贴给新会话的 Claude/TRAE，即可快速恢复完整工作上下文。
-> **最后更新**: 2026-07-28 Session #137g | **版本**: 1.30.0
+> **最后更新**: 2026-08-01 Session #161 | **版本**: 1.50.0
 
 ---
 
@@ -16,11 +16,11 @@
 | 前端 | React + TypeScript + Ant Design + Vite |
 | 数据库 | PostgreSQL 16 + pgvector + Redis 7 + MinIO (Docker) |
 | OCR | **按学科路由**: 化学→PaddleOCR-VL-1.6，其他→PP-StructureV3（百度星河 submit/poll） |
-| LLM Gateway | MIMO V2.5 Pro (fast) → DeepSeek V4 Pro (reasoning) → Qwen3.5 4B Ollama（三级回退） |
+| LLM Gateway | MIMO V2.5 Pro (fast/text) / MIMO V2.5 (vision) → DeepSeek V4 Pro (reasoning) → Qwen3.5 4B Ollama（三级回退） |
 | 嵌入模型 | qwen3-embedding:4b (Ollama, 2560 维) |
 | 工作目录 | `D:\Project\AI Tutors\backend` |
 
-**权威文档**: `PROJECT_STATUS.md` (状态) · `LOG.md` (历史) · `CLAUDE.md` (规则) · `Docs/02_Architecture/` (架构细节)
+**权威文档**: `PROJECT_STATUS.md` (状态) · `LOG.md` (历史) · `CLAUDE.md` (规则) · `RESTART_PROMPT.md` (本文档)
 
 ---
 
@@ -30,15 +30,21 @@
 # ── 基础设施 ──
 docker compose up -d postgres redis minio    # 端口: 15432 / 16379 / 9000
 
-# ── 后端（重要：修改管线代码后必须手动重启，不要依赖 --reload）──
+# ── 后端（推荐：supervised 模式，崩溃自动重启）──
 cd "D:/Project/AI Tutors/backend"
-taskkill //F //IM python.exe 2>nul            # 先杀残留进程
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python scripts/start_backend.py --supervised   # watchdog 监控 + 健康检查 + 自动重启
+
+# ── 后端（备选：raw uvicorn，仅调试时）──
+taskkill //F //IM python.exe 2>nul
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # ── 前端 ──
 cd "D:/Project/AI Tutors/frontend"
+taskkill //F //IM node.exe 2>nul              # 先杀残留进程（避免端口耗尽）
 npm run dev                                    # 端口: 3000
 ```
+
+> **PowerShell 快捷启动**: `.\start.ps1 -Supervised`（推荐）· `.\start.ps1`（无 reload 无 watchdog）· `.\start.ps1 -Reload`（调试模式）
 
 | 服务 | 端口 | 凭据 |
 |------|------|------|
@@ -48,11 +54,18 @@ npm run dev                                    # 端口: 3000
 | Redis | 16379 | — |
 | MinIO | 9000 | `minioadmin:minioadmin` |
 
-> **关键教训（S#137g）**: uvicorn `--reload` 不可靠。修改管线代码（`_document_pipeline.py`、`async_document.py`）后，旧 worker 进程可能仍在运行旧代码。**必须手动 taskkill + 重启**。
+> **Supervised 模式**: 推荐使用 `start_backend.py --supervised`（health check 每 5s，崩溃后自动重启，最多 10 次，指数退避 5s→60s）。
 >
-> **.pyc 缓存**: 代码修改后 uvicorn `--reload` 可能不生效，需手动清 `app/__pycache__/` 后重启。
+> **关键教训**: uvicorn `--reload` 不可靠。修改管线代码后必须手动 taskkill + 重启（supervised 模式会检测到崩溃并自动重启）。
+>
+> **端口耗尽**: Windows 上多次启动 node/python 进程会导致端口耗尽（ERR_NO_BUFFER_SPACE）。重启前必须 `taskkill //F //IM node.exe` 和 `taskkill //F //IM python.exe` 清理残留进程。`start_backend.py` 内置 `release_port()` 自动清理 TCP TIME_WAIT zombie。
+>
+> **Python 缓存**: 修改 async_document.py 后必须删除 `__pycache__` 目录再重启，否则旧字节码可能被加载。
 
 **.env 关键配置**: `VL_PRIMARY=mimo`, `VL_OCR_MODEL=mimo-v2.5`, `PADDLEOCR_VL_LAYOUT_MODE=api`, `LLM_GATEWAY_MODE=live`, `LLM_ANNOTATION_ENABLED=true`, `PARALLEL_EXTRACTION_ENABLED=true`, `PIPELINE_WORKERS=6`
+
+**DeepSeek API Key**: `sk-96521bea50fb4eac88288e11e4415402`（.env 文件中的 DEEPSEEK_API_KEY）
+**MIMO API Key**: 在 .env 中配置（MIMO_API_KEY）
 
 ---
 
@@ -71,101 +84,178 @@ UI → API → Service → MCP Client → MCP Server → Infra
 
 ---
 
-## 四、管线架构（3 阶段 + 3-queue）
+## 四、管线架构（Session #161 最新状态 — LLM 元数据架构已落地）
+
+### 核心架构：Question-Driven + LLM 语义元数据 + 学科路由
 
 ```
-Phase 1 (doc worker x4): 上传 → OCR(按学科路由) → Markdown 持久化 → LLM 全量提取 → 入库
-Phase 2 (enrich worker x2): knowledge_map → solve → difficulty → embed → explain_enqueue
-Phase 3 (explain worker x2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 → 保存
+所有科目
+  │
+  ▼
+Question-driven markdown extraction ←── LLM 语义识别 section 边界 + 完整元数据
+  │                                   └── _detect_markdown_sections() 返回 type_hint/is_composite/qno_range/material_shared
+  │
+  ├── 成功 → sections_meta 直接驱动 composite merge（零关键词匹配）
+  │         → per-section LLM 提取 → cross-validate → 返回
+  │
+  └── 失败（fallback）
+        ├── vision-first（化学/生物/地理）→ MIMO Vision
+        └── text-first（数学/物理/语文/英语/政治/历史）→ V3 text-mode
 ```
 
-**主路径**: PP-StructureV3 Markdown → LLM 全量提取（`_LLM_ANNOTATION_PROMPT_V3`）→ 入库
-**回退**: LLM 失败 → 正则管线（QuestionStructurer）
+### S#161 LLM 元数据架构（核心设计原则）
+
+```
+旧（规则-driven）:
+  正则 section 切分 → LLM 只输出 {header, line} → 代码靠关键词规则猜合并逻辑
+  └── 问题：LLM 理解了但没资格说出来，下游靠猜测
+
+新（元数据-driven）:
+  LLM 一次输出完整语义元数据 → 代码直接消费，零规则、零猜测
+  └── _detect_markdown_sections() 返回:
+        - sections: [{header, line, type_hint, qno_first, qno_last, is_composite, material_shared}]
+        - answer_section: {exists, line, note}
+```
+
+**关键消除**:
+- 7 个中文关键词硬编码（"语法填空"/"选词填空"/"完形填空"/"七选五"/"阅读表达"/"书面表达"/"写作"）
+- `_ANSWER_SECTION_RE` 正则答案边界检测
+- L0/L1 行号编号（改为 `[0]` 格式，保留 OCR 原始 `##`/`###`）
+
+### 视觉优先学科（`_VISION_FIRST_SUBJECTS`）
+
+定义在 [async_document.py](file:///d:/Project/AI Tutors/backend/app/domains/document/async_document.py)：
+
+```python
+_VISION_FIRST_SUBJECTS = frozenset({
+    "chemistry", "CHEM", "化学",
+    "biology", "BIO", "生物",
+    "geography", "GEO", "地理",
+})
+```
+
+### 关键函数地图
+
+| 函数 | 位置 | 说明 |
+|------|------|------|
+| `_VISION_FIRST_SUBJECTS` | async_document.py | 视觉优先学科路由表 |
+| `_step_llm_annotate()` | async_document.py | **管线入口**：学科路由 + 视觉/文本提取 |
+| `_cross_validate()` | async_document.py | 交叉验证（mode 参数化：fast/vision/reasoning） |
+| `_mimo_vision_extract()` | async_document.py | MIMO Vision 提取主函数 |
+| `_detect_markdown_sections()` | _question_driven_extractor.py | **LLM 语义 section 检测** — 返回 `(sections, metadata)` 双元组 |
+| `extract_questions_from_markdown()` | _question_driven_extractor.py | Markdown 路径主入口（优先路径） |
+| `extract_questions_from_blocks()` | _question_driven_extractor.py | Blocks 路径（PaddleOCR-VL 场景） |
+| `_SUBJECT_COMPREHENSIVE_HINTS` | _question_driven_extractor.py | 各科综合题 LLM prompt hints（辅助，不驱动逻辑） |
+
+### LLM Section Detection Prompt 设计
+
+`_detect_markdown_sections()` LLM 调用参数：
+- `mode="fast"`（结构化 JSON，零 reasoning overhead）
+- `max_tokens=8192`
+- `timeout=60`
+- 输入：完整 OCR markdown（`[0]` 行号格式，保留 `##`/`###` 层级）
+- 输出：`{sections: [...], answer_section: {exists, line, note}}`
 
 ---
 
-## 五、当前状态（Session #137g 结束后）
+## 五、当前状态（Session #161 — LLM 元数据架构完成 + 英语复合题回归修复）
 
-### 已完成的架构修复（S#137c-g）
+### §7.4 服务稳定性（✅ 已实施）
 
-| 修复 | 说明 | 状态 |
-|------|------|:----:|
-| B1 699行拆分 | `DocumentPipeline` 类 + `PipelineContext` 数据类 | ✅ |
-| B2 page_images→finally | `run()` 添加 `finally: _cleanup_temp_files()` | ✅ |
-| B3-B5 API→Service | training/admin/documents API 层 commit 移入 Service | ✅ |
-| B7 MCP→Repository | 13→0 处直接调用 | ✅ |
-| B8 工具互调 | `_map_knowledge_impl()` 共享 helper | ✅ |
-| B10 broad except | llm_server 11→0 处 | ✅ |
-| B13 sse_handler | 新建 `StudentImageService`，MinIO+Splitter 委托 Service | ✅ |
-| B14 N+1 查询 | batch `WHERE IN` | ✅ |
-| subject_id 映射 | `_CN_TO_CODE` 全名匹配 + else 兜底 SQL | ✅ |
-| 知识点跨学科 | 按 subject prefix 过滤 + prompt 加固 | ✅ |
-| PaddleOCR use_gpu | 移除废弃参数 | ✅ |
-| API session.commit | 移入 Service 层 | ✅ |
+**Supervised Watchdog** (`scripts/start_backend.py --supervised`)：
+- 健康检查轮询 `/health`，每 5s
+- 连续 3 次不健康 → kill + restart
+- 指数退避 5s→10s→20s→...（上限 60s），最多 10 次重启
+- `release_port()` 自动清理 TCP TIME_WAIT zombie（最多 120s）
+- 崩溃恢复审计：`start_worker()` 启动时查询 Redis 队列长度
 
-### 管线全流程验证结果（S#137g）
+**已验证**: crash → 8s 内自动恢复，健康端点正常。
 
-- LLM 标注路径正常工作（`source_type=llm_annotation`，21 道题）
-- `subject_id` 21/21 全部为 MATH
-- 知识点映射零跨学科
-- Q#1 正确识别为集合题（不再是封面/须知）
+### §7.5 管线增强（✅ 已实施）
 
-### 待修复质量问题（16 项）
+**QD Preview Endpoint**: `POST /api/documents/{doc_id}/reprocess-qd`
+- 从 DB 读取已存储的 `ocr_markdown`，调用 `extract_questions_from_markdown()` 重新提取
+- 返回标准化 JSON 预览（passage→stem 合并、options 解析、qno 强制转换）
+- 用于快速迭代 QD prompt，无需重新上传 PDF/跑完整管线
 
-**P0 数据丢失**：
-- D1: `max_tokens=65536` 截断丢题 → 改为 131072
-- D2: 漏题不触发重试 → 检测 JSON 完整性 + 末题 stem 长度
-- D3: 答案长度上限 3000 过严 → 改为 8000
-- D4: options 字符串被丢弃 → 兼容字符串格式
+### S#160: Section Detection 正则→LLM 语义化（✅ 已实施）
 
-**P1 渲染错误**：
-- R1-4: LaTeX 预处理 → 复用 LatexFallbackEngine + 补充 LLM 特有规则
+`_detect_markdown_sections()` 从正则关键词切分完全重构为 LLM 语义理解：
+- 历史 0→43 题（100%）
+- 生物 ~7→26 题（100%）
+- 设计原则：Section 检测 = LLM 语义，Answer 边界 = 简单正则，QNO = 辅助校验
 
-**P2 布局问题**：
-- L1-4: 前端布局 → max-width + overflow CSS
+### S#161: LLM 元数据架构落地（✅ 已实施）
 
-### 修复计划
+**背景**: S#160 的 `_detect_markdown_sections()` 仅返回 `{header, line}`，语义信息不足 → S#159 的 composite merge 关键词规则全部失效 → 英语 56 碎片回归。
 
-按优先级顺序：D1(5min) → D3(5min) → D4(10min) → D2(30min) → R1-4(2h) → L1-4(1h)，总计约 4h。
+**重构**: `_detect_markdown_sections()` 返回类型从 `list[tuple]` 扩展为 `tuple[list[tuple], list[dict]]`：
+- `sections_meta[i]`: `{type_hint, qno_first, qno_last, is_composite, material_shared}`
+- `answer_section`: `{exists, line, note}`
+
+**下游消费**: `meta.get("is_composite")` 替代 7 个中文关键词；`answer_section.line` 替代 `_ANSWER_SECTION_RE`。
+
+**验证**: 英语 doc 17: 56 碎片 → **10 composite 题**。
+
+### P0 遗留问题
+
+- **选词填空 section detection 漏检**: LLM 将 选词填空 header 合并到 语法填空 section body，但 per-section LLM 仍正确提取为独立 composite 题（轻微影响，非致命）
+- **9 科全量回归验证**: 英语单科已通过，其余 8 科待重测
+
+### 关键代码指标
+
+- `_question_driven_extractor.py`: ~1400 行（核心 QD 提取逻辑）
+- `_detect_markdown_sections()`: LLM `mode="fast"`, `max_tokens=8192`, `timeout=60`
+- Section metadata 字段: 6 个语义字段 + answer_section 3 个字段
+- 已消除的硬编码: 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则
 
 ---
 
 ## 六、关键代码地图
 
-### async_document.py（核心管线）
+### async_document.py（核心管线，~3500+ 行）
 
-| 代码段 | 行号 | 说明 |
-|--------|------|------|
-| `_LLM_ANNOTATION_PROMPT_V3` | L54-232 | LLM 标注 prompt V3 |
-| `_validate_llm_answer()` | L1091-1099 | 答案长度限制（D3 待修：essay/proof 3000→8000） |
-| `_step_parallel_extract()` | L1886-2223 | 并行提取 + 知识点映射 |
-| `_step_llm_annotate()` | L2227-2625 | LLM 标注（D1 待修：max_tokens 65536→131072） |
-| `_parse_llm_annotation_json()` | L2629-2749 | JSON 解析 4 层回退 |
-| `_check_question_count_sanity()` | L737-742 | QNO 检查（D2 待修：补充 under-count 检测） |
-| L2422-2424 | options 兼容 | D4 待修：字符串→数组转换 |
+| 代码段 | 说明 |
+|--------|------|
+| `_pipeline_checkpoint()` | 管线监控 checkpoint（**sync**—不能 await！） |
+| `_step_llm_annotate()` | **管线入口**：学科路由 + QD blocks → Vision → V3 |
+| `_cross_validate()` | 交叉验证主函数 |
+| `_mimo_vision_extract()` | MIMO Vision 提取主函数 |
+| `_VISION_FIRST_SUBJECTS` | 视觉优先学科 frozenset |
+
+### _question_driven_extractor.py（Question-Driven 提取器，~1400 行）
+
+| 代码段 | 说明 |
+|--------|------|
+| `_detect_markdown_sections()` | **LLM 语义 section 检测** — 返回 `(sections, metadata)` 双元组，元数据含 type_hint/is_composite/qno_range |
+| `extract_questions_from_markdown()` | 从 markdown 文本 LLM 提取（优先路径） |
+| `extract_questions_from_blocks()` | 从 block_label 块组装题目（PaddleOCR-VL 场景） |
+| `_SECTION_DETECTION_PROMPT` | LLM prompt：输出完整语义元数据 + answer_section 边界 |
+| `_SUBJECT_COMPREHENSIVE_HINTS` | 各科综合题 LLM prompt hints（辅助，不驱动逻辑） |
 
 ### _document_pipeline.py（管线编排）
 
-| 代码段 | 行号 | 说明 |
-|--------|------|------|
-| `run()` | L73-87 | 主编排 + finally 清理 |
-| `_extract_route_parallel()` | L264-350 | 并行提取 + LLM 标注条件 |
-| `_cleanup_temp_files()` | L574-581 | B2 修复：finally 块清理 |
+| 代码段 | 说明 |
+|--------|------|
+| `run()` | 主编排 + try/except |
+| `_extract_route_parallel()` | 并行提取 + LLM 标注 |
+| `_store_questions()` | 题目入库 + quality gate |
 
-### LatexFallbackEngine（R1-4 复用目标）
+### 测试脚本
 
-| 文件 | 说明 |
+| 脚本 | 说明 |
 |------|------|
-| `parallel_extraction/latex_fallback.py` | 72 个测试用例，覆盖 Unicode→LaTeX、语法修正 |
-| R1-4 方案 | 复用现有引擎 + 补充 LLM 特有规则（大括号配对、left/right 配对） |
+| `backend/scripts/_run_9subj_test_v2.py` | **当前运行中** — 9 科全量测试（带轮询+逐环节解析） |
+| `backend/scripts/_upload_test.py` | 上传单份测试 PDF |
+| `backend/scripts/reset_test_data.py` | 清库 + 重置序列 |
+| `backend/scripts/9subj_test_v2_partial.json` | 中间结果 JSON |
 
-### MathRenderer.tsx（前端渲染）
+### 清库命令
 
-| 代码段 | 行号 | 说明 |
-|--------|------|------|
-| KaTeX 宏定义 | L64-72 | `\xlongequal`/`\cancel`/`\bcancel`/`\xcancel` 桥接 |
-| 图片渲染 | L27-42 | `![alt](url)` Markdown 图片 |
-| Table 渲染 | L43-51 | GFM pipe table → HTML |
+```bash
+cd "D:/Project/AI Tutors/backend"
+python scripts/reset_test_data.py
+```
 
 ---
 
@@ -173,62 +263,70 @@ Phase 3 (explain worker x2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | Session | 日期 | 内容 |
 |---------|------|------|
-| **#137g** | **07-28** | **全流程测试 + 质量评估**: 管线验证通过（21题/subject_id/knowledge），发现 16 项质量问题（P0x4/P1x5/P2x4/P3x3），修复计划已确认。7 个提交。 |
-| **#137f** | **07-28** | **修复后全量扫描 + TRAE 交叉验证**: 4-Agent 复扫确认 11 项修复，TRAE 纠正 2 处误判。 |
-| **#137e** | **07-28** | **P1-1 KaTeX cancel 宏**: `\cancel`/`\bcancel`/`\xcancel` 桥接实现。 |
-| **#137d** | **07-28** | **B3-B5 架构合规**: training/admin/documents API→Service。 |
-| **#137c** | **07-28** | **B1 拆分**: `_process_document_task` 699行→DocumentPipeline。 |
-| **#137b** | **07-28** | **P2-4 + B9**: 管线静默异常 + PIPELINE_DEBUG 降级。 |
-| **#137** | **07-28** | **代码评估 + 第一批修复**: F1 XSS + P1-3 start.ps1 + F2 SSE + B6 Gateway。 |
-| **#136** | **07-28** | **选项提取三层修复**: OCR 预拆分 + 选项补全 + 阈值放松。 |
-| **#135** | **07-28** | **配图内联渲染**: MathRenderer `![alt](url)` + whole-page guard。 |
-| **#134** | **07-27** | **图片管线贯通**: API markdown.images → MinIO → question_images。 |
-| **#133** | **07-26** | **LaTeX 前端渲染修复**: MathRenderer 2 bug + 15处补充。 |
+| **#161** | **08-01** | **LLM 元数据架构落地**: `_detect_markdown_sections()` 重写为完整语义元数据输出，composite merge 零关键词，answer boundary LLM 判断。英语 56→10 composite 题。消除 7 个中文关键词 + `_ANSWER_SECTION_RE`。 |
+| **#160** | **08-01** | **Section Detection 正则→LLM 语义重构**: 历史 0→43 题、生物 ~7→26 题。 |
+| **#159** | **08-01** | **英语 QD 修复 + 全科推广**: 阅读篇章子切分、composite merge、QNO 修正、9 科 hints。13 题验证通过（后被 S#160 覆盖）。 |
+| **#158** | **07-31** | **QD Extraction 根因分析**: PP-StructureV3 不产出 title label → 8/9 科 QD 返回 None。 |
+| **#157** | **07-31** | **9 科全量测试**: 创建 `_run_9subj_test_v2.py`，9/9 完成。llm_annotate 占比 97.4%。 |
+| **#156** | **07-31** | **语文修正 + 全科 blocks 统一 + 降级链简化** |
+| **#155** | **07-31** | **Question-Driven Pipeline**: 新增 `_question_driven_extractor.py` (~860行)。 |
+| **#154** | **07-31** | 跨科目 QNO 切分影响扫描：5/9 科受负面影响。 |
+| **#153** | **07-31** | 9 科全量测试：英语崩溃、化学 24%、文档规范确立。 |
+| **#152** | **07-31** | Block 提取优化（答案区过滤 + 括号 QNO）。化学 25/25 完美。 |
+| **#151** | **07-31** | Block 结构化提取 Phase 0：MIMO Vision 降为 fallback。 |
+| **#150** | **07-31** | 学科路由 + MIMO Vision 提取。 |
 
 ---
 
 ## 八、给 Claude/TRAE 的工作指令
 
 ```
-继续 AI Tutors 项目。版本 1.30.0。
+继续 AI Tutors 项目。版本 1.50.0。
+
+== 当前重点 ==
+
+S#161 LLM 元数据架构已完成落地：
+- `_detect_markdown_sections()` 返回完整语义元数据（type_hint/is_composite/qno_range/material_shared + answer_section）
+- Composite merge 零关键词匹配，直接消费 `meta.get("is_composite")`
+- Answer 边界由 LLM metadata `answer_section.line` 判断，废弃 `_ANSWER_SECTION_RE` 正则
+- 英语 QD: 56 碎片→10 composite 题，完形+语法+选词+4篇阅读+七选五+阅读表达+写作全部正确
+- 已消除: 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则
+- 后端以 supervised 模式运行（崩溃自动重启，8s 恢复）
+- QD preview 端点可用（POST /api/documents/{id}/reprocess-qd）
+
+P1 待办：
+1. 9 科全量回归 QD 测试（验证 S#161 元数据架构在其他科目的效果）
+2. 选词填空 section detection 漏检优化（LLM 将其合并到语法填空 body）
 
 == 快速恢复步骤 ==
 
-1. 读本文件 §三 架构规则（不可违反）
-2. 读本文件 §四 管线架构
-3. 读本文件 §五 当前状态（待修复质量问题）
-4. 读本文件 §六 关键代码地图
-5. 读 CLAUDE.md 完整规则
+1. 基础设施: `docker compose up -d postgres redis minio`
+2. 后端: `cd backend ; python scripts/start_backend.py --supervised`
+   备选: `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000`
+3. 前端: `cd frontend ; taskkill //F //IM node.exe 2>nul ; npm run dev`
 
-== 当前状态 ==
+== 关键注意事项 ==
 
-架构修复全部完成（S#137c-g），管线全流程验证通过。
-下一步：修复 16 项质量问题，按 D1→D3→D4→D2→R1-4→L1-4 顺序。
-
-== 待修复清单 ==
-
-D1: max_tokens 65536→131072 (async_document.py L2369)
-D3: 答案长度 3000→8000 (async_document.py L1091-1099)
-D4: options 字符串兼容 (async_document.py L2422-2424)
-D2: 漏题重试 (async_document.py L737-742)
-R1-4: LaTeX 预处理 (复用 latex_fallback.py + 补充规则)
-L1-4: 前端布局 (MathRenderer.tsx + pages/*.tsx)
-
-== 关键决策 ==
-
-- max_tokens: 131072（MIMO/DeepSeek 支持 512K 上下文）
-- 答案长度: 暂按 8000
-- LaTeX 预处理: 复用 LatexFallbackEngine + 补充 LLM 特有规则
-- D2 重试: 检测 JSON 完整性 + 末题 stem 异常短（不简单加 under-count 阈值）
-
-== 启动命令 ==
-
-后端: cd "D:/Project/AI Tutors/backend" && taskkill //F //IM python.exe 2>nul && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-前端: cd "D:/Project/AI Tutors/frontend" && npm run dev
-
-== 注意事项 ==
-
-- 修改管线代码后必须手动重启后端（--reload 不可靠）
-- 清库: python -c 执行 TRUNCATE TABLE 循环（见 memory/pipeline-quality-issues.md）
-- 测试 PDF: "2026北京人大附中高一（上）期末数学（教师版）.pdf" 883KB
+- 管线代码修改后必须 kill + restart（supervised 模式会自动重启）
+- QD 提取所有逻辑集中在 `_question_driven_extractor.py`（~1400 行）
+- `_detect_markdown_sections()` 返回双元组：`(sections: list[tuple], metadata: list[dict])`
+- LLM section detection 参数: `mode="fast"`, `max_tokens=8192`, `timeout=60`
+- Section metadata 字段: `type_hint`, `qno_first`, `qno_last`, `is_composite`, `material_shared`
+- Composite merge: `meta.get("is_composite")` — 零关键词、零猜测
+- Answer boundary: `answer_section.line` 从 LLM metadata，不依赖 `_ANSWER_SECTION_RE`
+- 阅读篇章子切分: `_PASSAGE_MARKER_RE` 检测 A/B/C/D 单字母行标记
+- max_chars=30000（从 12000 提升）
+- 空壳 section（< 100 chars）自动过滤
+- `_pipeline_checkpoint()` 是 sync 函数，不能 await
+- 任务日志 timestamp 是 Excel 序列号字符串，需 `float()` 转换
+- 修改 async_document.py 后必须删除 __pycache__ 再重启
+- 端口 8000 被占用时，start_backend.py 会自动 release_port()
+- Redis 队列持久化：crash 后 restart，任务不丢失
 ```
+
+### 新增 API 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/health` | GET | 健康检查（supervised 轮询用） |
+| `/api/documents/{id}/reprocess-qd` | POST | 从 DB 读取 OCR markdown，重新 QD 提取预览 |
