@@ -1265,9 +1265,10 @@ For EACH question, output:
 CRITICAL RULES:
 - stem_lines MUST cover the COMPLETE question stem — sub-questions, blanks, formulas, figure references
 - For composite questions (reading comprehension, cloze, grammar fill):
-  * passage_lines = the FULL shared reading material
-  * stem_lines = ALL sub-questions, blanks, and instructions
-  * Output ONE question object for the ENTIRE composite section
+  * Output ONE question object PER sub-question
+  * All sub-questions in the same composite group share the same passage_lines
+  * Each sub-question has its own stem_lines and options_lines
+  * passage_lines = the FULL shared reading material (same for all sub-questions)
 - For choice questions: options_lines covers A/B/C/D option lines
 - Line numbers refer to the [N] prefixed lines in the input
 - Extract ALL questions — do NOT skip any
@@ -1737,30 +1738,34 @@ async def extract_questions_from_markdown(
         type_hint = meta.get("type_hint", "other")
 
         if is_composite and len(qs) > 1:
-            # Merge over-split questions back into one composite
-            combined_stem_parts = []
-            combined_options = []
+            # ── S#164+: Sub-question preservation ──
+            # LLM outputs one question per sub-question with shared passage_lines.
+            # Group by passage_lines and preserve sub_questions list.
             first_qno = meta.get("qno_first")
+            passage_key = None
             for q in qs:
-                s = (q.get("stem") or "").strip()
-                if s:
-                    combined_stem_parts.append(s)
-                opts = q.get("options") or []
-                combined_options.extend(opts)
-                if first_qno is None and q.get("qno") is not None:
-                    first_qno = q.get("qno")
+                pl = q.get("passage_lines")
+                if pl is not None:
+                    passage_key = tuple(pl) if isinstance(pl, list) else pl
+                    break
+            if first_qno is None:
+                first_qno = qs[0].get("qno")
+
+            # Build composite question with sub_questions
             merged = {
                 **qs[0],
                 "qno": first_qno,
-                "stem": "\n\n".join(combined_stem_parts),
-                "options": combined_options,
+                "qno_last": meta.get("qno_last"),
+                "passage_lines": list(passage_key) if passage_key else None,
+                "stem": qs[0].get("stem", ""),  # keep first sub-question stem as default
+                "sub_questions": qs,  # preserve all sub-questions
             }
             qs = [merged]
             q_count = 1
             logger.info(
-                "QD post-process: merged %d questions → 1 for [%s] "
+                "QD post-process: preserved %d sub-questions for [%s] "
                 "(type=%s, qno_first=%s)",
-                len(combined_stem_parts), header[:60],
+                len(merged["sub_questions"]), header[:60],
                 type_hint, meta.get("qno_first"),
             )
 

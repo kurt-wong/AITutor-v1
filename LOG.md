@@ -11999,3 +11999,112 @@ S#163 Step 1 完成了答案区标注范式，但 QD 提取（`extract_questions
 | 文件 | 类型 | 说明 |
 |------|------|------|
 | `PROJECT_STATUS.md` | 修改 | LX4 状态更新为 ✅ 已修复（S#164） |
+
+---
+
+## Session #165 — 2026-08-02: PaddleOCR-VL-1.6 化学PDF丢页Bug根因定位与修复
+
+### 背景
+
+用户发现化学 PDF（八十中，16 页）通过 PaddleOCR-VL-1.6 解析后只返回了 4 页内容，大量题目缺失。用户质疑：同样的 16 页化学 PDF 之前用 VL 全量识别成功，且百度官方页面试用 VL 也能完整输出，为何管线中只产出 4 页？
+
+### 诊断过程
+
+#### 阶段 1：排除"模型名无效"理论
+- 初步怀疑 `PaddleOCR-VL-1.6` 不是有效模型名（API 文档只记载到 1.5）
+- **用户纠正**：VL-1.6 是最新版本号，文档滞后于产品，官方页面 `https://ai.baidu.com/ai-doc/AISTUDIO/Cmkz2m0ma` 已介绍 VL-1.6
+
+#### 阶段 2：排除"git 回归"理论
+- 执行 `git diff bac42f5` 对比当前代码与基线，`_paddleocr_vl_client.py` 代码无变化
+- 确认不是近期代码改动引入的回归
+
+#### 阶段 3：诊断脚本实测 API 行为
+- 编写 `_diag_paddleocr_vl.py` 直接调用 PaddleOCR-VL-1.6 API
+- 在每次 poll 步骤中打印 `extractProgress`（totalPages / extractedPages）
+- 统计每行 JSONL 中 `layoutParsingResults` 的条目数
+
+**关键发现**：
+- API 层面一切正常：`extractProgress` 确认全部页面处理完成（14/14）
+- **每行 JSONL 包含 4 个 `layoutParsingResults`**（PP-StructureV3 每行只有 1 个）
+- 但我们的 `_parse_jsonl()` 每行只读取 `layout_results[0]`，丢弃了 [1]-[3]
+
+### 根因
+
+**PaddleOCR-VL-1.6 的 JSONL 批处理格式与 PP-StructureV3 不同**：
+
+| 模型 | JSONL 每行 `layoutParsingResults` 数量 | 页面覆盖率 |
+|------|:---:|:---:|
+| PP-StructureV3 | 1 页/行 | 100% |
+| PaddleOCR-VL-1.6 | **~4 页/行**（批处理） | 25%（原代码只取[0]） |
+
+原代码 `_parse_single_page()` 只取 `layout_results[0]`：
+```python
+# 旧代码（Bug）：每行 JSONL 只处理第一个 layoutParsingResults
+lr = layout_results[0]
+# → 14 页的文件，4 行 JSONL × 取[0] → 只产出 4 页
+```
+
+PP-StructureV3 每行正好 1 页 → 取 [0] 刚好正确，所以此 Bug 对非化学科目**完全不可见**。化学走 VL-1.6 时才暴露。
+
+### 修复
+
+**文件**: `backend/app/domains/document/parallel_extraction/_paddleocr_vl_client.py`
+
+#### 1. `_parse_jsonl()` 重构（L433-475）
+
+| 改动 | 旧 | 新 |
+|------|-----|-----|
+| 核心逻辑 | 每行取 `layout_results[0]` → 调用 `_parse_single_page(line)` | 遍历**所有** `layoutParsingResults` → 调用 `_parse_single_layout_result(lr, page_num)` |
+| 页码管理 | 依赖 JSONL 中 `pageNum` 字段（不可靠） | 全局 1-based `page_index`，顺序递增 |
+| 函数签名 | `_parse_single_page(line, line_num)` | 重命名为 `_parse_single_layout_result(lr, page_num)`，接收单个 layoutParsingResults 条目 |
+
+#### 2. `_poll_job()` 新增诊断日志（L263-281）
+
+```python
+# 每次 poll 打印 extractProgress
+ep = d.get("extractProgress", {})
+if ep:
+    logger.debug("PaddleOCR-VL job %s state=%s, totalPages=%s, extractedPages=%s",
+                 job_id, state, ep.get("totalPages"), ep.get("extractedPages"))
+
+# 完成时检查页面完整性
+if state == "done" and ep:
+    total = ep.get("totalPages", 0)
+    extracted = ep.get("extractedPages", 0)
+    if total and extracted and int(extracted) < int(total):
+        logger.warning("PaddleOCR-VL job %s: extractedPages < totalPages — partial result")
+```
+
+#### 3. Bug 修复中发现的测试偏移
+- `test_single_page_with_text_blocks` 期望 `page_num == 1`（1-based）
+- `page_index` 初始值从 0 修正为 1
+
+### 验证
+
+#### 单元测试
+- 16/16 tests pass（全部通过）
+
+#### 端到端 OCR 验证（八十中化学 PDF，14 页）
+
+| 指标 | 修复前 | 修复后 |
+|------|:---:|:---:|
+| 页面数 | **4** | **14** ✓ |
+| 总字符数 | ~5,775 | **25,048** |
+| 总 block 数 | ~60 | **215** |
+| 题干/题目/答案 | 大量缺失 | 全部完整 |
+
+### 经验教训
+
+1. **JSONL 批处理假设不可跨模型共享**：PP-StructureV3 和 PaddleOCR-VL-1.6 虽然都是百度 PaddleOCR 异步 API，使用相同的 submit/poll/download 协议，但 JSONL 响应格式不同。不能假设不同模型版本的响应结构一致。
+2. **API 诊断日志的价值**：`extractProgress` 是官方 API 字段，提供了明确的页面完整性信号。在 `_poll_job()` 中添加此日志后，未来如果再次出现页面丢失，日志会直接显示 `extractedPages < totalPages`。
+3. **跨模型测试覆盖不足**：PP-StructureV3（1 页/行）掩盖了 JSONL 解析器的缺陷。如果当初化学科目（唯一使用 VL-1.6 的科目）有端到端 OCR 页数验证，此 Bug 会更早暴露。
+
+### 变更文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_paddleocr_vl_client.py` | 修改 | `_parse_jsonl()` 遍历所有 layoutParsingResults + `_parse_single_page` → `_parse_single_layout_result` + `_poll_job()` extractProgress 诊断日志 |
+| `_diag_paddleocr_vl.py` | 临时（已删除） | 诊断脚本：直接调用 VL-1.6 API 并逐次 poll 打印 extractProgress |
+| `_verify_chem_fix.py` | 临时（已删除） | 验证脚本：OCR + QD 端到端验证，确认 14 页完整返回 |
+| `LOG.md` | 追加 | 本条目 |
+| `PROJECT_STATUS.md` | 修改 | §6 近期完成 + §16 变更日志追加 |

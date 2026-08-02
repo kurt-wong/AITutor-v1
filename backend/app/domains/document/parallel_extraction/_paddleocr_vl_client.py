@@ -257,10 +257,28 @@ class PaddleOCRVlClient:
                 )
                 response.raise_for_status()
                 data = response.json()
-                state = data.get("data", {}).get("state", "unknown")
-                logger.debug("PaddleOCR-VL job %s state: %s", job_id, state)
+                d = data.get("data", {})
+                state = d.get("state", "unknown")
+
+                # Log extractProgress if available (official API pattern)
+                ep = d.get("extractProgress", {})
+                if ep:
+                    logger.debug(
+                        "PaddleOCR-VL job %s state=%s, totalPages=%s, extractedPages=%s",
+                        job_id, state,
+                        ep.get("totalPages", "?"),
+                        ep.get("extractedPages", "?"),
+                    )
 
                 if state in ("done", "failed", "cancelled"):
+                    if state == "done" and ep:
+                        total = ep.get("totalPages", 0)
+                        extracted = ep.get("extractedPages", 0)
+                        if total and extracted and int(extracted) < int(total):
+                            logger.warning(
+                                "PaddleOCR-VL job %s: extractedPages (%s) < totalPages (%s) — partial result",
+                                job_id, extracted, total,
+                            )
                     return state
 
             except Exception as exc:
@@ -415,19 +433,33 @@ class PaddleOCRVlClient:
     def _parse_jsonl(raw: str) -> list[PaddleOCRPageResult]:
         """Parse PaddleOCR-VL JSONL into PaddleOCRPageResult list.
 
-        Each line is a JSON object:
-          result.layoutParsingResults[].prunedResult.parsing_res_list[]
+        Each JSONL line may contain multiple layoutParsingResults entries
+        (PaddleOCR-VL batches ~4 pages per line, PP-StructureV3 has 1).
+        We iterate ALL entries to avoid silent page loss.
         """
         pages: list[PaddleOCRPageResult] = []
+        page_index = 1  # 1-based sequential page number across all lines
 
         for line_num, line in enumerate(raw.split("\n"), start=1):
             line = line.strip()
             if not line:
                 continue
             try:
-                page = PaddleOCRVlClient._parse_single_page(line, line_num)
-                if page is not None:
-                    pages.append(page)
+                data = _json.loads(line)
+                result = data.get("result", {})
+                layout_results = result.get("layoutParsingResults", [])
+
+                if not layout_results:
+                    continue
+
+                for lr in layout_results:
+                    page = PaddleOCRVlClient._parse_single_layout_result(
+                        lr, page_index,
+                    )
+                    if page is not None:
+                        pages.append(page)
+                        page_index += 1
+
             except Exception as exc:
                 logger.warning(
                     "PaddleOCR-VL: failed to parse line %d: %s",
@@ -443,32 +475,14 @@ class PaddleOCRVlClient:
         return pages
 
     @staticmethod
-    def _parse_single_page(
-        line: str, line_num: int,
+    def _parse_single_layout_result(
+        lr: dict, page_num: int,
     ) -> Optional[PaddleOCRPageResult]:
-        """Parse one JSONL line into a PaddleOCRPageResult."""
-        data = _json.loads(line)
-        result = data.get("result", {})
-        layout_results = result.get("layoutParsingResults", [])
-
-        if not layout_results:
-            return None
-
-        lr = layout_results[0]
+        """Parse one layoutParsingResults entry into a PaddleOCRPageResult."""
         pruned = lr.get("prunedResult", {})
         md_obj = lr.get("markdown", {})
         markdown_text = md_obj.get("text", "") if isinstance(md_obj, dict) else ""
         markdown_images: dict[str, str] = md_obj.get("images", {}) if isinstance(md_obj, dict) else {}  # S#134
-        # S#134/S#147: debug log to logger instead of hardcoded file
-        if line_num == 1 and isinstance(md_obj, dict):
-            _md_keys = list(md_obj.keys())
-            logger.debug(
-                "PaddleOCR-VL: PARSE_PAGE1 markdown keys=%s images_type=%s images_count=%d",
-                _md_keys, type(markdown_images).__name__, len(markdown_images),
-            )
-            if markdown_images:
-                _sample = list(markdown_images.items())[:3]
-                logger.debug("PaddleOCR-VL: PARSE_PAGE1 images sample=%s", _sample)
 
         width = pruned.get("width", 0)
         height = pruned.get("height", 0)
@@ -496,7 +510,7 @@ class PaddleOCRVlClient:
                 block_order=item.get("block_order") or 0,
                 block_id=item.get("block_id") or 0,
                 group_id=item.get("group_id") or 0,
-                page=line_num,
+                page=page_num,
             )
             blocks.append(block)
 
@@ -504,7 +518,7 @@ class PaddleOCRVlClient:
         blocks.sort(key=lambda b: b.block_order if b.block_order is not None else 0)
 
         return PaddleOCRPageResult(
-            page_num=line_num,
+            page_num=page_num,
             width=width,
             height=height,
             blocks=blocks,

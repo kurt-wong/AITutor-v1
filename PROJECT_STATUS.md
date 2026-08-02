@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-08-02 Session #164 (标注范式 Step 3 实施 — QD 题干标注化完成) | **版本**: 1.53.0 | **完成度**: 核心链路 ~98%，整体 ~97%。
+> **最后更新**: 2026-08-02 Session #165 (PaddleOCR-VL-1.6 化学PDF丢页Bug修复) | **版本**: 1.54.0 | **完成度**: 核心链路 ~98%，整体 ~97%。
 >
 > **记录规范（2026-07-31 起严格执行）**：
 > - 本文档 §1-§15 为当前状态快照，可以原地编辑
@@ -253,6 +253,7 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 日期 | Session | 事项 |
 |------|:---:|------|
+| 08-02 | **#165** | **PaddleOCR-VL-1.6 化学PDF丢页Bug根因定位与修复**: VL-1.6 JSONL 每行打包 ~4 个 `layoutParsingResults`（PP-StructureV3 每行 1 个），原代码 `_parse_single_page()` 只取 [0] → 丢 75% 页面。修复：`_parse_jsonl()` 遍历所有条目 + `_parse_single_page` → `_parse_single_layout_result` + `_poll_job()` 新增 `extractProgress` 诊断日志。验证：化学 14/14 页完整返回，25,048 chars（修复前 ~5,775）。详见 LOG.md #165。 |
 | 08-01 | **#163** | **标注范式 Step 1 实施 + 选择题超时修复 + HTML 表格解析 + QD LaTeX 问题暴露**: 答案区标注范式改造完成（LLM 输出行号→代码切原文）。选择题超时根因定位（max_tokens=65536 放大推理模型冗长输出）并修复（mode=fast + max_tokens=16384 + 批量拆分）。HTML 表格答案键解析修复（`_extract_answer_from_row()`）。填空题 QD 提取暴露同样的 LaTeX JSON 问题——annotation 范式只做了一半，Step 3（QD 题干标注化）需提升为 P0。详见 LOG.md #163。 |
 | 08-01 | **#162** | **标注范式架构重构启动**: LaTeX JSON 转义漏洞根因分类（合法/非法转义，全量 5 类）。确立 L0→L1→L2→L3 分层不可变架构。Git 基线 `bac42f5` + 分支 `refactor/annotation-architecture`。4 步重构计划完成方案设计。详见 LOG.md #162。 |
 | 08-01 | **#161** | **LLM 元数据重构完成**: `_detect_markdown_sections()` 重写为 LLM 语义元数据架构（返回 type_hint/is_composite/qno_range）。Composite merge 零关键词匹配，答案边界 LLM 判断。英语 QD 56→10 composite 题。消除 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则。详见 LOG.md #161。 |
@@ -573,7 +574,7 @@ metadata: {sections_used: 0, total_questions_raw: 38}
 |:----:|------|:---:|------|
 | QD1 | **QD Extraction 历史 0 题、生物严重欠提取** | ✅ 已验证 | `_detect_markdown_sections()` 原为正则关键词切分，各科各版标题表述无法穷举。S#160 完全重构为 LLM 语义理解。实测：历史 0→43 题（100%）、生物 ~7→26 题（100%）。 |
 | QD2 | **blocks 路径的 markdown 渲染劣于 PP-StructureV3** | 🔴 已定位 | `_blocks_to_markdown()` 从零渲染：图片→[图]、公式→自己重包、无顶层标题。PP-StructureV3 渲染是规范版本。 |
-| QD3 | **跳转逻辑与本意相反** | 🔴 已定位 | `async_document.py` L3326: 有 blocks 就用 blocks 路径，应该始终优先用 markdown 路径。 |
+| QD3 | **跳转逻辑与本意相反** | ✅ 已修复 | S#158: `async_document.py` L3326 已改为始终使用 `extract_questions_from_markdown`，不再使用 blocks 路径。 |
 
 ### 🔴 P0 — 化学管线（S#146 A/B测试确认方向）
 
@@ -584,6 +585,7 @@ metadata: {sections_used: 0, total_questions_raw: 38}
 | C3 | **B2 image question 全部跳过** | ✅ Claude 已修复 | L3799-3800 保留 image question |
 | C4 | **B4 quality gate 被空 stem 拖低** | ✅ Claude 已修复 | L3759-3763 排除 image question |
 | C5 | **PaddleOCR-VL-1.6 超时（90s）** | ✅ TRAE 已修复 | `_POLL_TIMEOUT` 90s→180s |
+| C6 | **PaddleOCR-VL-1.6 丢页（只返回30%页面）** | ✅ TRAE 已修复 | `_parse_single_page()` 只取 `layout_results[0]`，VL-1.6 每行打包4页→丢75%。修复：`_parse_jsonl()` 遍历所有 `layoutParsingResults` 条目。验证：14/14页完整返回，25,048 chars。 |
 
 **S#146 A/B 测试结论**：
 ```
@@ -1204,3 +1206,37 @@ qd_result = await extract_questions_from_markdown(full_markdown, ...)
 **遗留**: 填空题 QD 提取 LaTeX JSON 问题（Q11-Q15 全部丢失）→ Step 3 需提升为 P0。
 
 **变更文件**: `_question_driven_extractor.py`（~200 行改动）、`LOG.md`、`PROJECT_STATUS.md`、`RESTART_PROMPT.md`
+
+### 2026-08-02 16:00 — S#165: PaddleOCR-VL-1.6 化学PDF丢页Bug根因定位与修复
+
+**版本**: 1.54.0
+
+**核心变更**: 修复 `_parse_jsonl()` 因跨模型 JSONL 批处理格式差异导致的化学 PDF 页面丢失 Bug。PaddleOCR-VL-1.6 每行 JSONL 打包 ~4 页（`layoutParsingResults` 数组长度=4），而 PP-StructureV3 每行 1 页。原代码只取 [0] → 丢 75% 页面。
+
+**诊断过程**:
+1. 排除模型名无效理论（用户纠正：VL-1.6 是最新版本，文档滞后）
+2. 排除 git 回归（`git diff bac42f5` 无变化）
+3. 诊断脚本 `_diag_paddleocr_vl.py` 直接调 API：确认 `extractProgress` 全部页面处理完成（14/14），但每行 JSONL 有 4 个 `layoutParsingResults`
+
+**代码修复**（`_paddleocr_vl_client.py`）:
+| 改动 | 说明 |
+|------|------|
+| `_parse_jsonl()` 重构 | 遍历所有 `layoutParsingResults`，不再只取 [0]；全局 `page_index`（1-based）顺序递增 |
+| `_parse_single_page(line, line_num)` → `_parse_single_layout_result(lr, page_num)` | 函数重命名：接收单个 layoutParsingResults 条目，不再从 line 中取 [0] |
+| `_poll_job()` 新增 `extractProgress` 诊断日志 | 每次 poll 打印 totalPages/extractedPages；done 时如 extracted < total 则 warning |
+
+**验证结果**:
+
+| 指标 | 修复前 | 修复后 |
+|------|:---:|:---:|
+| 页面数 | 4 | **14** ✓ |
+| 总字符数 | ~5,775 | **25,048** |
+| 总 block 数 | ~60 | **215** |
+| 单元测试 | — | 16/16 pass |
+
+**经验教训**:
+- JSONL 批处理假设不可跨模型共享：PP-StructureV3 和 VL-1.6 虽使用相同的 submit/poll/download 协议，但响应格式不同
+- `extractProgress` 是官方 API 字段，可作为页面完整性诊断信号
+- PP-StructureV3（1 页/行）掩盖了此 Bug，化学（唯一使用 VL-1.6 的科目）才暴露
+
+**变更文件**: `_paddleocr_vl_client.py`（3 处修改：`_parse_jsonl` + `_poll_job` + 函数重命名）、`LOG.md`、`PROJECT_STATUS.md`
