@@ -1522,13 +1522,21 @@ async def _detect_markdown_sections(
 
     boundaries.sort(key=lambda s: int(s.get("line", 0)))
 
+    # ── 3b. Code-level QNO boundary recalculation (Direction B) ──
+    # LLM's line numbers are unreliable. Scan all QNOs in the body,
+    # group by continuity, and recalculate actual section boundaries.
+    boundaries = _recalculate_section_boundaries(body_lines, boundaries, answer_start)
+
     sections: list[tuple[str, str]] = []
     sections_meta: list[dict] = []
 
     for idx, section in enumerate(boundaries):
         header = str(section.get("header", f"Section {idx + 1}")).strip()
         start = int(section.get("line", 0))
-        end = int(boundaries[idx + 1]["line"]) if idx + 1 < len(boundaries) else body_len
+        # Use _end if set by recalculation, otherwise use next section's line
+        end = section.get("_end", body_len)
+        if "_end" not in section:
+            end = int(boundaries[idx + 1]["line"]) if idx + 1 < len(boundaries) else body_len
         body = "\n".join(body_lines[start:end]).strip()
 
         if body and len(body.strip()) >= _MIN_SECTION_CHARS:
@@ -1616,6 +1624,186 @@ def _count_questions_in_body(body: str) -> int:
         except ValueError:
             pass
     return len(qnos)
+
+
+def _recalculate_section_boundaries(
+    body_lines: list[str],
+    boundaries: list[dict],
+    answer_start: int | None = None,
+) -> list[dict]:
+    """Code-level QNO boundary recalculation (Direction B).
+
+    LLM's line numbers are unreliable. This function scans all QNOs
+    (question numbers) in the body and recalculates actual section
+    boundaries based on QNO positions.
+
+    Key insight: QNOs in the document are LOCAL (restart at 1 in each
+    section). The algorithm uses the ORDER of sections from LLM (which
+    is usually correct) and finds actual boundaries by scanning for
+    QNO patterns.
+
+    Algorithm:
+    1. Scan body_lines for all QNO markers, record (line_idx, qno)
+    2. For each section, find where it actually starts by looking for
+       the first QNO after the previous section ends
+    3. Update qno_first/qno_last from actual QNOs found in that range
+
+    Args:
+        body_lines: Full document lines (before answer section)
+        boundaries: LLM-detected section boundaries
+        answer_start: Line where answer section begins (skip sections beyond this)
+
+    Returns:
+        Corrected boundaries with accurate line numbers
+    """
+    if not boundaries or not body_lines:
+        return boundaries
+
+    # Use answer_start as the upper bound for question sections
+    max_line = answer_start if answer_start is not None else len(body_lines)
+
+    # ── 1. Scan all QNOs and record positions ──
+    qno_positions: list[tuple[int, int]] = []  # (line_idx, qno)
+    for i, line in enumerate(body_lines):
+        m = re.match(r'\s*(\d{1,3})\s*[.、．]', line)
+        if m:
+            try:
+                qno = int(m.group(1))
+                if 1 <= qno <= 100:
+                    qno_positions.append((i, qno))
+            except ValueError:
+                pass
+
+    if not qno_positions:
+        logger.warning("QD: No QNOs found in body, skipping boundary recalculation")
+        return boundaries
+
+    # ── 2. For each section, find actual QNO range ──
+    # Strategy: Use LLM's section ORDER (usually correct) but find
+    # actual boundaries by scanning QNOs after previous section ends.
+    corrected: list[dict] = []
+    prev_end_line = 0  # Start from beginning
+
+    for section in boundaries:
+        header = section.get("header", "")
+        type_hint = section.get("type_hint", "")
+        llm_qno_first = section.get("qno_first")
+        llm_qno_last = section.get("qno_last")
+
+        # Find QNOs after prev_end_line
+        section_qnos = [
+            (line_idx, qno) for line_idx, qno in qno_positions
+            if line_idx >= prev_end_line
+        ]
+
+        if not section_qnos:
+            # No QNOs left — skip if original line is in answer area
+            orig_line = int(section.get("line", 0))
+            if orig_line >= max_line:
+                logger.info(
+                    "QD boundary recalc: [%s] skipped (no QNOs, line=%d in answer area)",
+                    header[:40], orig_line,
+                )
+                continue
+            corrected.append(section)
+            continue
+
+        # Find the first QNO that could start this section
+        # For local numbering, each section starts with QNO 1
+        # For global numbering, it continues from previous
+        first_qno_in_section = section_qnos[0][1]
+
+        # Determine if this section starts with QNO 1 (local) or continues
+        # by checking if there's a QNO 1 right after prev_end_line
+        candidates = [qno for _, qno in section_qnos[:5]]  # First 5 QNOs
+
+        if 1 in candidates:
+            # Local numbering: section starts at first QNO 1
+            actual_start = min(
+                line_idx for line_idx, qno in section_qnos
+                if qno == 1
+            )
+        else:
+            # Global numbering or continuation: use first QNO found
+            actual_start = section_qnos[0][0]
+
+        # Find where this section ends (next section's start or max QNO)
+        # Look for a jump in QNOs or significant gap
+        actual_qnos_in_section: list[int] = []
+        end_line = max_line  # Default to answer boundary
+
+        for i, (line_idx, qno) in enumerate(section_qnos):
+            actual_qnos_in_section.append(qno)
+
+            # Check if next QNO suggests a new section
+            if i + 1 < len(section_qnos):
+                next_line, next_qno = section_qnos[i + 1]
+
+                # QNO jumped back to 1 or small number (new section)
+                if next_qno < qno and next_qno <= 3:
+                    end_line = next_line
+                    break
+
+                # Large gap in line numbers (possible section break)
+                if (next_line - line_idx) > 30 and next_qno == 1:
+                    end_line = next_line
+                    break
+
+        # Determine actual qno_first and qno_last
+        if actual_qnos_in_section:
+            actual_first = min(actual_qnos_in_section)
+            actual_last = max(actual_qnos_in_section)
+        else:
+            actual_first = llm_qno_first
+            actual_last = llm_qno_last
+
+        # Skip sections where start > end or start is in answer area
+        if actual_start >= end_line or actual_start >= max_line:
+            logger.info(
+                "QD boundary recalc: [%s] skipped (start=%d, end=%d, max=%d)",
+                header[:40], actual_start, end_line, max_line,
+            )
+            continue
+
+        # Clamp end_line to max_line (answer boundary)
+        if end_line > max_line:
+            end_line = max_line
+
+        # Update section with corrected values
+        corrected_section = {
+            **section,
+            "line": actual_start,
+            "_end": end_line,
+            "qno_first": str(actual_first) if actual_first else llm_qno_first,
+            "qno_last": str(actual_last) if actual_last else llm_qno_last,
+        }
+
+        logger.info(
+            "QD boundary recalc: [%s] LLM line=%d→%d, "
+            "qno_first=%s→%s, qno_last=%s→%s",
+            header[:40],
+            section.get("line"), actual_start,
+            llm_qno_first, actual_first,
+            llm_qno_last, actual_last,
+        )
+
+        corrected.append(corrected_section)
+        prev_end_line = end_line
+
+    # ── 3. Ensure _end is set for all sections ──
+    for i in range(len(corrected) - 1):
+        if "_end" not in corrected[i]:
+            corrected[i]["_end"] = int(corrected[i + 1].get("line", 0))
+    if corrected and "_end" not in corrected[-1]:
+        corrected[-1]["_end"] = len(body_lines)
+
+    logger.info(
+        "QD boundary recalculation complete: %d sections, corrected lines: %s",
+        len(corrected),
+        [f"{s.get('header', '?')[:30]}:L{s.get('line')}-{s.get('_end')}" for s in corrected],
+    )
+
+    return corrected
 
 
 def _split_section_into_batches(body: str, batch_size: int = 5) -> list[str]:
@@ -1854,13 +2042,16 @@ async def extract_questions_from_markdown(
         # ── QNO remapping: correct local QNOs using section metadata ──
         # LLM outputs local QNOs (Q1, Q2, ...) within each section.
         # Metadata qno_first/qno_last give the global QNO range from the exam.
-        # For ALL sections (composite or not), remap QNOs using qno_first.
+        # Remap ALL questions, but skip merged composites (sub_questions already set).
         meta_qno_first = meta.get("qno_first")
-        if meta_qno_first is not None and len(qs) > 0 and not is_composite:
-            # Non-composite section: remap Q1→qno_first, Q2→qno_first+1, ...
+        if meta_qno_first is not None and len(qs) > 0:
+            # Remap Q1→qno_first, Q2→qno_first+1, ...
+            # Skip questions that already have sub_questions (merged composites).
             try:
                 offset = int(meta_qno_first) - 1  # Q1 → offset=0
                 for i, q in enumerate(qs):
+                    if q.get("sub_questions"):
+                        continue  # skip merged composites
                     old_qno = q.get("qno")
                     new_qno = str(offset + i + 1)
                     if old_qno != new_qno:
