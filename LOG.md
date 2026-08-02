@@ -11751,3 +11751,228 @@ Claude 提议将答案区提取合并到 `_detect_markdown_sections()` 的一次
 | `_question_driven_extractor.py` | 优化 | 移除 section markdown 30K 截断 + section detection 500→1500 行 |
 
 **现状：开发完成，审查通过，待全链路回归测试。**
+
+---
+
+## Session #162 — 2026-08-01: LaTeX JSON 转义漏洞根因 + 标注范式架构重构启动
+
+### 背景
+
+生产流程报告：答案提取步骤因 `Invalid \escape` 错误 FAILED。根因是 LLM 在 JSON 输出中输出 LaTeX 命令（如 `\frac`、`\sqrt`），反斜杠在 JSON 字符串中需转义为 `\\frac`，但 LLM 经常忘记转义。
+
+### LaTeX JSON 转义漏洞分类
+
+| LaTeX | JSON 行为 | 后果 |
+|-------|----------|------|
+| `\frac` → `\f` | **合法转义**（formfeed） | **静默损毁内容** — 解析层无法检测 |
+| `\times` → `\t` | **合法转义**（tab） | **静默损毁内容** — 解析层无法检测 |
+| `\sqrt` → `\s` | 非法转义 | 抛异常 `Invalid \escape` |
+| `\cdot` → `\c` | 非法转义 | 抛异常 |
+| `\pm` → `\p` | 非法转义 | 抛异常 |
+
+**Session #92 历史教训**：`\frac` 和 `\times` 的静默损毁是关键限制——`LOG.md` L2679 明确记录：这两种情况"无法在解析层修复——需从 prompt 层要求 LLM 正确转义"。
+
+### 架构讨论：标注范式 vs 改写范式
+
+当前 `_extract_answers_from_section()` 的 prompt（L1071-1091）让 LLM 把答案和解析原文**抄写到 JSON 值**中（改写范式）：
+```json
+{"items": [{"qno": 1, "answer": "A", "explanation": "由 $\\frac{1}{2}$ 得..."}]}
+```
+
+用户明确指出正确架构：**LLM 只应"标注"（输出行号/偏移量），绝不应"改写"（抄写原文内容）**。这引出了完整的 L0→L1→L2→L3 分层不可变架构：
+
+```
+L0  PDF 存档     →  原始 PDF，永久不可变
+L1  OCR 存档     →  PP-StructureV3 生成的 markdown，永久不可变
+L2  标注镜像     →  所有 LLM 工作发生在这里（仅输出行号/偏移量元数据）
+L3  前端渲染     →  从 L1 + L2 组合渲染（L1 内容 + L2 标注位置）
+```
+
+**核心原则**：L0/L1 不可变，L2 可重建。所有 LLM 输出中 JSON 仅含整数（行号），绝不包含 LaTeX 字符串。
+
+### Git 基线与分支建立
+
+```
+main:                              bac42f5 (baseline commit, 23 files / 15K lines)
+refactor/annotation-architecture:  bac42f5 (活跃开发分支)
+Remote:                            https://github.com/kurt-wong/AITutor
+```
+
+**基线内容**：排除所有测试数据（`ab_compare_output/`、`ocr_after/`、`ocr_before/`、`.dbg/`、`Docs/plans/`），仅保留核心架构和代码。
+
+### 4 步架构重构计划
+
+| Step | 内容 | 文件 | 预计行数 |
+|:---:|------|------|:---:|
+| **1** | **答案区标注范式改造** — `_extract_answers_from_section()` 从"输出内容 JSON"改为"输出行号范围 JSON"，代码从 OCR 原文切出内容。**同时消灭 LaTeX 转义漏洞。** | `_question_driven_extractor.py` | ~80 |
+| 2 | 标注镜像库 — 新建 `question_annotations` 表 + `annotation_repository.py`，持久化 L2 行号元数据 | 新文件 + migration | ~200 |
+| 3 | QD 题干提取标注化 — `extract_questions_from_section()` prompt 改为输出行号范围 | `_question_driven_extractor.py` | ~300 |
+| 4 | 前端切换 — 从 L1 + L2 组合渲染，取代从 DB 字段直接读取 | 前端 5 文件 | ~200 |
+
+**Step 1 关键设计**：返回值 shape 完全不变（仍是 `list[dict]` with `qno/answer/explanation`），只改变内容来源（从"LLM 抄写"变为"代码按行号从 OCR 原文切出"）。因此下游零改动，风险可控。
+
+### 变更文件（本次仅为文档更新）
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `.gitignore` | 修改 | 新增排除测试数据目录（`ab_compare_output/`、`ocr_after/`、`ocr_before/`、`.dbg/`、`Docs/plans/` 等） |
+| `LOG.md` | 追加 | 本条目 |
+| `PROJECT_STATUS.md` | 修改 | 版本 1.50.0→1.51.0 + 标注架构状态 |
+| `RESTART_PROMPT.md` | 修改 | 标注架构重构上下文 |
+
+### 下一步
+
+Step 1 代码实施（`_extract_answers_from_section()` 标注范式改造），由 Claude 在新的 `refactor/annotation-architecture` 分支上执行。
+
+---
+
+## Session #163 — 2026-08-01: 标注范式 Step 1 实施 + 选择题超时修复 + HTML 表格答案解析
+
+### 背景
+
+Session #162 的 4 步架构重构计划 Step 1 正式实施。实施过程中遇到选择题超时、HTML 表格答案识别失败、QNO 映射丢失等连环问题，经多轮迭代后选择题 Q1-Q10 全部通过，但填空题 QD 提取暴露新 LaTeX JSON 问题。
+
+### Step 1 实施：答案区标注范式
+
+**文件**: `_question_driven_extractor.py`
+
+**核心改动**:
+| 改动 | 旧 | 新 |
+|------|-----|-----|
+| `_ANSWER_EXTRACTION_PROMPT` | LLM 输出答案内容和解析原文 | LLM 输出 `{qno, answer_line, explanation_lines}` 行号范围 |
+| `_extract_answers_from_section()` | LLM 抄写答案字符串到 JSON | 代码按行号从 OCR 原文切出内容 |
+| `_extract_line()` | — | 新增：按行号 ±1 tolerance 提取原文行 |
+| `_extract_lines_range()` | — | 新增：按起止行号提取多行原文 |
+
+**设计原则**: LLM 仅输出行号/偏移量整数元数据，JSON 中绝不包含 LaTeX 字符串。返回值 shape 完全不变（`[{"qno": int, "answer": str, "explanation": str}]`），下游零改动。
+
+### 选择题超时根因与修复
+
+**现象**: 10 道选择题的 answer extraction 超时（120s）。
+
+**根因诊断**（TRAE 独立分析）:
+- `max_tokens=65536`（DeepSeek reasoning 默认值）允许 LLM 输出 8K-15K tokens
+- 65536 max_tokens 放大了 reasoning 模型的冗长输出倾向
+- 实际 root cause 不是 section 大小，而是 max_tokens 过大导致 generation 时间指数增长
+
+**修复**:
+| 改动 | 说明 |
+|------|------|
+| `mode="reasoning"` → `mode="fast"` | DeepSeek V4 Flash → MIMO V2.5 Pro（更快的 API） |
+| `max_tokens=65536` → `max_tokens=16384` | 限制输出长度，消除冗长 generation |
+| 选择题 section 批量拆分 | 新增 `_count_questions_in_body()` + `_split_section_into_batches()`，>5 题拆为 batches of 5 |
+| `max_tokens=8192` (answer extraction) | 答案区标注调用独立 max_tokens |
+
+**验证**: 21 题全部提取，无超时。
+
+### HTML 表格答案解析修复
+
+**现象**: 选择题 Q1-Q10 答案全部被 validation 拒绝（Rule 3 长度超限：choice max 10 chars，实际 332 chars）。
+
+**根因**: OCR 输出的答案键是 HTML 表格格式：
+```html
+<table>
+  <tr><td>题号</td><td>1</td>...<td>10</td></tr>
+  <tr><td>答案</td><td>A</td>...<td>B</td></tr>
+</table>
+```
+旧逻辑 `_extract_line()` 返回整行 HTML → 332 chars → 校验拒绝。
+
+**修复**: 新增 `_extract_answer_from_row()` 函数（L1146-1206）：
+1. 按 `<tr>` 拆分表格行
+2. 找到包含"答案"/"Answer"/"answer"的行
+3. 从该行提取 `<td>` 单元格
+4. 按 `qno_in_section.index(qno) + 1` 索引取对应值
+5. 兜底：无"答案"行时用最后一行
+
+**验证**: 选择题 Q1-Q10 答案全部正确（A/D/B/A/B/C/D/C/C/B）。
+
+### 当前状态（测试结果）
+
+| QNO | 答案 | 状态 |
+|:---:|------|:---:|
+| Q1-Q10 | A/D/B/A/B/C/D/C/C/B | ✅ HTML 表格解析修复生效 |
+| Q11-Q15 | — | ❌ 填空题 section JSON 解析失败（`Invalid \escape`）→ 5 题全部丢失 |
+| Q16-Q20 | 部分正确 | 🟡 |
+| Q21 | — | ❌ 答案缺失 |
+
+### 待解决问题
+
+| 问题 | 优先级 | 根因 |
+|------|:---:|------|
+| **填空题 QD 提取 LaTeX JSON** | **P0** | MIMO fast 模式也会输出未转义 LaTeX（`\sqrt→\s`），导致整个 section 的 `json.loads` 失败 → 5 题全丢。这说明 LaTeX JSON 问题不仅在答案区，**QD 提取（`extract_questions_from_section`）同样存在**。 |
+| Q19-Q21 答案缺失 | P1 | 可能为同样原因，或标注覆盖不足 |
+| 详解仍为 LLM 生成 | P2 | 非 OCR 原文 |
+
+### 关键认知
+
+**annotation 范式只做了一半**: Step 1 改造了答案提取（`_extract_answers_from_section`），但 QD 提取（`extract_questions_from_section`，即 stem/options/answer 的结构化提取）仍使用"改写范式"——LLM 把 LaTeX 抄写到 JSON 值中 → 同样的转义漏洞。
+
+**下一步**: Step 3（QD 题干标注化）应从"后续"提升为**当前 P0**。将 `extract_questions_from_section()` 也改为 annotation 范式，LLM 仅输出 stem/options/explanation 的行号范围，彻底消灭 LaTeX JSON 转义问题。
+
+### 变更文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 修改 | Step 1 答案区标注范式（~200 行改动）：`_ANSWER_EXTRACTION_PROMPT` 重写 + `_extract_answers_from_section()` 重写 + `_extract_line()`/`_extract_lines_range()`/`_extract_answer_from_row()` 新增 + `_count_questions_in_body()`/`_split_section_into_batches()` 新增 + mode/max_tokens 调整 |
+| `LOG.md` | 追加 | 本条目 |
+| `PROJECT_STATUS.md` | 修改 | 版本 1.52.0 + Step 1 状态更新 + 已知问题更新 |
+| `RESTART_PROMPT.md` | 修改 | 版本 1.52.0 + Step 1 完成 + Step 3 P0 提升
+## Session #164 — 2026-08-02: 标注范式 Step 3 实施（QD 题干标注化）
+
+### 背景
+
+S#163 Step 1 完成了答案区标注范式，但 QD 提取（`extract_questions_from_section()`）仍使用"改写范式"——LLM 将 LaTeX 抄写到 JSON 值中 → `json.loads` 失败（`Invalid \escape: \s`）→ 填空题 Q11-Q15 全部丢失。
+
+**根因**: MIMO fast 模式也会输出未转义 LaTeX（`\sqrt→\s`），导致整个 section 的 JSON 解析失败。
+
+**解决方案**: 将 `extract_questions_from_section()` 也改为 annotation 范式，LLM 仅输出行号范围，代码从 OCR 原文按行号切出内容。
+
+### 修改
+
+#### 1. 新增 `_QD_ANNOTATION_EXTRACTION_PROMPT`（annotation 范式 prompt）
+- LLM 输出 `{questions: [{qno, type, passage_lines, stem_lines, options_lines, answer_lines, explanation_lines, score, knowledge_points}]}`
+- JSON 中仅含整数行号，永不包含 LaTeX 字符串
+- 支持 composite questions（reading comprehension, cloze, grammar fill）
+
+#### 2. 新增辅助函数
+- `_extract_text_from_lines(lines, line_range)`: 从单个 `[start, end]` 范围提取内容
+- `_extract_multiple_ranges(lines, ranges)`: 从多个 `[start, end]` 范围提取内容并拼接
+
+#### 3. 重写 `extract_questions_from_section()`（annotation 范式）
+- 将 markdown 按行分割，添加行号 `[N]` 格式
+- 使用 `_QD_ANNOTATION_EXTRACTION_PROMPT` 调用 LLM
+- LLM 返回行号范围后，从原始 markdown 切出内容
+- 返回值 shape 不变，下游零改动
+- 保留 mode/max_tokens 分层：简单题 `mode="fast"`, `max_tokens=8192`；复杂题 `mode="reasoning"`, `max_tokens=16384`
+
+### 验证
+
+- Python 语法检查：✅ 通过
+- Helper 函数单元测试：✅ 全部通过（`test_qd_annotation.py`）
+- LaTeX 保留测试：✅ `$\sqrt{x}$` 完整保留
+
+### 关键优势
+
+**annotation 范式彻底消灭 LaTeX JSON 转义问题**：
+- 旧范式：LLM 输出 `{"stem": "已知 $\sqrt{x}$ ..."}>` → JSON 解析失败
+- 新范式：LLM 输出 `{"stem_lines": [5, 12]}` → 代码从原文切出 → LaTeX 完整保留
+
+### 当前状态
+
+| Step | 内容 | 状态 |
+|:---:|------|:---:|
+| 1 | 答案区标注范式 | ✅ 已完成（S#163） |
+| 2 | 标注镜像库 | ⏳ 待设计 |
+| 3 | QD 题干标注化 | ✅ 已完成（S#164） |
+| 4 | 前端渲染切换 | ⏳ 待设计 |
+
+### 变更文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 修改 | Step 3 QD 题干标注化（~150 行改动）：`_QD_ANNOTATION_EXTRACTION_PROMPT` 新增 + `_extract_text_from_lines()`/`_extract_multiple_ranges()` 新增 + `extract_questions_from_section()` 重写为 annotation 范式 |
+| `test_qd_annotation.py` | 新增 | Annotation 范式单元测试脚本 |
+| `LOG.md` | 追加 | 本条目 |
+| `PROJECT_STATUS.md` | 修改 | 版本 1.53.0 + Step 3 状态更新 |
+| `RESTART_PROMPT.md` | 修改 | 版本 1.53.0 + Step 3 完成 + 待办事项更新 |

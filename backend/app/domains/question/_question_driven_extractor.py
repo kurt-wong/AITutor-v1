@@ -698,6 +698,10 @@ async def extract_questions_from_section(
 ) -> tuple[list[dict], dict[str, Any]]:
     """Call LLM to extract questions from a single section's markdown.
 
+    ANNOTATION PARADIGM (S#163 Step 3): LLM outputs line number ranges,
+    code extracts content from OCR original. This avoids LaTeX escape
+    issues in JSON completely.
+
     Args:
         section_markdown: Complete section text rendered as markdown.
         subject_code: Subject identifier (e.g. "english", "chinese").
@@ -708,30 +712,54 @@ async def extract_questions_from_section(
         (questions, validation_report) where questions is a list of
         question dicts and validation_report is the QNO validation result.
     """
-    system_prompt = _build_extraction_system_prompt(subject_code)
+    # Split into lines for line-number annotation
+    raw_lines = section_markdown.split("\n")
 
-    # Build full prompt
-    full_prompt = (
-        f"{system_prompt}\n\n"
-        f"## Exam Section Text\n"
-        f"```\n{section_markdown}\n```"
-    )
+    # Build condensed text with line numbers [N] for LLM
+    condensed: list[str] = []
+    for i, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if stripped:
+            condensed.append(f"[{i}] {stripped}")
+
+    if not condensed:
+        logger.warning("Section [%s] has no content lines", section_label or "unnamed")
+        return [], {"status": "empty", "section": section_label}
+
+    condensed_text = "\n".join(condensed)
+
+    # Build full prompt with annotation paradigm
+    full_prompt = f"{_QD_ANNOTATION_EXTRACTION_PROMPT}\n\n```\n{condensed_text}\n```"
 
     try:
         from app.gateway.router import llm_gateway
 
         logger.info(
-            "Extracting questions from section [%s] (%d chars)",
+            "Extracting questions from section [%s] (%d chars, %d lines)",
             section_label or "unnamed",
             len(section_markdown),
+            len(condensed),
         )
+
+        # S#163: Layered model selection by section complexity
+        # Simple sections (choice/fill) → MIMO fast (low latency)
+        # Complex sections (essay/reading/calculation) → DeepSeek reasoning (quality)
+        is_simple = subject_code in ("choice", "fill") or (
+            section_label and any(kw in section_label for kw in ["选择", "填空", "choice", "fill"])
+        )
+        if is_simple:
+            mode = "fast"
+            max_tokens = 8192
+        else:
+            mode = "reasoning"
+            max_tokens = 16384
 
         result = await asyncio.wait_for(
             llm_gateway.generate(
-                mode="reasoning",  # DeepSeek for complex extraction
+                mode=mode,
                 prompt=full_prompt,
                 response_format={"type": "json_object"},
-                max_tokens=65536,  # P0: prevent JSON truncation for large sections (was 4096 default)
+                max_tokens=max_tokens,
             ),
             timeout=timeout,
         )
@@ -760,8 +788,24 @@ async def extract_questions_from_section(
         )
         return [], {"status": "error", "section": section_label, "error": str(exc)}
 
-    questions = _parse_llm_questions(raw)
-    if not questions:
+    # Parse LLM response (annotation format with line numbers)
+    try:
+        parsed = _json.loads(_clean_json(raw))
+        questions_data = parsed.get("questions", [])
+        if not questions_data:
+            # Try to find any list value
+            for val in parsed.values():
+                if isinstance(val, list) and val and isinstance(val[0], dict):
+                    questions_data = val
+                    break
+    except (_json.JSONDecodeError, TypeError) as e:
+        logger.warning(
+            "Failed to parse LLM annotation response for section [%s]: %s",
+            section_label or "unnamed", e
+        )
+        return [], {"status": "parse_error", "section": section_label, "error": str(e)}
+
+    if not questions_data:
         logger.warning(
             "LLM returned no parseable questions for section [%s]",
             section_label or "unnamed",
@@ -770,16 +814,16 @@ async def extract_questions_from_section(
 
     # Validate against regex QNO
     extracted_qnos = [
-        q.get("qno") for q in questions
+        q.get("qno") for q in questions_data
         if q.get("qno") is not None
     ]
     validation = validate_qnos(
         section_markdown, extracted_qnos, section_label,
     )
 
-    # Normalize question dicts
+    # Normalize question dicts — extract content from line numbers
     normalized = []
-    for q in questions:
+    for q in questions_data:
         qno = q.get("qno")
         try:
             qno = int(qno) if qno is not None else None
@@ -787,24 +831,26 @@ async def extract_questions_from_section(
             qno = None
 
         qtype = q.get("type", "calculation")
-        passage = (q.get("passage") or "").strip()
-        stem = (q.get("stem") or "").strip()
-        # Merge passage into stem for composite questions
+
+        # Extract content from line number ranges (ANNOTATION PARADIGM)
+        passage = _extract_text_from_lines(raw_lines, q.get("passage_lines"))
+        stem = _extract_text_from_lines(raw_lines, q.get("stem_lines"))
+        options_raw = _extract_multiple_ranges(raw_lines, q.get("options_lines"))
+        answer = _extract_text_from_lines(raw_lines, q.get("answer_lines"))
+        explanation = _extract_text_from_lines(raw_lines, q.get("explanation_lines"))
+
+        # Merge passage into stem for composite questions (same as before)
         if passage and stem:
             stem = passage + "\n\n" + stem
         elif passage:
             stem = passage
-        
-        options = q.get("options") or []
-        if isinstance(options, str):
-            try:
-                options = _json.loads(options)
-            except (_json.JSONDecodeError, TypeError):
-                options = [options] if options.strip() else []
-        if not isinstance(options, list):
-            options = []
-        options = [str(o).strip() for o in options if o and str(o).strip()]
-        answer = (q.get("answer") or "").strip()
+
+        # Parse options from extracted text
+        options = []
+        if options_raw:
+            # Split by newlines and clean
+            option_lines = [o.strip() for o in options_raw.split("\n") if o.strip()]
+            options = option_lines
 
         # S#162: Normalize Unicode subscripts/superscripts → LaTeX
         stem = _normalize_unicode_math(stem)
@@ -818,14 +864,14 @@ async def extract_questions_from_section(
             "stem": stem,
             "options": options,
             "answer": answer,
-            "explanation": str(q.get("explanation", "")).strip(),
+            "explanation": explanation,
             "score": q.get("score"),
             "difficulty": None,
             "knowledge_points": q.get("knowledge_points", []),
         })
 
     logger.info(
-        "Section [%s]: extracted %d questions, validation=%s",
+        "Section [%s]: extracted %d questions (annotation mode), validation=%s",
         section_label or "unnamed",
         len(normalized),
         validation["status"],
@@ -1068,27 +1114,298 @@ Return ONLY this JSON structure:
 {"sections": [...], "answer_section": {...}}"""
 
 
-_ANSWER_EXTRACTION_PROMPT = """You are parsing an exam's "参考答案" (answer key) section.
+_ANSWER_EXTRACTION_PROMPT = """You are locating answers in an exam's "参考答案" (answer key) section.
 
-The text contains answers for ALL question types:
-- Choice answers: may be HTML table, "1-5 ABCDB" range notation, "1.A 2.B" list, or inline
-- Fill-in answers: "NN.【答案】value" format
-- Essay answers: "NN.【答案】value【分析】...【详解】..." format
+The input text has line numbers like [0], [1], [2]... at the start of each line.
+Your task: for EACH question, find which lines contain its answer and explanation.
+DO NOT copy content — only output LINE NUMBERS.
 
-Extract EVERY question's answer and explanation. For choice questions, the
-explanation is typically empty. For fill-in/essay questions, extract 【分析】
-and/or 【详解】 content as explanation.
+For choice questions:
+- The answer is typically a single letter (A/B/C/D) in a table or list
+- Set answer_line to the line containing that letter
+- explanation_lines is null (no explanation for choices)
+
+For fill-in/essay questions:
+- The answer follows 【答案】 marker
+- The explanation follows 【分析】 and/or 【详解】 markers
+- explanation_lines covers from 【分析】/【详解】 to the next question or section end
 
 Return a JSON object:
-{"items": [{"qno": 1, "answer": "A", "explanation": ""}, {"qno": 11, "answer": "[-2,0)∪(0,+∞)", "explanation": "由题意，得..."}, ...]}
+{"items": [
+  {"qno": 1, "answer_line": 3, "explanation_lines": null},
+  {"qno": 11, "answer_line": 8, "explanation_lines": [9, 15]},
+  ...
+]}
 
 Rules:
-- qno must be integer
-- answer is the final answer (choice letter, value, or expression)
-- explanation contains analysis/solution steps if present, empty string if not
-- Extract ALL questions, do not skip any
-- For HTML table answers: map column position to question number
-- For "1-5 ABCDB" format: expand to individual qno→answer pairs"""
+- qno: question number (integer)
+- answer_line: line number [N] where the answer is (single integer)
+- explanation_lines: [start, end] line numbers inclusive, or null if no explanation
+- Line numbers refer to the [N] prefixed lines in the input
+- Extract ALL questions — do not skip any
+- For HTML table answers: the answer line is the row containing the answer value
+- For "1-5 ABCDB" format: each letter maps to its own qno with answer_line pointing to that letter
+- NEVER output content strings — only integers and null"""
+
+
+def _extract_line(lines: list[str], line_num: int, tolerance: int = 1) -> str:
+    """Extract content from a specific line number with tolerance.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        line_num: The [N] line number from LLM output.
+        tolerance: Allowed deviation from exact line number.
+
+    Returns:
+        Stripped content of the matched line, or empty string.
+    """
+    if line_num < 0 or line_num >= len(lines):
+        return ""
+    # Try exact match first
+    content = lines[line_num].strip()
+    if content:
+        return content
+    # Try within tolerance
+    for offset in range(1, tolerance + 1):
+        for delta in [offset, -offset]:
+            idx = line_num + delta
+            if 0 <= idx < len(lines):
+                content = lines[idx].strip()
+                if content:
+                    return content
+    return ""
+
+
+def _extract_answer_from_row(
+    row_text: str, qno: int, qno_in_section: list[int]
+) -> str:
+    """Extract a single answer from an HTML table row.
+
+    When the answer line is an HTML table containing multiple answers
+    (e.g., choice answer table with header row + answer row), extract
+    the specific cell for this qno from the answer row.
+
+    Args:
+        row_text: The full row text (may be HTML table or plain text).
+        qno: The question number to extract answer for.
+        qno_in_section: Ordered list of all qnos in this section.
+
+    Returns:
+        The specific answer for this qno, or the original row_text if
+        extraction fails.
+    """
+    if not row_text:
+        return ""
+
+    # Check if this is HTML with <td> tags
+    if "<td" not in row_text.lower():
+        return row_text
+
+    # Find the answer row (contains "答案" or "Answer")
+    # Split by <tr> to get individual rows
+    tr_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
+    rows = tr_pattern.findall(row_text)
+
+    answer_cells = None
+    for tr_content in rows:
+        # Check if this row contains "答案" or "Answer" marker
+        if re.search(r'答案|Answer|answer', tr_content, re.IGNORECASE):
+            # Extract cells from this answer row
+            cells = re.findall(r'<td[^>]*>(.*?)</td>', tr_content, re.DOTALL | re.IGNORECASE)
+            if cells:
+                answer_cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+                break
+
+    # Fallback: if no "答案" row found, use the LAST row (usually the answer row)
+    if answer_cells is None and rows:
+        last_row = rows[-1]
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', last_row, re.DOTALL | re.IGNORECASE)
+        if cells:
+            answer_cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+
+    if answer_cells is None:
+        return row_text
+
+    # First cell is the header label ("答案"), skip it
+    # Find the position of this qno in the section
+    try:
+        idx = qno_in_section.index(qno)
+        answer_idx = idx + 1  # +1 because first cell is the header label
+        if answer_idx < len(answer_cells):
+            return answer_cells[answer_idx]
+    except ValueError:
+        pass
+
+    return row_text
+
+
+def _extract_lines_range(
+    lines: list[str], start: int, end: int, tolerance: int = 1
+) -> str:
+    """Extract content from a range of line numbers with tolerance.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        start: Start line number (inclusive).
+        end: End line number (inclusive).
+        tolerance: Allowed deviation for start/end boundaries.
+
+    Returns:
+        Joined content of the line range, stripped.
+    """
+    if start > end:
+        return ""
+    # Clamp to valid range
+    start = max(0, start)
+    end = min(len(lines) - 1, end)
+    content = "\n".join(lines[start:end + 1]).strip()
+    if content:
+        return content
+    # Try with tolerance on boundaries
+    for t in range(1, tolerance + 1):
+        s = max(0, start - t)
+        e = min(len(lines) - 1, end + t)
+        content = "\n".join(lines[s:e + 1]).strip()
+        if content:
+            return content
+    return ""
+
+
+def _extract_question_lines(
+    lines: list[str], ranges: list | None, tolerance: int = 1
+) -> str:
+    """Extract content from a list of [start, end] line ranges.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        ranges: List of [start, end] inclusive ranges, or None.
+        tolerance: Allowed deviation for boundary lines.
+
+    Returns:
+        Joined content of all ranges, stripped.
+    """
+    if not ranges:
+        return ""
+    parts: list[str] = []
+    for r in ranges:
+        if isinstance(r, list) and len(r) == 2:
+            part = _extract_lines_range(lines, int(r[0]), int(r[1]), tolerance)
+            if part:
+                parts.append(part)
+    return "\n\n".join(parts)
+
+
+def _extract_text_from_lines(
+    lines: list[str], line_range: list | None, tolerance: int = 1
+) -> str:
+    """Extract content from a single [start, end] line range.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        line_range: [start, end] inclusive range, or None.
+        tolerance: Allowed deviation for boundary lines.
+
+    Returns:
+        Stripped content of the range, or empty string.
+    """
+    if not line_range or not isinstance(line_range, list) or len(line_range) != 2:
+        return ""
+    return _extract_lines_range(lines, int(line_range[0]), int(line_range[1]), tolerance)
+
+
+def _extract_multiple_ranges(
+    lines: list[str], ranges: list | None, tolerance: int = 1
+) -> str:
+    """Extract content from multiple [start, end] line ranges and join them.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        ranges: List of [start, end] inclusive ranges, or None.
+        tolerance: Allowed deviation for boundary lines.
+
+    Returns:
+        Joined content of all ranges, stripped.
+    """
+    if not ranges:
+        return ""
+    parts: list[str] = []
+    for r in ranges:
+        if isinstance(r, list) and len(r) == 2:
+            part = _extract_lines_range(lines, int(r[0]), int(r[1]), tolerance)
+            if part:
+                parts.append(part)
+    return "\n\n".join(parts)
+
+
+_QUESTION_ANNOTATION_PROMPT = """You are locating question content in an exam section's OCR text.
+
+The text has line numbers like [0], [1], [2]... at the start of each line.
+Your task: for EACH question, find which lines contain its stem, options, answer, and explanation.
+DO NOT copy or rewrite content — only output LINE NUMBERS.
+
+For EACH question, output:
+- qno: question number (integer)
+- type: question type (choice/multi_choice/fill/calculation/proof/essay/etc.)
+- stem_lines: [start, end] inclusive line range for the question stem
+  (include passage/material text, sub-questions, blanks, formulas — everything the student sees)
+- options_lines: list of [start, end] ranges for options (choice/multi_choice only, null otherwise)
+- answer_lines: [start, end] range for the answer content (null if not present)
+- explanation_lines: [start, end] range for explanation/analysis (null if not present)
+
+IMPORTANT RULES:
+- stem_lines MUST cover the COMPLETE question text — passage + sub-questions + blanks + formulas
+- For composite questions (reading comprehension, cloze, grammar fill): stem includes the FULL passage
+- For choice questions: options_lines covers A/B/C/D option lines
+- Line numbers refer to the [N] prefixed lines in the input
+- Extract ALL questions — do NOT skip any
+- NEVER output content strings — only integers and null
+- ranges are INCLUSIVE: [5, 20] means lines 5 through 20
+
+Return a JSON object:
+{"questions": [
+  {"qno": 1, "type": "choice", "stem_lines": [5, 12], "options_lines": [[13, 16]], "answer_lines": null, "explanation_lines": null},
+  {"qno": 11, "type": "fill", "stem_lines": [25, 35], "options_lines": null, "answer_lines": null, "explanation_lines": null},
+  ...
+]}"""
+
+
+_QD_ANNOTATION_EXTRACTION_PROMPT = """You are an exam question extractor using ANNOTATION PARADIGM.
+
+The input text has line numbers like [0], [1], [2]... at the start of each line.
+Your task: for EACH question, locate which lines contain its content.
+DO NOT copy or rewrite content — only output LINE NUMBERS.
+
+For EACH question, output:
+- qno: question number (integer)
+- type: question type (choice/multi_choice/fill/calculation/proof/essay/etc.)
+- passage_lines: [start, end] inclusive range for shared reading material (null if no shared passage)
+- stem_lines: [start, end] inclusive range for the question stem
+  (include sub-questions, blanks, formulas — everything the student sees EXCEPT passage and options)
+- options_lines: list of [start, end] ranges for options (choice/multi_choice only, null otherwise)
+- answer_lines: [start, end] range for the answer content (null if not present in this section)
+- explanation_lines: [start, end] range for explanation/analysis (null if not present)
+- score: points for this question (integer or null)
+- knowledge_points: list of knowledge point strings (can be empty)
+
+CRITICAL RULES:
+- stem_lines MUST cover the COMPLETE question stem — sub-questions, blanks, formulas, figure references
+- For composite questions (reading comprehension, cloze, grammar fill):
+  * passage_lines = the FULL shared reading material
+  * stem_lines = ALL sub-questions, blanks, and instructions
+  * Output ONE question object for the ENTIRE composite section
+- For choice questions: options_lines covers A/B/C/D option lines
+- Line numbers refer to the [N] prefixed lines in the input
+- Extract ALL questions — do NOT skip any
+- NEVER output content strings — only integers, null, and arrays
+- ranges are INCLUSIVE: [5, 20] means lines 5 through 20
+- If a question has no answer/explanation in this section, set those to null
+
+Return a JSON object:
+{"questions": [
+  {"qno": 1, "type": "choice", "passage_lines": null, "stem_lines": [5, 12], "options_lines": [[13, 16]], "answer_lines": null, "explanation_lines": null, "score": 5, "knowledge_points": ["grammar"]},
+  {"qno": 11, "type": "fill", "passage_lines": null, "stem_lines": [25, 35], "options_lines": null, "answer_lines": null, "explanation_lines": null, "score": 10, "knowledge_points": ["vocabulary"]},
+  ...
+]}"""
 
 
 async def _extract_answers_from_section(
@@ -1096,6 +1413,9 @@ async def _extract_answers_from_section(
     timeout: float = 30.0,
 ) -> list[dict]:
     """Extract per-question answers from the answer section using LLM.
+
+    Annotation paradigm: LLM outputs line numbers, code extracts content
+    from OCR markdown original. This avoids LaTeX escape issues in JSON.
 
     Args:
         answer_text: The answer section markdown (lines after answer boundary).
@@ -1108,12 +1428,29 @@ async def _extract_answers_from_section(
         logger.info("Answer section too short (%d chars), skipping", len(answer_text or ""))
         return []
 
-    full_prompt = f"{_ANSWER_EXTRACTION_PROMPT}\n\n```\n{answer_text}\n```"
+    # Split into lines for later extraction by line number
+    raw_lines = answer_text.split("\n")
+
+    # Build condensed text with line numbers [N] for LLM
+    condensed: list[str] = []
+    for i, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if stripped:
+            condensed.append(f"[{i}] {stripped}")
+
+    if not condensed:
+        return []
+
+    condensed_text = "\n".join(condensed)
+    full_prompt = f"{_ANSWER_EXTRACTION_PROMPT}\n\n```\n{condensed_text}\n```"
 
     try:
         from app.gateway.router import llm_gateway
 
-        logger.info("Answer extraction: %d chars", len(answer_text))
+        logger.info(
+            "Answer extraction (annotation): %d chars, %d condensed lines",
+            len(answer_text), len(condensed),
+        )
         result = await asyncio.wait_for(
             llm_gateway.generate(
                 mode="fast",
@@ -1133,21 +1470,54 @@ async def _extract_answers_from_section(
                 "Answer extraction: LLM returned no 'items' key, "
                 "raw keys=%s", list(parsed.keys()),
             )
+            return []
 
-        # Normalize
+        # Normalize: extract content from original lines by line numbers
         normalized = []
+        # Track question order within a table row for column-index extraction
+        qno_in_section = []  # ordered list of qnos from LLM
+        for item in items:
+            try:
+                qno = int(item.get("qno"))
+                qno_in_section.append(qno)
+            except (ValueError, TypeError):
+                pass
+
         for item in items:
             try:
                 qno = int(item.get("qno"))
             except (ValueError, TypeError):
                 continue
+
+            # Extract answer content from line number
+            answer_line = item.get("answer_line")
+            answer = ""
+            if answer_line is not None:
+                raw_answer = _extract_line(raw_lines, int(answer_line))
+                # S#163: If answer is an HTML table row, extract the specific cell
+                answer = _extract_answer_from_row(raw_answer, qno, qno_in_section)
+                if not answer or len(answer) > 20:
+                    logger.info(
+                        "Answer extraction Q%d: line=%s, raw_len=%d, "
+                        "answer=%r (may need table parsing)",
+                        qno, answer_line, len(raw_answer), answer[:50],
+                    )
+
+            # Extract explanation content from line range
+            explanation = ""
+            explanation_lines = item.get("explanation_lines")
+            if explanation_lines and isinstance(explanation_lines, list) and len(explanation_lines) == 2:
+                explanation = _extract_lines_range(
+                    raw_lines, int(explanation_lines[0]), int(explanation_lines[1])
+                )
+
             normalized.append({
                 "qno": qno,
-                "answer": str(item.get("answer", "")).strip(),
-                "explanation": str(item.get("explanation", "")).strip(),
+                "answer": answer,
+                "explanation": explanation,
             })
 
-        logger.info("Answer extraction: %d answers parsed", len(normalized))
+        logger.info("Answer extraction: %d answers parsed (annotation mode)", len(normalized))
         return normalized
 
     except Exception as exc:
@@ -1296,6 +1666,54 @@ async def _detect_markdown_sections(
     return sections, sections_meta, answer_start
 
 
+def _count_questions_in_body(body: str) -> int:
+    """Count question numbers in a section body using regex patterns."""
+    qnos = set()
+    # Pattern: "N." or "N、" at line start (question numbers)
+    for m in re.finditer(r'(?:^|\n)\s*(\d{1,3})\s*[.、．]', body):
+        try:
+            qno = int(m.group(1))
+            if 1 <= qno <= 100:
+                qnos.add(qno)
+        except ValueError:
+            pass
+    return len(qnos)
+
+
+def _split_section_into_batches(body: str, batch_size: int = 5) -> list[str]:
+    """Split a section body into batches by question number boundaries.
+
+    Finds question number markers (e.g., "1.", "2.") and splits the body
+    into batches of approximately batch_size questions each.
+    """
+    lines = body.split("\n")
+    # Find question start lines (lines starting with a question number)
+    q_starts: list[tuple[int, int]] = []  # (line_idx, qno)
+    for i, line in enumerate(lines):
+        m = re.match(r'\s*(\d{1,3})\s*[.、．]', line)
+        if m:
+            try:
+                qno = int(m.group(1))
+                if 1 <= qno <= 100:
+                    q_starts.append((i, qno))
+            except ValueError:
+                pass
+
+    if len(q_starts) <= batch_size:
+        return [body]
+
+    # Split into batches
+    batches: list[str] = []
+    for i in range(0, len(q_starts), batch_size):
+        start_line = q_starts[i][0]
+        end_line = q_starts[i + batch_size][0] if i + batch_size < len(q_starts) else len(lines)
+        batch = "\n".join(lines[start_line:end_line]).strip()
+        if batch:
+            batches.append(batch)
+
+    return batches if batches else [body]
+
+
 async def extract_questions_from_markdown(
     markdown: str,
     subject_code: str = "",
@@ -1348,15 +1766,16 @@ async def extract_questions_from_markdown(
     else:
         logger.info("QD markdown: no answer section detected")
 
-    # ── S#159: Split reading comprehension sections into passages ──
-    # English and other subjects with composite reading sections pack
-    # multiple passages (A/B/C/D) under one section header.  Splitting
-    # them into individual sub-sections gives the LLM manageable
-    # context sizes (~3k chars each vs 12k+ combined).
+    # ── S#159 + S#163: Split large sections into manageable chunks ──
+    # Reading passages: split by A/B/C/D markers
+    # Choice sections: split into batches of ~5 questions to avoid timeout
     expanded: list[tuple[str, str]] = []
     expanded_meta: list[dict] = []
     for idx, (header, body) in enumerate(raw_sections):
         meta = sections_meta[idx]
+        type_hint = meta.get("type_hint", "other")
+
+        # Split reading comprehension sections by passage markers
         passages_found = _PASSAGE_MARKER_RE.findall(body)
         is_reading_section = (
             len(passages_found) >= 2
@@ -1370,7 +1789,6 @@ async def extract_questions_from_markdown(
             )
             subs = _split_reading_passages(body, header)
             expanded.extend(subs)
-            # Each sub-passage is still a composite reading question
             for _ in subs:
                 expanded_meta.append({
                     "type_hint": "reading",
@@ -1378,6 +1796,25 @@ async def extract_questions_from_markdown(
                     "material_shared": True,
                     "note": "split from multi-passage reading section",
                 })
+
+        # S#163: Split large choice/fill sections into batches
+        # A section with 10+ questions can timeout the reasoning model.
+        # Split into batches of ~5 questions each.
+        elif type_hint == "choice" and _count_questions_in_body(body) > 5:
+            batch_size = 5
+            batches = _split_section_into_batches(body, batch_size)
+            logger.info(
+                "QD markdown: splitting choice section [%s] into %d batches (%d chars total)",
+                header[:60], len(batches), len(body),
+            )
+            for batch_idx, batch_body in enumerate(batches):
+                batch_header = f"{header} (Part {batch_idx + 1})"
+                expanded.append((batch_header, batch_body))
+                expanded_meta.append({
+                    **meta,
+                    "note": f"batch {batch_idx + 1}/{len(batches)} from choice section",
+                })
+
         else:
             expanded.append((header, body))
             expanded_meta.append(meta)

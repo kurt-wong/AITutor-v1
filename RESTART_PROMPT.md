@@ -1,7 +1,7 @@
 # AI Tutors 系统重启提示词
 
 > **使用方式**：将此文件全部内容复制粘贴给新会话的 Claude/TRAE，即可快速恢复完整工作上下文。
-> **最后更新**: 2026-08-01 Session #161 | **版本**: 1.50.0
+> **最后更新**: 2026-08-02 Session #164 | **版本**: 1.53.0
 
 ---
 
@@ -84,7 +84,7 @@ UI → API → Service → MCP Client → MCP Server → Infra
 
 ---
 
-## 四、管线架构（Session #161 最新状态 — LLM 元数据架构已落地）
+## 四、管线架构（Session #163 最新状态 — LLM 元数据架构已落地 + S#162 标注范式 Step 1 已完成）
 
 ### 核心架构：Question-Driven + LLM 语义元数据 + 学科路由
 
@@ -102,6 +102,20 @@ Question-driven markdown extraction ←── LLM 语义识别 section 边界 + 
         ├── vision-first（化学/生物/地理）→ MIMO Vision
         └── text-first（数学/物理/语文/英语/政治/历史）→ V3 text-mode
 ```
+
+### S#162 标注范式架构重构（Step 1 ✅ Step 3 ✅ 已完成）
+
+**分支**: `refactor/annotation-architecture`（基于 `main` 基线 `bac42f5`）
+
+**目标**: L0→L1→L2→L3 分层不可变架构，LLM 仅输出行号/偏移量元数据，JSON 绝不包含 LaTeX 字符串。
+
+**4 步计划**:
+| Step | 内容 | 状态 |
+|:---:|------|:---:|
+| 1 | 答案区标注范式 — `_extract_answers_from_section()` 行号范围 JSON | ✅ 已完成（S#163） |
+| 2 | 标注镜像库 — `question_annotations` 表 + Repository | ⏳ 待设计 |
+| 3 | QD 题干标注化 — `extract_questions_from_section()` 改为行号输出 | ✅ 已完成（S#164） |
+| 4 | 前端渲染切换 — L1+L2 组合渲染 | ⏳ 待设计 |
 
 ### S#161 LLM 元数据架构（核心设计原则）
 
@@ -158,7 +172,7 @@ _VISION_FIRST_SUBJECTS = frozenset({
 
 ---
 
-## 五、当前状态（Session #161 — LLM 元数据架构完成 + 英语复合题回归修复）
+## 五、当前状态（Session #163 — 标注范式 Step 1 完成 + QD LaTeX JSON P0 待修复）
 
 ### §7.4 服务稳定性（✅ 已实施）
 
@@ -177,6 +191,14 @@ _VISION_FIRST_SUBJECTS = frozenset({
 - 从 DB 读取已存储的 `ocr_markdown`，调用 `extract_questions_from_markdown()` 重新提取
 - 返回标准化 JSON 预览（passage→stem 合并、options 解析、qno 强制转换）
 - 用于快速迭代 QD prompt，无需重新上传 PDF/跑完整管线
+
+### Git 仓库
+
+```
+Remote:  https://github.com/kurt-wong/AITutor
+main:    bac42f5 (baseline, 23 files / 15K lines, 仅核心代码)
+*refactor/annotation-architecture: bac42f5 (活跃开发分支)
+```
 
 ### S#160: Section Detection 正则→LLM 语义化（✅ 已实施）
 
@@ -199,13 +221,34 @@ _VISION_FIRST_SUBJECTS = frozenset({
 
 ### P0 遗留问题
 
-- **选词填空 section detection 漏检**: LLM 将 选词填空 header 合并到 语法填空 section body，但 per-section LLM 仍正确提取为独立 composite 题（轻微影响，非致命）
-- **9 科全量回归验证**: 英语单科已通过，其余 8 科待重测
+- **QD 提取 LaTeX JSON 转义漏洞（S#163 新发现）**: `extract_questions_from_section()` 仍使用"改写范式"，LLM 将 LaTeX 抄写到 JSON 值中。MIMO fast 模式也会输出未转义 LaTeX（`\sqrt→\s`）→ `json.loads` 失败 → 整个 section 题目丢弃（实测填空题 Q11-Q15 全丢）。**根除方案**：Step 3 QD 题干标注化。
+- **Q19-Q21 答案缺失**: 可能同为 LaTeX JSON 问题，或标注覆盖不足，待排查
+- **详解仍为 LLM 生成**: 非 OCR 原文，P2
+
+### S#163 Step 1 实施成果
+
+**答案区标注范式已落地**（`_extract_answers_from_section()`）:
+- LLM 输出 `{qno, answer_line, explanation_lines}` 行号范围
+- 代码按行号从 OCR 原文切出内容
+- JSON 仅含整数，永不包含 LaTeX 字符串
+- 返回值 shape 不变，下游零改动
+
+**S#163 连带修复**:
+| 修复 | 说明 |
+|------|------|
+| 选择题超时 | 根因 `max_tokens=65536` 放大 DeepSeek reasoning 冗长输出 → 修复：`mode="fast"`(MIMO) + `max_tokens=16384` + 批量拆分 |
+| HTML 表格答案解析 | `_extract_answer_from_row()` 新增：找"答案"行→提取 `<td>`→按 qno 索引 |
+| 选择题 section 批量拆分 | `_count_questions_in_body()` + `_split_section_into_batches()`，>5 题拆 batches of 5 |
+
+**验证**: 选择题 Q1-Q10 答案全部正确。
 
 ### 关键代码指标
 
-- `_question_driven_extractor.py`: ~1400 行（核心 QD 提取逻辑）
+- `_question_driven_extractor.py`: ~1600 行（核心 QD 提取逻辑 + 答案标注范式 + HTML 表格解析 + 批量拆分）
 - `_detect_markdown_sections()`: LLM `mode="fast"`, `max_tokens=8192`, `timeout=60`
+- `_extract_answers_from_section()`: LLM `mode="fast"`, `max_tokens=8192`, `timeout=30`（annotation 范式）
+- `_extract_answer_from_row()`: HTML 表格答案键解析（S#163 新增）
+- `_count_questions_in_body()` / `_split_section_into_batches()`: 批量拆分（S#163 新增）
 - Section metadata 字段: 6 个语义字段 + answer_section 3 个字段
 - 已消除的硬编码: 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则
 
@@ -223,14 +266,18 @@ _VISION_FIRST_SUBJECTS = frozenset({
 | `_mimo_vision_extract()` | MIMO Vision 提取主函数 |
 | `_VISION_FIRST_SUBJECTS` | 视觉优先学科 frozenset |
 
-### _question_driven_extractor.py（Question-Driven 提取器，~1400 行）
+### _question_driven_extractor.py（Question-Driven 提取器，~1600 行）
 
 | 代码段 | 说明 |
 |--------|------|
 | `_detect_markdown_sections()` | **LLM 语义 section 检测** — 返回 `(sections, metadata)` 双元组，元数据含 type_hint/is_composite/qno_range |
 | `extract_questions_from_markdown()` | 从 markdown 文本 LLM 提取（优先路径） |
 | `extract_questions_from_blocks()` | 从 block_label 块组装题目（PaddleOCR-VL 场景） |
+| `_extract_answers_from_section()` | **答案区标注范式**（S#163）— LLM 输出行号，代码切原文 |
+| `_extract_answer_from_row()` | **HTML 表格答案键解析**（S#163）— 找"答案"行→按列索引 |
+| `_count_questions_in_body()` / `_split_section_into_batches()` | **批量拆分**（S#163）— >5 题拆 batches |
 | `_SECTION_DETECTION_PROMPT` | LLM prompt：输出完整语义元数据 + answer_section 边界 |
+| `_ANSWER_EXTRACTION_PROMPT` | LLM prompt（S#163）：输出行号范围而非内容 |
 | `_SUBJECT_COMPREHENSIVE_HINTS` | 各科综合题 LLM prompt hints（辅助，不驱动逻辑） |
 
 ### _document_pipeline.py（管线编排）
@@ -263,6 +310,9 @@ python scripts/reset_test_data.py
 
 | Session | 日期 | 内容 |
 |---------|------|------|
+| **#164** | **08-02** | **标注范式 Step 3 实施**: QD 题干标注化完成（`extract_questions_from_section()` 改为 annotation 范式）。新增 `_QD_ANNOTATION_EXTRACTION_PROMPT`（LLM 输出行号范围）、`_extract_text_from_lines()`、`_extract_multiple_ranges()` 辅助函数。彻底消灭 LaTeX JSON 转义问题。版本 1.53.0。 |
+| **#163** | **08-01** | **标注范式 Step 1 实施 + 选择题超时修复 + HTML表格解析**: 答案区标注范式落地（LLM输出行号→代码切原文）。选择题超时根因 max_tokens=65536→修复为 mode=fast + 16384 + 批量拆分。HTML 表格答案键解析（`_extract_answer_from_row`）。填空题 QD 提取暴露同样 LaTeX JSON 问题 → Step 3 提升为 P0。 |
+| **#162** | **08-01** | **标注范式架构重构启动**: LaTeX JSON 转义漏洞根因分类（5 类，含合法转义静默损毁）。L0→L1→L2→L3 分层不可变架构确立。Git 基线 + `refactor/annotation-architecture` 分支。4 步重构计划（Step 1: 答案区标注范式 ~80 行）。 |
 | **#161** | **08-01** | **LLM 元数据架构落地**: `_detect_markdown_sections()` 重写为完整语义元数据输出，composite merge 零关键词，answer boundary LLM 判断。英语 56→10 composite 题。消除 7 个中文关键词 + `_ANSWER_SECTION_RE`。 |
 | **#160** | **08-01** | **Section Detection 正则→LLM 语义重构**: 历史 0→43 题、生物 ~7→26 题。 |
 | **#159** | **08-01** | **英语 QD 修复 + 全科推广**: 阅读篇章子切分、composite merge、QNO 修正、9 科 hints。13 题验证通过（后被 S#160 覆盖）。 |
@@ -281,22 +331,43 @@ python scripts/reset_test_data.py
 ## 八、给 Claude/TRAE 的工作指令
 
 ```
-继续 AI Tutors 项目。版本 1.50.0。
+继续 AI Tutors 项目。版本 1.53.0。
 
 == 当前重点 ==
+
+标注范式架构重构（S#162-164）— `refactor/annotation-architecture` 分支：
+
+S#164 Step 3 已完成（QD 题干标注化）：
+  ✅ `extract_questions_from_section()` 已改为 annotation 范式
+     LLM 输出 {"qno": 1, "stem_lines": [5, 12], "options_lines": [[13, 16]], ...}
+     代码从 OCR 原文按行号切出 → 彻底消灭 LaTeX JSON 转义问题
+  ✅ 新增 `_QD_ANNOTATION_EXTRACTION_PROMPT` — LLM 输出行号范围而非内容
+  ✅ 新增 `_extract_text_from_lines()` / `_extract_multiple_ranges()` 辅助函数
+  ✅ 返回值 shape 不变，下游零改动
+
+S#163 Step 1 已完成（答案区标注范式）：
+  ✅ `_extract_answers_from_section()` 已改为 annotation 范式
+     LLM 输出 {"qno": 1, "answer_line": 3, "explanation_lines": [7, 12]}
+     代码从 OCR 原文按行号切出 → 返回值 shape 不变，下游零改动
+  ✅ 选择题超时修复 — mode=fast(MIMO) + max_tokens=16384 + 批量拆分
+  ✅ HTML 表格答案键解析 — `_extract_answer_from_row()` 找"答案"行→按列索引
+
+🟡 P1 — Q19-Q21 答案缺失：可能同因或标注覆盖不足，待排查
+
+⏳ P2 — Step 2: 标注镜像库 — `question_annotations` 表 + Repository（待设计）
 
 S#161 LLM 元数据架构已完成落地：
 - `_detect_markdown_sections()` 返回完整语义元数据（type_hint/is_composite/qno_range/material_shared + answer_section）
 - Composite merge 零关键词匹配，直接消费 `meta.get("is_composite")`
 - Answer 边界由 LLM metadata `answer_section.line` 判断，废弃 `_ANSWER_SECTION_RE` 正则
-- 英语 QD: 56 碎片→10 composite 题，完形+语法+选词+4篇阅读+七选五+阅读表达+写作全部正确
-- 已消除: 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则
+- 英语 QD: 56 碎片→10 composite 题
 - 后端以 supervised 模式运行（崩溃自动重启，8s 恢复）
 - QD preview 端点可用（POST /api/documents/{id}/reprocess-qd）
 
-P1 待办：
-1. 9 科全量回归 QD 测试（验证 S#161 元数据架构在其他科目的效果）
-2. 选词填空 section detection 漏检优化（LLM 将其合并到语法填空 body）
+== Git ==
+
+Remote:  https://github.com/kurt-wong/AITutor
+Current: refactor/annotation-architecture (baseline: bac42f5)
 
 == 快速恢复步骤 ==
 
@@ -308,12 +379,10 @@ P1 待办：
 == 关键注意事项 ==
 
 - 管线代码修改后必须 kill + restart（supervised 模式会自动重启）
-- QD 提取所有逻辑集中在 `_question_driven_extractor.py`（~1400 行）
+- QD 提取所有逻辑集中在 `_question_driven_extractor.py`（~1700 行）
 - `_detect_markdown_sections()` 返回双元组：`(sections: list[tuple], metadata: list[dict])`
 - LLM section detection 参数: `mode="fast"`, `max_tokens=8192`, `timeout=60`
-- Section metadata 字段: `type_hint`, `qno_first`, `qno_last`, `is_composite`, `material_shared`
 - Composite merge: `meta.get("is_composite")` — 零关键词、零猜测
-- Answer boundary: `answer_section.line` 从 LLM metadata，不依赖 `_ANSWER_SECTION_RE`
 - 阅读篇章子切分: `_PASSAGE_MARKER_RE` 检测 A/B/C/D 单字母行标记
 - max_chars=30000（从 12000 提升）
 - 空壳 section（< 100 chars）自动过滤
@@ -322,6 +391,31 @@ P1 待办：
 - 修改 async_document.py 后必须删除 __pycache__ 再重启
 - 端口 8000 被占用时，start_backend.py 会自动 release_port()
 - Redis 队列持久化：crash 后 restart，任务不丢失
+
+== Step 1 + Step 3 已完成（标注范式全面落地）==
+
+文件: `backend/app/domains/question/_question_driven_extractor.py`
+
+Step 1 答案区标注范式：
+  - `_ANSWER_EXTRACTION_PROMPT`: LLM 输出行号范围而非内容字符串 ✅
+  - `_extract_answers_from_section()`: 代码按行号从 OCR 原文切出 ✅
+  - `_extract_line()` / `_extract_lines_range()`: 行号提取工具函数 ✅
+  - `_extract_answer_from_row()`: HTML 表格答案键解析 ✅
+  - `_count_questions_in_body()` / `_split_section_into_batches()`: 批量拆分 ✅
+
+Step 3 QD 题干标注化：
+  - `_QD_ANNOTATION_EXTRACTION_PROMPT`: LLM 输出 stem_lines/options_lines/answer_lines 行号范围 ✅
+  - `extract_questions_from_section()`: 代码从 OCR 原文按行号切出 stem/options/answer/explanation ✅
+  - `_extract_text_from_lines()`: 单行号范围提取 ✅
+  - `_extract_multiple_ranges()`: 多行号范围提取 ✅
+  - mode/max_tokens: `mode="fast"`, `max_tokens=8192`（简单题）/ `mode="reasoning"`, `max_tokens=16384`（复杂题）
+
+== 待办事项 ==
+
+1. 🔴 P1 — Q19-Q21 答案缺失排查
+2. 🟡 P2 — Step 2: 标注镜像库（`question_annotations` 表 + Repository）
+3. 🟡 P2 — Step 4: 前端渲染切换（L1+L2 组合渲染）
+4. 🟢 P3 — 9 科全量回归测试（验证 annotation 范式效果）
 ```
 
 ### 新增 API 端点
