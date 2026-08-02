@@ -443,33 +443,6 @@ def _clean_json(raw: str) -> str:
     return raw
 
 
-def _parse_llm_questions(raw: str) -> list[dict]:
-    """Parse LLM response into a list of question dicts.
-
-    Handles both top-level JSON array and nested {"questions": [...]} object.
-    """
-    cleaned = _clean_json(raw)
-    try:
-        data = _json.loads(cleaned)
-    except _json.JSONDecodeError as e:
-        logger.warning("Failed to parse LLM response as JSON: %s", e)
-        return []
-
-    # Handle {"questions": [...]} wrapper
-    if isinstance(data, dict):
-        questions = data.get("questions", [])
-        if questions:
-            return questions
-        # Try to find any list value
-        for val in data.values():
-            if isinstance(val, list) and val and isinstance(val[0], dict):
-                return val
-
-    # Direct array
-    if isinstance(data, list):
-        return data
-
-    return []
 
 
 # Subject-specific question type taxonomy for the extraction prompt
@@ -622,72 +595,6 @@ _SUBJECT_COMPREHENSIVE_HINTS: dict[str, str] = {
 }
 
 
-def _build_extraction_system_prompt(subject_code: str) -> str:
-    """Build the system prompt for question extraction."""
-    subj_key = subject_code.lower() if subject_code else "mathematics"
-    type_options = _QUESTION_TYPES_BY_SUBJECT.get(
-        subj_key, ["choice", "fill", "calculation", "essay"],
-    )
-    comprehensive_hint = _SUBJECT_COMPREHENSIVE_HINTS.get(subj_key, "")
-
-    lines = [
-        "You are an exam question extractor.  Your task is to identify and extract",
-        "every question from an exam section.",
-        "",
-        "## Rules",
-        "1. Identify ALL complete questions in the given text.",
-        "2. Each question must have: qno (integer), type (string), stem (full text), passage (if shared material), options (if choice/multi_choice), answer (if present in text).",
-        "3. For fill-in-the-blank questions, include the blank markers (___ or （）) in the stem.",
-        "4. For choice questions, extract options as a list of strings (e.g. ['A. ...', 'B. ...']).",
-        "5. Include any formulas, tables, or figure references as part of the stem.",
-        "6. Do NOT include answer keys, scoring notes, or teacher annotations as part of the stem.",
-        "7. CRITICAL: If a question has sub-parts like (1)(2)(3) or multiple blanks in a shared passage, "
-        "treat the ENTIRE group as ONE question. Put the shared material in 'passage' and all sub-items in 'stem'. "
-        "NEVER create separate questions for each sub-part or blank.",
-    ]
-
-    if comprehensive_hint:
-        lines.append(f"\n## Subject-Specific Guidance\n{comprehensive_hint}")
-
-    lines.extend([
-        "",
-        f"Subject: {subject_code}",
-        f"Valid question types: {', '.join(type_options)}",
-        "",
-        "CRITICAL: The exam section text you receive is ALREADY one logical unit. "
-        "The entire section should produce EXACTLY ONE question (for composite sections "
-        "like reading comprehension/cloze/experiment) or a small number of standalone "
-        "questions (for sections with independent numbered questions). "
-        "NEVER create 20+ questions from a single section.",
-        "",
-        "## Output Format",
-        "Return a JSON object with a 'questions' array:",
-        "{",
-        '  "questions": [',
-        "    {",
-        '      "qno": 1,',
-        '      "type": "cloze",',
-        '      "passage": "shared reading material (if this question has a shared passage, '
-        'put the FULL original text here — do NOT summarize or truncate)",',
-        '      "stem": "full question text — for composite questions, include ALL sub-questions, '
-        'blanks, and options in the stem",',
-        '      "options": ["A. option1", "B. option2"],',
-        '      "answer": "C"',
-        "    }",
-        "  ]",
-        "}",
-        "",
-        "IMPORTANT: ALWAYS include the 'type' field with a value from the valid types above.",
-        "",
-        "For composite questions (e.g. reading comprehension, cloze, grammar fill):",
-        "- Use the 'passage' field for the shared reading material",
-        "- Put ALL sub-questions, blanks, and their options into the 'stem' field",
-        "- Output ONLY ONE question object per section/group — do NOT create separate questions for each sub-item",
-        "",
-        "Output ONLY the JSON object, no other text.",
-    ])
-
-    return "\n".join(lines)
 
 
 async def extract_questions_from_section(
@@ -1335,38 +1242,6 @@ def _extract_multiple_ranges(
             if part:
                 parts.append(part)
     return "\n\n".join(parts)
-
-
-_QUESTION_ANNOTATION_PROMPT = """You are locating question content in an exam section's OCR text.
-
-The text has line numbers like [0], [1], [2]... at the start of each line.
-Your task: for EACH question, find which lines contain its stem, options, answer, and explanation.
-DO NOT copy or rewrite content — only output LINE NUMBERS.
-
-For EACH question, output:
-- qno: question number (integer)
-- type: question type (choice/multi_choice/fill/calculation/proof/essay/etc.)
-- stem_lines: [start, end] inclusive line range for the question stem
-  (include passage/material text, sub-questions, blanks, formulas — everything the student sees)
-- options_lines: list of [start, end] ranges for options (choice/multi_choice only, null otherwise)
-- answer_lines: [start, end] range for the answer content (null if not present)
-- explanation_lines: [start, end] range for explanation/analysis (null if not present)
-
-IMPORTANT RULES:
-- stem_lines MUST cover the COMPLETE question text — passage + sub-questions + blanks + formulas
-- For composite questions (reading comprehension, cloze, grammar fill): stem includes the FULL passage
-- For choice questions: options_lines covers A/B/C/D option lines
-- Line numbers refer to the [N] prefixed lines in the input
-- Extract ALL questions — do NOT skip any
-- NEVER output content strings — only integers and null
-- ranges are INCLUSIVE: [5, 20] means lines 5 through 20
-
-Return a JSON object:
-{"questions": [
-  {"qno": 1, "type": "choice", "stem_lines": [5, 12], "options_lines": [[13, 16]], "answer_lines": null, "explanation_lines": null},
-  {"qno": 11, "type": "fill", "stem_lines": [25, 35], "options_lines": null, "answer_lines": null, "explanation_lines": null},
-  ...
-]}"""
 
 
 _QD_ANNOTATION_EXTRACTION_PROMPT = """You are an exam question extractor using ANNOTATION PARADIGM.
