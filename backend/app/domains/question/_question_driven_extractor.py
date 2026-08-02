@@ -1683,13 +1683,20 @@ async def extract_questions_from_markdown(
                 "QD markdown: splitting choice section [%s] into %d batches (%d chars total)",
                 header[:60], len(batches), len(body),
             )
+            # Calculate per-batch qno_first from the original section's qno_first
+            section_qno_first = meta.get("qno_first")
+            running_qno = int(section_qno_first) if section_qno_first else 1
             for batch_idx, batch_body in enumerate(batches):
                 batch_header = f"{header} (Part {batch_idx + 1})"
+                batch_qcount = _count_questions_in_body(batch_body)
                 expanded.append((batch_header, batch_body))
                 expanded_meta.append({
                     **meta,
+                    "qno_first": str(running_qno),
+                    "qno_last": str(running_qno + batch_qcount - 1),
                     "note": f"batch {batch_idx + 1}/{len(batches)} from choice section",
                 })
+                running_qno += batch_qcount
 
         else:
             expanded.append((header, body))
