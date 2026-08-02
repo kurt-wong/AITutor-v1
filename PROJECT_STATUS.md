@@ -557,7 +557,7 @@ metadata: {sections_used: 0, total_questions_raw: 38}
 | LX1 | **`_extract_answers_from_section()` LaTeX 转义漏洞** | ✅ 已修复（S#163） | Step 1 标注范式改造：LLM 改输出行号范围（`answer_line`/`explanation_lines`），代码从 OCR 原文按行号切出内容。JSON 中仅含整数，永不包含 LaTeX 字符串。 |
 | LX2 | **修复方向：标注范式** | ✅ 已实施 | 答案区标注范式落地，返回值 shape 不变，下游零改动。 |
 | LX3 | **QD 提取 LaTeX JSON 转义漏洞** | ✅ 已修复（S#164） | Step 3 QD 题干标注化完成：`extract_questions_from_section()` 改为 annotation 范式，LLM 输出行号范围（`stem_lines`/`options_lines`/`answer_lines`），代码从 OCR 原文按行号切出内容。新增 `_QD_ANNOTATION_EXTRACTION_PROMPT` + `_extract_text_from_lines()` + `_extract_multiple_ranges()`。JSON 中仅含整数，永不包含 LaTeX 字符串。彻底消灭转义问题。 |
-| LX4 | **Q19-Q21 答案缺失** | 🟡 P1 | 可能同为 LaTeX JSON 问题，或标注覆盖不足，待排查。 |
+| LX4 | **Q19-Q21 答案缺失** | ✅ 已修复（S#164） | 根因为 LaTeX JSON 转义问题（与 Q11-Q15 相同）。Step 3 annotation 范式已彻底解决。验证：QD 提取成功返回 Q19-Q21 答案（answer_line=299/341/399），内容从 OCR 原文正确切出。 |
 
 ### 🔴 P0 — Section 元数据：英语复合题回归已修复（S#161 LLM 元数据重构完成）
 

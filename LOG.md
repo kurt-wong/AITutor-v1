@@ -11976,3 +11976,26 @@ S#163 Step 1 完成了答案区标注范式，但 QD 提取（`extract_questions
 | `LOG.md` | 追加 | 本条目 |
 | `PROJECT_STATUS.md` | 修改 | 版本 1.53.0 + Step 3 状态更新 |
 | `RESTART_PROMPT.md` | 修改 | 版本 1.53.0 + Step 3 完成 + 待办事项更新 |
+
+### P1 排查结果：Q19-Q21 答案缺失（已解决）
+
+**验证方法**：运行完整 QD 提取流程，检查 Q19-Q21 答案提取结果。
+
+**验证结果**：
+- Section detection 正确检测到答案区边界（answer_start=181）
+- LLM 正确提取了 Q19-Q21 的答案行号（299/341/399）
+- 代码从 OCR 原文按行号切出了答案内容
+- Step 3 annotation 范式彻底解决了 LaTeX JSON 转义问题
+
+**Q19-Q21 答案提取结果**：
+- Q19: answer='19.答案．$(1)\frac{1}{2}$', explanation='...'
+- Q20: answer='20.答案．$(1)\left(\frac{1}{2},1\right)$', explanation='...'
+- Q21: answer='21.答案．(1)$A=\{1,2,3,\cdots,50\}$ 答案不唯一', explanation='...'
+
+**结论**：Q19-Q21 答案缺失问题的根因是 LaTeX JSON 转义问题（与 Q11-Q15 相同）。Step 3 annotation 范式已彻底解决此问题。P1 排查完成。
+
+### 变更文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `PROJECT_STATUS.md` | 修改 | LX4 状态更新为 ✅ 已修复（S#164） |
