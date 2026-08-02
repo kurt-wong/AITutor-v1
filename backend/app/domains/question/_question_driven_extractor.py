@@ -1006,6 +1006,16 @@ Also detect the ANSWER SECTION (do NOT include answers as a question section):
 }
 
 IMPORTANT RULES:
+- CRITICAL: When question TYPE changes (e.g. 选择题→填空题,
+  填空题→计算题, etc.), you MUST create a NEW section. The boundary
+  is at the FIRST line of the new question type, even if the transition
+  header is a simple text line (not a markdown heading).
+- Look for transition signals: numbered headers (二、, 2.), explicit
+  type labels (填空题, 实验题, 解答题), or pattern changes in QNO sequence.
+- The section's qno_first and qno_last MUST match the actual QNOs
+  visible within the section's line range [line, next_section.line).
+  If the next section starts at Q12, this section's qno_last cannot
+  be 21 — it must be ≤ the last QNO actually in the body.
 - Identify MAJOR sections that contain actual exam questions.
 - Skip preamble text (school name, exam title, instructions).
 - Do NOT split individual questions into separate sections.
@@ -1522,11 +1532,63 @@ async def _detect_markdown_sections(
         body = "\n".join(body_lines[start:end]).strip()
 
         if body and len(body.strip()) >= _MIN_SECTION_CHARS:
+            # ── Defensive: verify qno_last vs actual QNOs in body ──
+            # If LLM's qno_last is far beyond the actual max QNO in body,
+            # trim the body to avoid cross-type contamination.
+            meta_qno_last = section.get("qno_last")
+            if meta_qno_last is not None:
+                actual_qnos = set()
+                body_lines_list = body.split("\n")
+                for bline in body_lines_list:
+                    bm = re.match(r'\s*(\d{1,3})\s*[.、．]', bline)
+                    if bm:
+                        try:
+                            qn = int(bm.group(1))
+                            if 1 <= qn <= 100:
+                                actual_qnos.add(qn)
+                        except ValueError:
+                            pass
+                if actual_qnos:
+                    max_actual = max(actual_qnos)
+                    declared_last = int(meta_qno_last)
+                    if declared_last > max_actual + 2:
+                        logger.warning(
+                            "QD section [%s]: qno_last=%d but max QNO in body=%d, "
+                            "trimming qno_last to %d",
+                            header[:40], declared_last, max_actual, max_actual,
+                        )
+                        meta_qno_last = str(max_actual)
+                    # Also trim body: find lines where QNO falls outside
+                    # the declared [qno_first, qno_last] range.
+                    meta_qno_first_val = section.get("qno_first")
+                    if meta_qno_first_val is not None:
+                        first_qno = int(meta_qno_first_val)
+                        trim_line = len(body_lines_list)
+                        for bi, bline in enumerate(body_lines_list):
+                            bm = re.match(r'\s*(\d{1,3})\s*[.、．]', bline)
+                            if bm:
+                                try:
+                                    qn = int(bm.group(1))
+                                    if 1 <= qn <= 100:
+                                        # QNO jumped backward or beyond declared range
+                                        if qn < first_qno or qn > int(meta_qno_last):
+                                            trim_line = bi
+                                            break
+                                except ValueError:
+                                    pass
+                        if trim_line < len(body_lines_list):
+                            body = "\n".join(body_lines_list[:trim_line]).strip()
+                            logger.warning(
+                                "QD section [%s]: trimmed body at line %d "
+                                "(QNO outside declared range %s-%s)",
+                                header[:40], trim_line, meta_qno_first_val, meta_qno_last,
+                            )
+
             sections.append((header, body))
             sections_meta.append({
                 "type_hint": section.get("type_hint", "other"),
                 "qno_first": section.get("qno_first"),
-                "qno_last": section.get("qno_last"),
+                "qno_last": meta_qno_last,
                 "is_composite": section.get("is_composite", False),
                 "material_shared": section.get("material_shared", False),
                 "note": section.get("note", ""),
