@@ -1782,6 +1782,27 @@ async def extract_questions_from_markdown(
                     current_qno, meta_qno_first, header[:60], type_hint,
                 )
 
+        # ── QNO remapping: correct local QNOs using section metadata ──
+        # LLM outputs local QNOs (Q1, Q2, ...) within each section.
+        # Metadata qno_first/qno_last give the global QNO range from the exam.
+        # For ALL sections (composite or not), remap QNOs using qno_first.
+        meta_qno_first = meta.get("qno_first")
+        if meta_qno_first is not None and len(qs) > 0 and not is_composite:
+            # Non-composite section: remap Q1→qno_first, Q2→qno_first+1, ...
+            try:
+                offset = int(meta_qno_first) - 1  # Q1 → offset=0
+                for i, q in enumerate(qs):
+                    old_qno = q.get("qno")
+                    new_qno = str(offset + i + 1)
+                    if old_qno != new_qno:
+                        q["qno"] = new_qno
+                        logger.debug(
+                            "QD QNO remap: %s → %s in [%s]",
+                            old_qno, new_qno, header[:40],
+                        )
+            except (ValueError, TypeError):
+                pass  # skip if qno_first is not a valid integer
+
         all_questions.extend(qs)
         validation_results.append(val)
         section_summaries.append({

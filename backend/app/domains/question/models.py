@@ -8,6 +8,7 @@ DSD §6: Question Tables
 """
 
 
+import sqlalchemy as sa
 from sqlalchemy import Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -43,6 +44,12 @@ class Question(Base, IDMixin, TimestampMixin):
     # material-based question groups (reading comprehension, cloze,
     # process-flow experiments, etc.)
     passage_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # S#164: Composite question sub-question preservation.
+    # Stores sub-questions list as JSONB for composite question groups.
+    sub_questions: Mapped[dict | None] = mapped_column(
+        sa.JSON().with_variant(sa.JSON, "postgresql"),
+        nullable=True,
+    )
 
     # Relationships
     document: Mapped["Document | None"] = relationship(back_populates="questions")
