@@ -2122,12 +2122,16 @@ async def extract_questions_from_markdown(
 
     # ── S#162: Merge extracted answers into questions by QNO ──
     # OCR answer section is authoritative — always overwrite LLM-generated answers.
+    # S#165: Normalize QNO to int for matching (question QNOs may be strings).
     if answer_items:
-        answer_map = {item["qno"]: item for item in answer_items}
+        answer_map = {int(item["qno"]): item for item in answer_items}
         merged_count = 0
         for q in deduped:
-            qno = q.get("qno")
-            if qno is not None and qno in answer_map:
+            try:
+                qno = int(q.get("qno"))
+            except (ValueError, TypeError):
+                continue
+            if qno in answer_map:
                 ans = answer_map[qno]
                 if ans["answer"]:
                     q["answer"] = ans["answer"]
