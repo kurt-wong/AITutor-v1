@@ -484,6 +484,12 @@ class PaddleOCRVlClient:
         markdown_text = md_obj.get("text", "") if isinstance(md_obj, dict) else ""
         markdown_images: dict[str, str] = md_obj.get("images", {}) if isinstance(md_obj, dict) else {}  # S#134
 
+        # S#165: PP-StructureV3 escapes "1." as "1\." to avoid Markdown
+        # heading/ordered-list syntax conflicts.  Normalize back so downstream
+        # QNO regex patterns (r'\d+[.、．]') can match.
+        # NOTE: r'\\\\.' in raw string = regex matches literal backslash + any char
+        markdown_text = re.sub(r'(\d+)\\\\.', r'\1.', markdown_text)
+
         width = pruned.get("width", 0)
         height = pruned.get("height", 0)
         parsing_list = pruned.get("parsing_res_list", [])
@@ -503,6 +509,8 @@ class PaddleOCRVlClient:
             raw_content = item.get("block_content") or ""
             if isinstance(raw_content, list):
                 raw_content = "\n".join(str(c) for c in raw_content)
+            # S#165: Same escape normalization as markdown_text
+            raw_content = re.sub(r'(\d+)\\\\.', r'\1.', raw_content)
             block = PaddleOCRBlock(
                 block_label=label,
                 block_content=raw_content,

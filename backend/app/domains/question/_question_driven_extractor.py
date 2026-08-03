@@ -1926,27 +1926,37 @@ async def extract_questions_from_markdown(
         # S#163: Split large choice/fill sections into batches
         # A section with 10+ questions can timeout the reasoning model.
         # Split into batches of ~5 questions each.
-        elif type_hint == "choice" and _count_questions_in_body(body) > 5:
+        # S#165: Use LLM metadata qno_first/qno_last instead of regex body scan.
+        section_qno_first = int(meta.get("qno_first", 1))
+        section_qno_last = int(meta.get("qno_last", section_qno_first))
+        total_qnos = section_qno_last - section_qno_first + 1
+
+        if type_hint == "choice" and total_qnos > 5:
             batch_size = 5
-            batches = _split_section_into_batches(body, batch_size)
+            num_batches = (total_qnos + batch_size - 1) // batch_size  # ceil division
+            body_lines_list = body.split("\n")
+            total_lines = len(body_lines_list)
             logger.info(
-                "QD markdown: splitting choice section [%s] into %d batches (%d chars total)",
-                header[:60], len(batches), len(body),
+                "QD markdown: splitting choice section [%s] into %d batches "
+                "(Q%d-Q%d, %d lines, %d chars)",
+                header[:60], num_batches,
+                section_qno_first, section_qno_last,
+                total_lines, len(body),
             )
-            # Calculate per-batch qno_first from the original section's qno_first
-            section_qno_first = meta.get("qno_first")
-            running_qno = int(section_qno_first) if section_qno_first else 1
-            for batch_idx, batch_body in enumerate(batches):
+            for batch_idx in range(num_batches):
+                start_line = int(batch_idx * total_lines / num_batches)
+                end_line = int((batch_idx + 1) * total_lines / num_batches)
+                batch_body = "\n".join(body_lines_list[start_line:end_line]).strip()
                 batch_header = f"{header} (Part {batch_idx + 1})"
-                batch_qcount = _count_questions_in_body(batch_body)
+                batch_qno_first = section_qno_first + batch_idx * batch_size
+                batch_qno_last = min(section_qno_first + (batch_idx + 1) * batch_size - 1, section_qno_last)
                 expanded.append((batch_header, batch_body))
                 expanded_meta.append({
                     **meta,
-                    "qno_first": str(running_qno),
-                    "qno_last": str(running_qno + batch_qcount - 1),
-                    "note": f"batch {batch_idx + 1}/{len(batches)} from choice section",
+                    "qno_first": str(batch_qno_first),
+                    "qno_last": str(batch_qno_last),
+                    "note": f"batch {batch_idx + 1}/{num_batches} from choice section",
                 })
-                running_qno += batch_qcount
 
         else:
             expanded.append((header, body))
