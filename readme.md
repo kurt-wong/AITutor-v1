@@ -9,7 +9,7 @@
 
 核心能力：
 
-- **文档智能**：PDF 上传 → PP-StructureV3 云端解析（submit/poll 异步 API）→ 多 VL 协同增强 → 题目结构化（含跨页合并）
+- **文档智能**：PDF 上传 → PP-StructureV3 / PaddleOCR-VL 云端解析（按学科路由）→ OCR Markdown 持久化 → LLM 行号标注 QD 提取（Annotation Paradigm）→ 入库 → 异步富化
 - **知识系统**：9 学科知识树（人工维护）+ 三级回退知识映射（关键词 → 题型启发式 → LLM）
 - **AI 推理**：LLM Gateway 统一路由，primary → cloud → Ollama 三级 fallback
 - **学习闭环**：详解生成、错题本、训练集/模拟考生成、学生问答 SSE 流
@@ -39,12 +39,15 @@
 
 | 用途 | 模型 | 部署 |
 |------|------|------|
-| 文档解析 | PP-StructureV3 | 百度星河云 API |
-| 布局理解 / OCR 验证（主 VL） | Qwen 3.6 Plus | 云 API |
+| 文档解析 | PP-StructureV3（默认）/ PaddleOCR-VL-1.6（化学） | 百度星河云 API |
+| 布局理解 / OCR 验证（主 VL） | MIMO V2.5 | 云 API |
 | 图像 / 图表二次分析 | MIMO V2.5 | 云 API |
 | 推理 / 详解生成 | DeepSeek Pro | 云 API |
 | 可视化解析 | MIMO V2.5 Pro | 云 API |
-| 本地 last-resort fallback | qwen2.5vl:3b | Ollama（RTX 4060 8GB） |
+| 本地文本 / VL last-resort fallback | qwen3.5:4b / qwen2.5vl:3b | Ollama（RTX 4060 8GB） |
+| 嵌入模型 | qwen3-embedding:4b（2560 维） | Ollama |
+
+> 模型名和路由以 `backend/.env.example` 的键名为准，当前生效值查 `backend/.env`，不要在本文档固化具体生产模型。
 
 > 旧 C1-C4 本地并行管线（PyMuPDF + 本地 PaddleOCR + 本地 VL）已废弃为回退链，详见 `Docs/02_Architecture/PIPELINE.md`。
 
@@ -65,7 +68,9 @@ FastAPI Backend (:8000)      UI → API → Service → MCP Client → MCP Serve
 PostgreSQL :5432 / Redis :6379 / MinIO :9000
 ```
 
-核心管线（8 阶段）：上传 → PP-StructureV3 解析 → VL 协同 → 题目结构化 → 知识映射 → 详解生成 → 智能分析 → 辅导输出。各阶段实现状态见 `PROJECT_STATUS.md` §3.5。
+核心链路：上传 → OCR 解析（按学科路由）→ OCR Markdown 持久化 → QD 行号标注提取 → 交叉验证/入库 → 异步富化（知识映射/解答/难度/嵌入）→ 详解生成 → 辅导输出。各阶段实现状态见 `PROJECT_STATUS.md` §3.5。
+
+> S#167 简化的是 **QD 提取内部**：从 section detection → batch splitting → QNO remap → answer merge 的 5 步链，收敛为“单次 LLM 行号标注 + 代码按行号切题”1 步；完整文档处理链路仍包含 OCR、提取、入库、异步富化和详解生成。
 
 ## 4. Quick Start
 
@@ -116,7 +121,7 @@ npm run dev
 | PIPELINE | `Docs/02_Architecture/PIPELINE.md` | 文档解析管线权威参考 |
 | ACS | `Docs/02_Architecture/ACS.md` | API 合约 |
 | DSD | `Docs/03_Data/DSD.md` | 数据库结构 |
-| Prompt | `Docs/04_LLM/prompt.md` | Prompt 注册表 |
+| Prompt | `backend/prompts/prompt_registry.yaml` | Prompt 注册表 |
 | Design | `Docs/05_Development/Design.md` | 前端设计 token 参考 |
 | Ollama 指南 | `Docs/05_Development/Ollama Stability Guide.md` | 本地模型排障 |
 | 运维 | `Docs/06_Operations/`（DEPLOYMENT/BACKUP/UPGRADE） | 部署/备份/升级 |

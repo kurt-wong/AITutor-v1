@@ -9,7 +9,6 @@ import { DIFFICULTY_LABELS } from "../../types";
 import MathRenderer from "../../components/MathRenderer";
 
 const { Title, Text, Paragraph } = Typography;
-const { TextArea } = Input;
 
 interface QuestionImage {
   image_id: number;

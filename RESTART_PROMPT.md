@@ -1,7 +1,7 @@
 # AI Tutors 系统重启提示词
 
 > **使用方式**：将此文件全部内容复制粘贴给新会话的 Claude/TRAE，即可快速恢复完整工作上下文。
-> **最后更新**: 2026-08-01 Session #161 | **版本**: 1.50.0
+> **最后更新**: 2026-08-06 Session #167 | **版本**: 1.56.0
 
 ---
 
@@ -84,43 +84,43 @@ UI → API → Service → MCP Client → MCP Server → Infra
 
 ---
 
-## 四、管线架构（Session #161 最新状态 — LLM 元数据架构已落地）
+## 四、管线架构（Session #167 最新状态 — 简化管线已落地）
 
-### 核心架构：Question-Driven + LLM 语义元数据 + 学科路由
+### 核心架构：OCR Markdown → 单次 LLM 调用 → 直接入库
 
 ```
-所有科目
+OCR markdown (≤40K chars, ~15K tokens)
   │
   ▼
-Question-driven markdown extraction ←── LLM 语义识别 section 边界 + 完整元数据
-  │                                   └── _detect_markdown_sections() 返回 type_hint/is_composite/qno_range/material_shared
+extract_questions_from_markdown()  ←── 单次 LLM 调用，Annotation Paradigm（行号标注）
+  │                                   └── _QD_SIMPLE_ANNOTATION_PROMPT
+  │                                       LLM 输出: {qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}
+  │                                       代码按行号从 OCR 原文切出内容
   │
-  ├── 成功 → sections_meta 直接驱动 composite merge（零关键词匹配）
-  │         → per-section LLM 提取 → cross-validate → 返回
-  │
-  └── 失败（fallback）
-        ├── vision-first（化学/生物/地理）→ MIMO Vision
-        └── text-first（数学/物理/语文/英语/政治/历史）→ V3 text-mode
+  └── 返回 questions → 入库
 ```
 
-### S#161 LLM 元数据架构（核心设计原则）
+**已砍掉的中间步骤**（S#167）:
+- ~~section detection~~（`_detect_markdown_sections()`）— 文档仅 15K tokens，512K 上下文无需分段
+- ~~batch splitting~~（`_split_section_into_batches()`）— 单次调用即可提取全部题目
+- ~~QNO remap~~（`_calculate_qno_offset()`）— 不再分批，无需重映射
+- ~~composite merge~~（关键词驱动的篇章合并）— LLM 直接输出完整复合题
+
+### Annotation Paradigm（行号标注范式）
+
+**核心原则**: LLM 输出行号范围（整数），代码从原始 markdown 按行号提取内容。JSON 永不包含 LaTeX 字符串。
 
 ```
-旧（规则-driven）:
-  正则 section 切分 → LLM 只输出 {header, line} → 代码靠关键词规则猜合并逻辑
-  └── 问题：LLM 理解了但没资格说出来，下游靠猜测
-
-新（元数据-driven）:
-  LLM 一次输出完整语义元数据 → 代码直接消费，零规则、零猜测
-  └── _detect_markdown_sections() 返回:
-        - sections: [{header, line, type_hint, qno_first, qno_last, is_composite, material_shared}]
-        - answer_section: {exists, line, note}
+LLM 输出: {"qno": 1, "stem_lines": [5, 12], "options_lines": [[13, 16], [17, 20], ...], "answer": "D"}
+                                   ↓
+代码执行: stem = markdown_lines[5:13]  → 直接从 OCR 原文切出
+          options[0] = markdown_lines[13:17]
 ```
 
-**关键消除**:
-- 7 个中文关键词硬编码（"语法填空"/"选词填空"/"完形填空"/"七选五"/"阅读表达"/"书面表达"/"写作"）
-- `_ANSWER_SECTION_RE` 正则答案边界检测
-- L0/L1 行号编号（改为 `[0]` 格式，保留 OCR 原始 `##`/`###`）
+**为什么需要这个范式**:
+- LaTeX 命令（`\frac`, `\sqrt`, `\begin`, `\right`）在 JSON 中需转义
+- LLM 经常输出未转义的 LaTeX → `json.loads` 失败 → 整道题丢弃
+- 行号标注：JSON 中只有整数，零转义风险
 
 ### 视觉优先学科（`_VISION_FIRST_SUBJECTS`）
 
@@ -138,76 +138,80 @@ _VISION_FIRST_SUBJECTS = frozenset({
 
 | 函数 | 位置 | 说明 |
 |------|------|------|
-| `_VISION_FIRST_SUBJECTS` | async_document.py | 视觉优先学科路由表 |
 | `_step_llm_annotate()` | async_document.py | **管线入口**：学科路由 + 视觉/文本提取 |
-| `_cross_validate()` | async_document.py | 交叉验证（mode 参数化：fast/vision/reasoning） |
-| `_mimo_vision_extract()` | async_document.py | MIMO Vision 提取主函数 |
-| `_detect_markdown_sections()` | _question_driven_extractor.py | **LLM 语义 section 检测** — 返回 `(sections, metadata)` 双元组 |
-| `extract_questions_from_markdown()` | _question_driven_extractor.py | Markdown 路径主入口（优先路径） |
-| `extract_questions_from_blocks()` | _question_driven_extractor.py | Blocks 路径（PaddleOCR-VL 场景） |
-| `_SUBJECT_COMPREHENSIVE_HINTS` | _question_driven_extractor.py | 各科综合题 LLM prompt hints（辅助，不驱动逻辑） |
+| `extract_questions_from_markdown()` | _question_driven_extractor.py | **简化管线主入口** — 单次 LLM 调用，全量提取 |
+| `extract_questions_from_blocks()` | _question_driven_extractor.py | Blocks 路径（PaddleOCR-VL 场景，仍走旧多步管线） |
+| `_QD_SIMPLE_ANNOTATION_PROMPT` | _question_driven_extractor.py | 一次性提取 prompt（S#167 新增） |
+| `_clean_json()` | _question_driven_extractor.py | JSON 修复：`\b` `\f` `\r` 视为 LaTeX 转义而非 JSON 转义 |
+| `_detect_missing_qnos()` | _question_driven_extractor.py | 缺失题号检测辅助函数（S#167 新增） |
 
-### LLM Section Detection Prompt 设计
+### 旧函数（保留向后兼容）
 
-`_detect_markdown_sections()` LLM 调用参数：
-- `mode="fast"`（结构化 JSON，零 reasoning overhead）
-- `max_tokens=8192`
-- `timeout=60`
-- 输入：完整 OCR markdown（`[0]` 行号格式，保留 `##`/`###` 层级）
-- 输出：`{sections: [...], answer_section: {exists, line, note}}`
+以下函数已不再被 `extract_questions_from_markdown()` 使用，但保留以兼容 `extract_questions_from_blocks()` 路径：
+
+| 函数 | 说明 |
+|------|------|
+| `_detect_markdown_sections()` | LLM 语义 section 检测（仅 blocks 路径使用） |
+| `_extract_answers_from_section()` | 答案区标注范式（仅 blocks 路径使用） |
+| `extract_questions_from_section()` | Per-section QD 提取（仅 blocks 路径使用） |
+
+### LLM 调用参数
+
+`extract_questions_from_markdown()`:
+- `mode="reasoning"`（DeepSeek V4 Pro，需推理能力处理复杂题型）
+- `max_tokens=131072`（S#166 起：flash 无 thinking tokens，从 16384 提升至 128K）
+- `timeout=600`（大文档 + reasoning 模式需要更长等待，原 180s 过短）
+- 输入：完整 OCR markdown（保留 `##`/`###` 层级）
+- 输出：`[{qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}]`
 
 ---
 
-## 五、当前状态（Session #161 — LLM 元数据架构完成 + 英语复合题回归修复）
+## 五、当前状态（Session #167 — 简化管线完成 + 9 科回归通过）
 
-### §7.4 服务稳定性（✅ 已实施）
+### S#167: 简化管线（✅ 已完成）
 
-**Supervised Watchdog** (`scripts/start_backend.py --supervised`)：
-- 健康检查轮询 `/health`，每 5s
-- 连续 3 次不健康 → kill + restart
-- 指数退避 5s→10s→20s→...（上限 60s），最多 10 次重启
-- `release_port()` 自动清理 TCP TIME_WAIT zombie（最多 120s）
-- 崩溃恢复审计：`start_worker()` 启动时查询 Redis 队列长度
+**背景**: 旧管线 5 步（section detection → batch splitting → QNO remap → answer merge → cross-validate），OCR markdown 最大仅 39K chars（~15K tokens），DeepSeek 512K 上下文完全不需要分段。修复 JSON 转义后反而触发 section detection fallback 导致 Q1-Q5 丢失——证明复杂度本身就是 bug 来源。
 
-**已验证**: crash → 8s 内自动恢复，健康端点正常。
+**简化方案**: OCR markdown → 单次 LLM 调用 → 直接入库。
 
-### §7.5 管线增强（✅ 已实施）
+**核心改动**:
+- 新增 `_QD_SIMPLE_ANNOTATION_PROMPT`：LLM 一次性输出全部题目的行号范围
+- 重写 `extract_questions_from_markdown()`：单次 LLM 调用，无分段/分批/重映射
+- 修复 `_clean_json()`：regex 从 `\\(?!["\\/bfnrtu])` 改为 `\\(?!["\\/ntu])`，`\b` `\f` `\r` 视为 LaTeX 转义
+- 新增 answer override 保护：选择题不因 `answer_lines` 覆盖字母答案
+- 新增 `_detect_missing_qnos()` 辅助函数
 
-**QD Preview Endpoint**: `POST /api/documents/{doc_id}/reprocess-qd`
-- 从 DB 读取已存储的 `ocr_markdown`，调用 `extract_questions_from_markdown()` 重新提取
-- 返回标准化 JSON 预览（passage→stem 合并、options 解析、qno 强制转换）
-- 用于快速迭代 QD prompt，无需重新上传 PDF/跑完整管线
+**9 科全量回归验证**:
+| 指标 | 结果 |
+|------|------|
+| 总题数 | 293 |
+| 题干覆盖 | 100% |
+| 答案覆盖 | 100% |
+| 选择题字母答案正确 | 168/168 (100%) |
+| 仅缺失 | 地理 3 题（文档特定问题，非结构性） |
+| 英语复合题型 | 54 题全对（旧管线仅 35 碎片 + Q1-Q10 丢失） |
 
-### S#160: Section Detection 正则→LLM 语义化（✅ 已实施）
+### Git 仓库
 
-`_detect_markdown_sections()` 从正则关键词切分完全重构为 LLM 语义理解：
-- 历史 0→43 题（100%）
-- 生物 ~7→26 题（100%）
-- 设计原则：Section 检测 = LLM 语义，Answer 边界 = 简单正则，QNO = 辅助校验
-
-### S#161: LLM 元数据架构落地（✅ 已实施）
-
-**背景**: S#160 的 `_detect_markdown_sections()` 仅返回 `{header, line}`，语义信息不足 → S#159 的 composite merge 关键词规则全部失效 → 英语 56 碎片回归。
-
-**重构**: `_detect_markdown_sections()` 返回类型从 `list[tuple]` 扩展为 `tuple[list[tuple], list[dict]]`：
-- `sections_meta[i]`: `{type_hint, qno_first, qno_last, is_composite, material_shared}`
-- `answer_section`: `{exists, line, note}`
-
-**下游消费**: `meta.get("is_composite")` 替代 7 个中文关键词；`answer_section.line` 替代 `_ANSWER_SECTION_RE`。
-
-**验证**: 英语 doc 17: 56 碎片 → **10 composite 题**。
-
-### P0 遗留问题
-
-- **选词填空 section detection 漏检**: LLM 将 选词填空 header 合并到 语法填空 section body，但 per-section LLM 仍正确提取为独立 composite 题（轻微影响，非致命）
-- **9 科全量回归验证**: 英语单科已通过，其余 8 科待重测
+```
+Remote:  https://github.com/kurt-wong/AITutor
+main:    bac42f5 (baseline)
+*refactor/annotation-architecture: ee72faa (简化管线，待合并到 main)
+```
 
 ### 关键代码指标
 
-- `_question_driven_extractor.py`: ~1400 行（核心 QD 提取逻辑）
-- `_detect_markdown_sections()`: LLM `mode="fast"`, `max_tokens=8192`, `timeout=60`
-- Section metadata 字段: 6 个语义字段 + answer_section 3 个字段
-- 已消除的硬编码: 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则
+- `_question_driven_extractor.py`: ~1900 行（简化管线 + 旧函数保留向后兼容）
+- `extract_questions_from_markdown()`: LLM `mode="reasoning"`, `max_tokens=131072`, `timeout=600`
+- `_QD_SIMPLE_ANNOTATION_PROMPT`: ~120 行 prompt（S#167 新增）
+- 已消除的中间步骤: section detection / batch splitting / QNO remap / composite merge（markdown 路径）
+
+### 待定
+
+- 是否合并 `refactor/annotation-architecture` 到 `main`
+- 全量 29 份文档入库验证（可选）
+- Step 2: 标注镜像库（`question_annotations` 表 + Repository）— P2 待设计
+- Step 4: 前端渲染切换（L1+L2 组合渲染）— P2 待设计
 
 ---
 
@@ -218,20 +222,23 @@ _VISION_FIRST_SUBJECTS = frozenset({
 | 代码段 | 说明 |
 |--------|------|
 | `_pipeline_checkpoint()` | 管线监控 checkpoint（**sync**—不能 await！） |
-| `_step_llm_annotate()` | **管线入口**：学科路由 + QD blocks → Vision → V3 |
+| `_step_llm_annotate()` | **管线入口**：学科路由 + 调用 `extract_questions_from_markdown()` |
 | `_cross_validate()` | 交叉验证主函数 |
 | `_mimo_vision_extract()` | MIMO Vision 提取主函数 |
 | `_VISION_FIRST_SUBJECTS` | 视觉优先学科 frozenset |
 
-### _question_driven_extractor.py（Question-Driven 提取器，~1400 行）
+### _question_driven_extractor.py（QD 提取器，~1900 行）
 
 | 代码段 | 说明 |
 |--------|------|
-| `_detect_markdown_sections()` | **LLM 语义 section 检测** — 返回 `(sections, metadata)` 双元组，元数据含 type_hint/is_composite/qno_range |
-| `extract_questions_from_markdown()` | 从 markdown 文本 LLM 提取（优先路径） |
-| `extract_questions_from_blocks()` | 从 block_label 块组装题目（PaddleOCR-VL 场景） |
-| `_SECTION_DETECTION_PROMPT` | LLM prompt：输出完整语义元数据 + answer_section 边界 |
-| `_SUBJECT_COMPREHENSIVE_HINTS` | 各科综合题 LLM prompt hints（辅助，不驱动逻辑） |
+| `extract_questions_from_markdown()` | **简化管线主入口**（S#167）— 单次 LLM 调用，Annotation Paradigm |
+| `_QD_SIMPLE_ANNOTATION_PROMPT` | **一次性提取 prompt**（S#167）— LLM 输出全部题目行号范围 |
+| `_clean_json()` | JSON 修复（S#167 修复）— `\b` `\f` `\r` 视为 LaTeX 转义 |
+| `_detect_missing_qnos()` | 缺失题号检测（S#167 新增） |
+| `extract_questions_from_blocks()` | Blocks 路径（PaddleOCR-VL 场景，走旧多步管线） |
+| `_detect_markdown_sections()` | LLM 语义 section 检测（仅 blocks 路径使用） |
+| `_extract_answers_from_section()` | 答案区标注范式（仅 blocks 路径使用） |
+| `extract_questions_from_section()` | Per-section QD 提取（仅 blocks 路径使用） |
 
 ### _document_pipeline.py（管线编排）
 
@@ -241,14 +248,14 @@ _VISION_FIRST_SUBJECTS = frozenset({
 | `_extract_route_parallel()` | 并行提取 + LLM 标注 |
 | `_store_questions()` | 题目入库 + quality gate |
 
-### 测试脚本
+### 测试/验证脚本
 
 | 脚本 | 说明 |
 |------|------|
-| `backend/scripts/_run_9subj_test_v2.py` | **当前运行中** — 9 科全量测试（带轮询+逐环节解析） |
-| `backend/scripts/_upload_test.py` | 上传单份测试 PDF |
+| `backend/scripts/_verify_simple_qd.py` | 简化管线验证（3 文档逐题对比） |
+| `backend/scripts/_regression_simple_9subj.py` | 9 科全量回归（每科随机 1 份文档） |
+| `backend/scripts/_quick_verify_answer.py` | 答案覆盖修复验证 |
 | `backend/scripts/reset_test_data.py` | 清库 + 重置序列 |
-| `backend/scripts/9subj_test_v2_partial.json` | 中间结果 JSON |
 
 ### 清库命令
 
@@ -263,6 +270,12 @@ python scripts/reset_test_data.py
 
 | Session | 日期 | 内容 |
 |---------|------|------|
+| **#167** | **08-06** | **简化管线落地**: 砍掉 section detection / batch splitting / QNO remap，OCR markdown → 单次 LLM 调用 → 直接入库。新增 `_QD_SIMPLE_ANNOTATION_PROMPT`，重写 `extract_questions_from_markdown()`。修复 `_clean_json()` 中 `\b` `\f` `\r` 误判。9 科回归：293 题 100% 覆盖，168/168 选择题正确。提交 ee72faa，版本 1.56.0。 |
+| **#166** | **08-05** | **Annotation Paradigm 调试验证**: 首次尝试 LLM 直接输出内容（stem/options/answer）→ JSON parse 失败（LaTeX 未转义）。切换为行号标注：LLM 只输出行号范围，代码从原文切出。answer override 保护（选择题不被 `answer_lines` 覆盖字母答案）。 |
+| **#165** | **08-05** | **QD 管线问题诊断**: 用户质疑为何多次修复仍丢题。根因分析：JSON 转义修复前 section detection 失败走 fallback 保留全部题目，修复后 LLM 返回 sections 但从 Q6 开始→丢 Q1-Q5。`_clean_json` 的 `\b` `\f` `\r` 误判为合法 JSON 转义。结论：文档仅 15K tokens，512K 上下文完全不需要分段。 |
+| **#164** | **08-02** | **标注范式 Step 3 实施**: QD 题干标注化完成（`extract_questions_from_section()` 改为 annotation 范式）。新增 `_QD_ANNOTATION_EXTRACTION_PROMPT`（LLM 输出行号范围）、`_extract_text_from_lines()`、`_extract_multiple_ranges()` 辅助函数。彻底消灭 LaTeX JSON 转义问题。版本 1.53.0。 |
+| **#163** | **08-01** | **标注范式 Step 1 实施 + 选择题超时修复 + HTML表格解析**: 答案区标注范式落地（LLM输出行号→代码切原文）。选择题超时根因 max_tokens=65536→修复为 mode=fast + 16384 + 批量拆分。HTML 表格答案键解析（`_extract_answer_from_row`）。填空题 QD 提取暴露同样 LaTeX JSON 问题 → Step 3 提升为 P0。 |
+| **#162** | **08-01** | **标注范式架构重构启动**: LaTeX JSON 转义漏洞根因分类（5 类，含合法转义静默损毁）。L0→L1→L2→L3 分层不可变架构确立。Git 基线 + `refactor/annotation-architecture` 分支。4 步重构计划（Step 1: 答案区标注范式 ~80 行）。 |
 | **#161** | **08-01** | **LLM 元数据架构落地**: `_detect_markdown_sections()` 重写为完整语义元数据输出，composite merge 零关键词，answer boundary LLM 判断。英语 56→10 composite 题。消除 7 个中文关键词 + `_ANSWER_SECTION_RE`。 |
 | **#160** | **08-01** | **Section Detection 正则→LLM 语义重构**: 历史 0→43 题、生物 ~7→26 题。 |
 | **#159** | **08-01** | **英语 QD 修复 + 全科推广**: 阅读篇章子切分、composite merge、QNO 修正、9 科 hints。13 题验证通过（后被 S#160 覆盖）。 |
@@ -281,22 +294,39 @@ python scripts/reset_test_data.py
 ## 八、给 Claude/TRAE 的工作指令
 
 ```
-继续 AI Tutors 项目。版本 1.50.0。
+继续 AI Tutors 项目。版本 1.56.0。
 
 == 当前重点 ==
 
-S#161 LLM 元数据架构已完成落地：
-- `_detect_markdown_sections()` 返回完整语义元数据（type_hint/is_composite/qno_range/material_shared + answer_section）
-- Composite merge 零关键词匹配，直接消费 `meta.get("is_composite")`
-- Answer 边界由 LLM metadata `answer_section.line` 判断，废弃 `_ANSWER_SECTION_RE` 正则
-- 英语 QD: 56 碎片→10 composite 题，完形+语法+选词+4篇阅读+七选五+阅读表达+写作全部正确
-- 已消除: 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则
-- 后端以 supervised 模式运行（崩溃自动重启，8s 恢复）
-- QD preview 端点可用（POST /api/documents/{id}/reprocess-qd）
+简化管线已落地（S#167）— `refactor/annotation-architecture` 分支，commit ee72faa：
 
-P1 待办：
-1. 9 科全量回归 QD 测试（验证 S#161 元数据架构在其他科目的效果）
-2. 选词填空 section detection 漏检优化（LLM 将其合并到语法填空 body）
+核心变化：
+  OCR markdown (≤40K chars) → extract_questions_from_markdown() → 单次 LLM 调用 → 直接入库
+
+已砍掉:
+  ❌ section detection（_detect_markdown_sections）— 文档仅 15K tokens，512K 上下文无需分段
+  ❌ batch splitting（_split_section_into_batches）— 单次调用提取全部题目
+  ❌ QNO remap（_calculate_qno_offset）— 不再分批，无需重映射
+  ❌ composite merge（关键词驱动）— LLM 直接输出完整复合题
+
+Annotation Paradigm（行号标注）:
+  - LLM 输出: {qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}
+  - 代码从 OCR 原文按行号切出 → JSON 永不包含 LaTeX 字符串
+  - _clean_json() 修复: regex 为 \\(?!["\\/ntu])，\b \f \r 视为 LaTeX 转义
+
+9 科回归结果:
+  - 293 题，100% 题干/答案覆盖，168/168 选择题字母答案正确
+  - 仅地理 3 题缺失（文档特定问题，非结构性）
+  - 英语 54 题复合题型全对（旧管线仅 35 碎片 + Q1-Q10 丢失）
+
+旧函数保留（仅 blocks 路径使用）:
+  - _detect_markdown_sections() / _extract_answers_from_section() / extract_questions_from_section()
+
+== Git ==
+
+Remote:  https://github.com/kurt-wong/AITutor
+Current: refactor/annotation-architecture (commit: ee72faa)
+Status:  简化管线已验证，待决定是否合并到 main
 
 == 快速恢复步骤 ==
 
@@ -307,26 +337,23 @@ P1 待办：
 
 == 关键注意事项 ==
 
+- 所有代码修改必须严格遵循项目文档设定，不能擅自越过项目文档；确需偏离时先充分沟通、明确告知影响并得到确认后再改代码
+- pytest 常规命令: `cd backend ; .venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py`（不要直接跑全量，live E2E 会真实调用外部 API 并可能长时间挂起）
 - 管线代码修改后必须 kill + restart（supervised 模式会自动重启）
-- QD 提取所有逻辑集中在 `_question_driven_extractor.py`（~1400 行）
-- `_detect_markdown_sections()` 返回双元组：`(sections: list[tuple], metadata: list[dict])`
-- LLM section detection 参数: `mode="fast"`, `max_tokens=8192`, `timeout=60`
-- Section metadata 字段: `type_hint`, `qno_first`, `qno_last`, `is_composite`, `material_shared`
-- Composite merge: `meta.get("is_composite")` — 零关键词、零猜测
-- Answer boundary: `answer_section.line` 从 LLM metadata，不依赖 `_ANSWER_SECTION_RE`
-- 阅读篇章子切分: `_PASSAGE_MARKER_RE` 检测 A/B/C/D 单字母行标记
-- max_chars=30000（从 12000 提升）
-- 空壳 section（< 100 chars）自动过滤
+- QD 提取核心文件: `_question_driven_extractor.py`（~1900 行）
+- Markdown 路径: `extract_questions_from_markdown()` — 简化管线，单次 LLM 调用
+- Blocks 路径: `extract_questions_from_blocks()` — 旧多步管线（PaddleOCR-VL 场景）
+- LLM 调用参数: `mode="reasoning"`, `max_tokens=131072`, `timeout=600`
 - `_pipeline_checkpoint()` 是 sync 函数，不能 await
 - 任务日志 timestamp 是 Excel 序列号字符串，需 `float()` 转换
 - 修改 async_document.py 后必须删除 __pycache__ 再重启
 - 端口 8000 被占用时，start_backend.py 会自动 release_port()
 - Redis 队列持久化：crash 后 restart，任务不丢失
+
+== 待办事项 ==
+
+1. 🟡 决定是否合并 refactor/annotation-architecture 到 main
+2. 🟢 全量 29 份文档入库验证（可选）
+3. 🟡 P2 — 标注镜像库（question_annotations 表 + Repository）
+4. 🟡 P2 — 前端渲染切换（L1+L2 组合渲染）
 ```
-
-### 新增 API 端点
-
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/health` | GET | 健康检查（supervised 轮询用） |
-| `/api/documents/{id}/reprocess-qd` | POST | 从 DB 读取 OCR markdown，重新 QD 提取预览 |

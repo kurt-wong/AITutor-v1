@@ -3,6 +3,8 @@
 Version: 2.1
 Status: FROZEN (2026-07-12 代码审计修正)
 
+> **实现现状注记（2026-08-06）**: 本文档为产品需求定义，保持 FROZEN。当前实现细节以 `Docs/02_Architecture/PIPELINE.md`（Annotation Paradigm / QD 行号标注）和 `PROJECT_STATUS.md` 为准；本文档中的历史管线描述（Route A / VL 协同 / QuestionStructurer 主路径）不代表当前实现。
+
 ---
 
 ## 1. Purpose

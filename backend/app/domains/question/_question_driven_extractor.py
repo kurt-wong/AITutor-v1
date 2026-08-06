@@ -439,37 +439,20 @@ def _clean_json(raw: str) -> str:
     start = raw.find("{")
     end = raw.rfind("}")
     if start >= 0 and end > start:
-        return raw[start:end + 1]
+        raw = raw[start:end + 1]
+    # S#167: Fix invalid JSON escape characters from LLM
+    # LLM output may contain LaTeX commands like \frac, \sqrt, \times etc.
+    # These backslashes are NOT valid JSON escapes but share the \ prefix
+    # with valid ones like \", \\, \/, \n, \t, \uXXXX.
+    #
+    # We preserve only the essential JSON escapes: \" \\ \/ \n \t \uXXXX
+    # \b, \f, \r are also valid JSON BUT they're extremely common LaTeX
+    # command prefixes (\begin, \beta, \frac, \right, \rho etc.) —
+    # treating them as LaTeX is always safe in this context.
+    raw = re.sub(r'\\(?!["\\/ntu])', r'\\\\', raw)
     return raw
 
 
-def _parse_llm_questions(raw: str) -> list[dict]:
-    """Parse LLM response into a list of question dicts.
-
-    Handles both top-level JSON array and nested {"questions": [...]} object.
-    """
-    cleaned = _clean_json(raw)
-    try:
-        data = _json.loads(cleaned)
-    except _json.JSONDecodeError as e:
-        logger.warning("Failed to parse LLM response as JSON: %s", e)
-        return []
-
-    # Handle {"questions": [...]} wrapper
-    if isinstance(data, dict):
-        questions = data.get("questions", [])
-        if questions:
-            return questions
-        # Try to find any list value
-        for val in data.values():
-            if isinstance(val, list) and val and isinstance(val[0], dict):
-                return val
-
-    # Direct array
-    if isinstance(data, list):
-        return data
-
-    return []
 
 
 # Subject-specific question type taxonomy for the extraction prompt
@@ -622,81 +605,19 @@ _SUBJECT_COMPREHENSIVE_HINTS: dict[str, str] = {
 }
 
 
-def _build_extraction_system_prompt(subject_code: str) -> str:
-    """Build the system prompt for question extraction."""
-    subj_key = subject_code.lower() if subject_code else "mathematics"
-    type_options = _QUESTION_TYPES_BY_SUBJECT.get(
-        subj_key, ["choice", "fill", "calculation", "essay"],
-    )
-    comprehensive_hint = _SUBJECT_COMPREHENSIVE_HINTS.get(subj_key, "")
-
-    lines = [
-        "You are an exam question extractor.  Your task is to identify and extract",
-        "every question from an exam section.",
-        "",
-        "## Rules",
-        "1. Identify ALL complete questions in the given text.",
-        "2. Each question must have: qno (integer), type (string), stem (full text), passage (if shared material), options (if choice/multi_choice), answer (if present in text).",
-        "3. For fill-in-the-blank questions, include the blank markers (___ or （）) in the stem.",
-        "4. For choice questions, extract options as a list of strings (e.g. ['A. ...', 'B. ...']).",
-        "5. Include any formulas, tables, or figure references as part of the stem.",
-        "6. Do NOT include answer keys, scoring notes, or teacher annotations as part of the stem.",
-        "7. CRITICAL: If a question has sub-parts like (1)(2)(3) or multiple blanks in a shared passage, "
-        "treat the ENTIRE group as ONE question. Put the shared material in 'passage' and all sub-items in 'stem'. "
-        "NEVER create separate questions for each sub-part or blank.",
-    ]
-
-    if comprehensive_hint:
-        lines.append(f"\n## Subject-Specific Guidance\n{comprehensive_hint}")
-
-    lines.extend([
-        "",
-        f"Subject: {subject_code}",
-        f"Valid question types: {', '.join(type_options)}",
-        "",
-        "CRITICAL: The exam section text you receive is ALREADY one logical unit. "
-        "The entire section should produce EXACTLY ONE question (for composite sections "
-        "like reading comprehension/cloze/experiment) or a small number of standalone "
-        "questions (for sections with independent numbered questions). "
-        "NEVER create 20+ questions from a single section.",
-        "",
-        "## Output Format",
-        "Return a JSON object with a 'questions' array:",
-        "{",
-        '  "questions": [',
-        "    {",
-        '      "qno": 1,',
-        '      "type": "cloze",',
-        '      "passage": "shared reading material (if this question has a shared passage, '
-        'put the FULL original text here — do NOT summarize or truncate)",',
-        '      "stem": "full question text — for composite questions, include ALL sub-questions, '
-        'blanks, and options in the stem",',
-        '      "options": ["A. option1", "B. option2"],',
-        '      "answer": "C"',
-        "    }",
-        "  ]",
-        "}",
-        "",
-        "IMPORTANT: ALWAYS include the 'type' field with a value from the valid types above.",
-        "",
-        "For composite questions (e.g. reading comprehension, cloze, grammar fill):",
-        "- Use the 'passage' field for the shared reading material",
-        "- Put ALL sub-questions, blanks, and their options into the 'stem' field",
-        "- Output ONLY ONE question object per section/group — do NOT create separate questions for each sub-item",
-        "",
-        "Output ONLY the JSON object, no other text.",
-    ])
-
-    return "\n".join(lines)
 
 
 async def extract_questions_from_section(
     section_markdown: str,
     subject_code: str,
     section_label: str = "",
-    timeout: float = 120.0,
+    timeout: float = 180.0,
 ) -> tuple[list[dict], dict[str, Any]]:
     """Call LLM to extract questions from a single section's markdown.
+
+    ANNOTATION PARADIGM (S#163 Step 3): LLM outputs line number ranges,
+    code extracts content from OCR original. This avoids LaTeX escape
+    issues in JSON completely.
 
     Args:
         section_markdown: Complete section text rendered as markdown.
@@ -708,30 +629,54 @@ async def extract_questions_from_section(
         (questions, validation_report) where questions is a list of
         question dicts and validation_report is the QNO validation result.
     """
-    system_prompt = _build_extraction_system_prompt(subject_code)
+    # Split into lines for line-number annotation
+    raw_lines = section_markdown.split("\n")
 
-    # Build full prompt
-    full_prompt = (
-        f"{system_prompt}\n\n"
-        f"## Exam Section Text\n"
-        f"```\n{section_markdown}\n```"
-    )
+    # Build condensed text with line numbers [N] for LLM
+    condensed: list[str] = []
+    for i, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if stripped:
+            condensed.append(f"[{i}] {stripped}")
+
+    if not condensed:
+        logger.warning("Section [%s] has no content lines", section_label or "unnamed")
+        return [], {"status": "empty", "section": section_label}
+
+    condensed_text = "\n".join(condensed)
+
+    # Build full prompt with annotation paradigm
+    full_prompt = f"{_QD_ANNOTATION_EXTRACTION_PROMPT}\n\n```\n{condensed_text}\n```"
 
     try:
         from app.gateway.router import llm_gateway
 
         logger.info(
-            "Extracting questions from section [%s] (%d chars)",
+            "Extracting questions from section [%s] (%d chars, %d lines)",
             section_label or "unnamed",
             len(section_markdown),
+            len(condensed),
         )
+
+        # S#163: Layered model selection by section complexity
+        # Simple sections (choice/fill) → MIMO fast (low latency)
+        # Complex sections (essay/reading/calculation) → DeepSeek reasoning (quality)
+        is_simple = subject_code in ("choice", "fill") or (
+            section_label and any(kw in section_label for kw in ["选择", "填空", "choice", "fill"])
+        )
+        if is_simple:
+            mode = "fast"
+            max_tokens = 8192
+        else:
+            mode = "reasoning"
+            max_tokens = 131072  # S#166: 128k — flash has no thinking tokens
 
         result = await asyncio.wait_for(
             llm_gateway.generate(
-                mode="reasoning",  # DeepSeek for complex extraction
+                mode=mode,
                 prompt=full_prompt,
                 response_format={"type": "json_object"},
-                max_tokens=65536,  # P0: prevent JSON truncation for large sections (was 4096 default)
+                max_tokens=max_tokens,
             ),
             timeout=timeout,
         )
@@ -760,26 +705,50 @@ async def extract_questions_from_section(
         )
         return [], {"status": "error", "section": section_label, "error": str(exc)}
 
-    questions = _parse_llm_questions(raw)
-    if not questions:
+    # Parse LLM response (annotation format with line numbers)
+    try:
+        parsed = _json.loads(_clean_json(raw))
+        questions_data = parsed.get("questions", [])
+        if not questions_data:
+            # Try to find any list value
+            for val in parsed.values():
+                if isinstance(val, list) and val and isinstance(val[0], dict):
+                    questions_data = val
+                    break
+    except (_json.JSONDecodeError, TypeError) as e:
+        logger.warning(
+            "Failed to parse LLM annotation response for section [%s]: %s",
+            section_label or "unnamed", e
+        )
+        return [], {"status": "parse_error", "section": section_label, "error": str(e)}
+
+    if not questions_data:
         logger.warning(
             "LLM returned no parseable questions for section [%s]",
             section_label or "unnamed",
         )
         return [], {"status": "empty", "section": section_label}
 
+    # S#165: Log raw LLM output for QNO diagnosis
+    logger.info(
+        "QD batch extraction raw: section=[%s], qnos=%s, count=%d",
+        section_label,
+        [q.get("qno") for q in questions_data],
+        len(questions_data),
+    )
+
     # Validate against regex QNO
     extracted_qnos = [
-        q.get("qno") for q in questions
+        q.get("qno") for q in questions_data
         if q.get("qno") is not None
     ]
     validation = validate_qnos(
         section_markdown, extracted_qnos, section_label,
     )
 
-    # Normalize question dicts
+    # Normalize question dicts — extract content from line numbers
     normalized = []
-    for q in questions:
+    for q in questions_data:
         qno = q.get("qno")
         try:
             qno = int(qno) if qno is not None else None
@@ -787,24 +756,26 @@ async def extract_questions_from_section(
             qno = None
 
         qtype = q.get("type", "calculation")
-        passage = (q.get("passage") or "").strip()
-        stem = (q.get("stem") or "").strip()
-        # Merge passage into stem for composite questions
+
+        # Extract content from line number ranges (ANNOTATION PARADIGM)
+        passage = _extract_text_from_lines(raw_lines, q.get("passage_lines"))
+        stem = _extract_text_from_lines(raw_lines, q.get("stem_lines"))
+        options_raw = _extract_multiple_ranges(raw_lines, q.get("options_lines"))
+        answer = _extract_text_from_lines(raw_lines, q.get("answer_lines"))
+        explanation = _extract_text_from_lines(raw_lines, q.get("explanation_lines"))
+
+        # Merge passage into stem for composite questions (same as before)
         if passage and stem:
             stem = passage + "\n\n" + stem
         elif passage:
             stem = passage
-        
-        options = q.get("options") or []
-        if isinstance(options, str):
-            try:
-                options = _json.loads(options)
-            except (_json.JSONDecodeError, TypeError):
-                options = [options] if options.strip() else []
-        if not isinstance(options, list):
-            options = []
-        options = [str(o).strip() for o in options if o and str(o).strip()]
-        answer = (q.get("answer") or "").strip()
+
+        # Parse options from extracted text
+        options = []
+        if options_raw:
+            # Split by newlines and clean
+            option_lines = [o.strip() for o in options_raw.split("\n") if o.strip()]
+            options = option_lines
 
         # S#162: Normalize Unicode subscripts/superscripts → LaTeX
         stem = _normalize_unicode_math(stem)
@@ -818,14 +789,14 @@ async def extract_questions_from_section(
             "stem": stem,
             "options": options,
             "answer": answer,
-            "explanation": str(q.get("explanation", "")).strip(),
+            "explanation": explanation,
             "score": q.get("score"),
             "difficulty": None,
             "knowledge_points": q.get("knowledge_points", []),
         })
 
     logger.info(
-        "Section [%s]: extracted %d questions, validation=%s",
+        "Section [%s]: extracted %d questions (annotation mode), validation=%s",
         section_label or "unnamed",
         len(normalized),
         validation["status"],
@@ -841,7 +812,7 @@ async def extract_questions_from_blocks(
     paddleocr_result: Any,
     subject_code: str = "",
     max_concurrent: int = 3,
-    timeout_per_section: float = 120.0,
+    timeout_per_section: float = 180.0,
 ) -> dict[str, Any] | None:
     """Main entry point: extract questions from PaddleOCR-VL structured blocks.
 
@@ -1053,6 +1024,16 @@ Also detect the ANSWER SECTION (do NOT include answers as a question section):
 }
 
 IMPORTANT RULES:
+- CRITICAL: When question TYPE changes (e.g. 选择题→填空题,
+  填空题→计算题, etc.), you MUST create a NEW section. The boundary
+  is at the FIRST line of the new question type, even if the transition
+  header is a simple text line (not a markdown heading).
+- Look for transition signals: numbered headers (二、, 2.), explicit
+  type labels (填空题, 实验题, 解答题), or pattern changes in QNO sequence.
+- The section's qno_first and qno_last MUST match the actual QNOs
+  visible within the section's line range [line, next_section.line).
+  If the next section starts at Q12, this section's qno_last cannot
+  be 21 — it must be ≤ the last QNO actually in the body.
 - Identify MAJOR sections that contain actual exam questions.
 - Skip preamble text (school name, exam title, instructions).
 - Do NOT split individual questions into separate sections.
@@ -1068,27 +1049,267 @@ Return ONLY this JSON structure:
 {"sections": [...], "answer_section": {...}}"""
 
 
-_ANSWER_EXTRACTION_PROMPT = """You are parsing an exam's "参考答案" (answer key) section.
+_ANSWER_EXTRACTION_PROMPT = """You are locating answers in an exam's "参考答案" (answer key) section.
 
-The text contains answers for ALL question types:
-- Choice answers: may be HTML table, "1-5 ABCDB" range notation, "1.A 2.B" list, or inline
-- Fill-in answers: "NN.【答案】value" format
-- Essay answers: "NN.【答案】value【分析】...【详解】..." format
+The input text has line numbers like [0], [1], [2]... at the start of each line.
+Your task: for EACH question, find which lines contain its answer and explanation.
+DO NOT copy content — only output LINE NUMBERS.
 
-Extract EVERY question's answer and explanation. For choice questions, the
-explanation is typically empty. For fill-in/essay questions, extract 【分析】
-and/or 【详解】 content as explanation.
+For choice questions:
+- The answer is typically a single letter (A/B/C/D) in a table or list
+- Set answer_line to the line containing that letter
+- explanation_lines is null (no explanation for choices)
+
+For fill-in/essay questions:
+- The answer follows 【答案】 marker
+- The explanation follows 【分析】 and/or 【详解】 markers
+- explanation_lines covers from 【分析】/【详解】 to the next question or section end
 
 Return a JSON object:
-{"items": [{"qno": 1, "answer": "A", "explanation": ""}, {"qno": 11, "answer": "[-2,0)∪(0,+∞)", "explanation": "由题意，得..."}, ...]}
+{"items": [
+  {"qno": 1, "answer_line": 3, "explanation_lines": null},
+  {"qno": 11, "answer_line": 8, "explanation_lines": [9, 15]},
+  ...
+]}
 
 Rules:
-- qno must be integer
-- answer is the final answer (choice letter, value, or expression)
-- explanation contains analysis/solution steps if present, empty string if not
-- Extract ALL questions, do not skip any
-- For HTML table answers: map column position to question number
-- For "1-5 ABCDB" format: expand to individual qno→answer pairs"""
+- qno: question number (integer)
+- answer_line: line number [N] where the answer is (single integer)
+- explanation_lines: [start, end] line numbers inclusive, or null if no explanation
+- Line numbers refer to the [N] prefixed lines in the input
+- Extract ALL questions — do not skip any
+- For HTML table answers: the answer line is the row containing the answer value
+- For "1-5 ABCDB" format: each letter maps to its own qno with answer_line pointing to that letter
+- NEVER output content strings — only integers and null"""
+
+
+def _extract_line(lines: list[str], line_num: int, tolerance: int = 1) -> str:
+    """Extract content from a specific line number with tolerance.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        line_num: The [N] line number from LLM output.
+        tolerance: Allowed deviation from exact line number.
+
+    Returns:
+        Stripped content of the matched line, or empty string.
+    """
+    if line_num < 0 or line_num >= len(lines):
+        return ""
+    # Try exact match first
+    content = lines[line_num].strip()
+    if content:
+        return content
+    # Try within tolerance
+    for offset in range(1, tolerance + 1):
+        for delta in [offset, -offset]:
+            idx = line_num + delta
+            if 0 <= idx < len(lines):
+                content = lines[idx].strip()
+                if content:
+                    return content
+    return ""
+
+
+def _extract_answer_from_row(
+    row_text: str, qno: int, qno_in_section: list[int]
+) -> str:
+    """Extract a single answer from an HTML table row.
+
+    When the answer line is an HTML table containing multiple answers
+    (e.g., choice answer table with header row + answer row), extract
+    the specific cell for this qno from the answer row.
+
+    Args:
+        row_text: The full row text (may be HTML table or plain text).
+        qno: The question number to extract answer for.
+        qno_in_section: Ordered list of all qnos in this section.
+
+    Returns:
+        The specific answer for this qno, or the original row_text if
+        extraction fails.
+    """
+    if not row_text:
+        return ""
+
+    # Check if this is HTML with <td> tags
+    if "<td" not in row_text.lower():
+        return row_text
+
+    # Find the answer row (contains "答案" or "Answer")
+    # Split by <tr> to get individual rows
+    tr_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
+    rows = tr_pattern.findall(row_text)
+
+    answer_cells = None
+    for tr_content in rows:
+        # Check if this row contains "答案" or "Answer" marker
+        if re.search(r'答案|Answer|answer', tr_content, re.IGNORECASE):
+            # Extract cells from this answer row
+            cells = re.findall(r'<td[^>]*>(.*?)</td>', tr_content, re.DOTALL | re.IGNORECASE)
+            if cells:
+                answer_cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+                break
+
+    # Fallback: if no "答案" row found, use the LAST row (usually the answer row)
+    if answer_cells is None and rows:
+        last_row = rows[-1]
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', last_row, re.DOTALL | re.IGNORECASE)
+        if cells:
+            answer_cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+
+    if answer_cells is None:
+        return row_text
+
+    # First cell is the header label ("答案"), skip it
+    # Find the position of this qno in the section
+    try:
+        idx = qno_in_section.index(qno)
+        answer_idx = idx + 1  # +1 because first cell is the header label
+        if answer_idx < len(answer_cells):
+            return answer_cells[answer_idx]
+    except ValueError:
+        pass
+
+    return row_text
+
+
+def _extract_lines_range(
+    lines: list[str], start: int, end: int, tolerance: int = 1
+) -> str:
+    """Extract content from a range of line numbers with tolerance.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        start: Start line number (inclusive).
+        end: End line number (inclusive).
+        tolerance: Allowed deviation for start/end boundaries.
+
+    Returns:
+        Joined content of the line range, stripped.
+    """
+    if start > end:
+        return ""
+    # Clamp to valid range
+    start = max(0, start)
+    end = min(len(lines) - 1, end)
+    content = "\n".join(lines[start:end + 1]).strip()
+    if content:
+        return content
+    # Try with tolerance on boundaries
+    for t in range(1, tolerance + 1):
+        s = max(0, start - t)
+        e = min(len(lines) - 1, end + t)
+        content = "\n".join(lines[s:e + 1]).strip()
+        if content:
+            return content
+    return ""
+
+
+def _extract_question_lines(
+    lines: list[str], ranges: list | None, tolerance: int = 1
+) -> str:
+    """Extract content from a list of [start, end] line ranges.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        ranges: List of [start, end] inclusive ranges, or None.
+        tolerance: Allowed deviation for boundary lines.
+
+    Returns:
+        Joined content of all ranges, stripped.
+    """
+    if not ranges:
+        return ""
+    parts: list[str] = []
+    for r in ranges:
+        if isinstance(r, list) and len(r) == 2:
+            part = _extract_lines_range(lines, int(r[0]), int(r[1]), tolerance)
+            if part:
+                parts.append(part)
+    return "\n\n".join(parts)
+
+
+def _extract_text_from_lines(
+    lines: list[str], line_range: list | None, tolerance: int = 1
+) -> str:
+    """Extract content from a single [start, end] line range.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        line_range: [start, end] inclusive range, or None.
+        tolerance: Allowed deviation for boundary lines.
+
+    Returns:
+        Stripped content of the range, or empty string.
+    """
+    if not line_range or not isinstance(line_range, list) or len(line_range) != 2:
+        return ""
+    return _extract_lines_range(lines, int(line_range[0]), int(line_range[1]), tolerance)
+
+
+def _extract_multiple_ranges(
+    lines: list[str], ranges: list | None, tolerance: int = 1
+) -> str:
+    """Extract content from multiple [start, end] line ranges and join them.
+
+    Args:
+        lines: Original lines (without [N] prefix).
+        ranges: List of [start, end] inclusive ranges, or None.
+        tolerance: Allowed deviation for boundary lines.
+
+    Returns:
+        Joined content of all ranges, stripped.
+    """
+    if not ranges:
+        return ""
+    parts: list[str] = []
+    for r in ranges:
+        if isinstance(r, list) and len(r) == 2:
+            part = _extract_lines_range(lines, int(r[0]), int(r[1]), tolerance)
+            if part:
+                parts.append(part)
+    return "\n\n".join(parts)
+
+
+_QD_ANNOTATION_EXTRACTION_PROMPT = """You are an exam question extractor using ANNOTATION PARADIGM.
+
+The input text has line numbers like [0], [1], [2]... at the start of each line.
+Your task: for EACH question, locate which lines contain its content.
+DO NOT copy or rewrite content — only output LINE NUMBERS.
+
+For EACH question, output:
+- qno: question number (integer)
+- type: question type (choice/multi_choice/fill/calculation/proof/essay/etc.)
+- passage_lines: [start, end] inclusive range for shared reading material (null if no shared passage)
+- stem_lines: [start, end] inclusive range for the question stem
+  (include sub-questions, blanks, formulas — everything the student sees EXCEPT passage and options)
+- options_lines: list of [start, end] ranges for options (choice/multi_choice only, null otherwise)
+- answer_lines: [start, end] range for the answer content (null if not present in this section)
+- explanation_lines: [start, end] range for explanation/analysis (null if not present)
+- score: points for this question (integer or null)
+- knowledge_points: list of knowledge point strings (can be empty)
+
+CRITICAL RULES:
+- stem_lines MUST cover the COMPLETE question stem — sub-questions, blanks, formulas, figure references
+- For composite questions (reading comprehension, cloze, grammar fill):
+  * Output ONE question object PER sub-question
+  * All sub-questions in the same composite group share the same passage_lines
+  * Each sub-question has its own stem_lines and options_lines
+  * passage_lines = the FULL shared reading material (same for all sub-questions)
+- For choice questions: options_lines covers A/B/C/D option lines
+- Line numbers refer to the [N] prefixed lines in the input
+- Extract ALL questions — do NOT skip any
+- NEVER output content strings — only integers, null, and arrays
+- ranges are INCLUSIVE: [5, 20] means lines 5 through 20
+- If a question has no answer/explanation in this section, set those to null
+
+Return a JSON object:
+{"questions": [
+  {"qno": 1, "type": "choice", "passage_lines": null, "stem_lines": [5, 12], "options_lines": [[13, 16]], "answer_lines": null, "explanation_lines": null, "score": 5, "knowledge_points": ["grammar"]},
+  {"qno": 11, "type": "fill", "passage_lines": null, "stem_lines": [25, 35], "options_lines": null, "answer_lines": null, "explanation_lines": null, "score": 10, "knowledge_points": ["vocabulary"]},
+  ...
+]}"""
 
 
 async def _extract_answers_from_section(
@@ -1096,6 +1317,9 @@ async def _extract_answers_from_section(
     timeout: float = 30.0,
 ) -> list[dict]:
     """Extract per-question answers from the answer section using LLM.
+
+    Annotation paradigm: LLM outputs line numbers, code extracts content
+    from OCR markdown original. This avoids LaTeX escape issues in JSON.
 
     Args:
         answer_text: The answer section markdown (lines after answer boundary).
@@ -1108,12 +1332,29 @@ async def _extract_answers_from_section(
         logger.info("Answer section too short (%d chars), skipping", len(answer_text or ""))
         return []
 
-    full_prompt = f"{_ANSWER_EXTRACTION_PROMPT}\n\n```\n{answer_text}\n```"
+    # Split into lines for later extraction by line number
+    raw_lines = answer_text.split("\n")
+
+    # Build condensed text with line numbers [N] for LLM
+    condensed: list[str] = []
+    for i, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if stripped:
+            condensed.append(f"[{i}] {stripped}")
+
+    if not condensed:
+        return []
+
+    condensed_text = "\n".join(condensed)
+    full_prompt = f"{_ANSWER_EXTRACTION_PROMPT}\n\n```\n{condensed_text}\n```"
 
     try:
         from app.gateway.router import llm_gateway
 
-        logger.info("Answer extraction: %d chars", len(answer_text))
+        logger.info(
+            "Answer extraction (annotation): %d chars, %d condensed lines",
+            len(answer_text), len(condensed),
+        )
         result = await asyncio.wait_for(
             llm_gateway.generate(
                 mode="fast",
@@ -1133,21 +1374,54 @@ async def _extract_answers_from_section(
                 "Answer extraction: LLM returned no 'items' key, "
                 "raw keys=%s", list(parsed.keys()),
             )
+            return []
 
-        # Normalize
+        # Normalize: extract content from original lines by line numbers
         normalized = []
+        # Track question order within a table row for column-index extraction
+        qno_in_section = []  # ordered list of qnos from LLM
+        for item in items:
+            try:
+                qno = int(item.get("qno"))
+                qno_in_section.append(qno)
+            except (ValueError, TypeError):
+                pass
+
         for item in items:
             try:
                 qno = int(item.get("qno"))
             except (ValueError, TypeError):
                 continue
+
+            # Extract answer content from line number
+            answer_line = item.get("answer_line")
+            answer = ""
+            if answer_line is not None:
+                raw_answer = _extract_line(raw_lines, int(answer_line))
+                # S#163: If answer is an HTML table row, extract the specific cell
+                answer = _extract_answer_from_row(raw_answer, qno, qno_in_section)
+                if not answer or len(answer) > 20:
+                    logger.info(
+                        "Answer extraction Q%d: line=%s, raw_len=%d, "
+                        "answer=%r (may need table parsing)",
+                        qno, answer_line, len(raw_answer), answer[:50],
+                    )
+
+            # Extract explanation content from line range
+            explanation = ""
+            explanation_lines = item.get("explanation_lines")
+            if explanation_lines and isinstance(explanation_lines, list) and len(explanation_lines) == 2:
+                explanation = _extract_lines_range(
+                    raw_lines, int(explanation_lines[0]), int(explanation_lines[1])
+                )
+
             normalized.append({
                 "qno": qno,
-                "answer": str(item.get("answer", "")).strip(),
-                "explanation": str(item.get("explanation", "")).strip(),
+                "answer": answer,
+                "explanation": explanation,
             })
 
-        logger.info("Answer extraction: %d answers parsed", len(normalized))
+        logger.info("Answer extraction: %d answers parsed (annotation mode)", len(normalized))
         return normalized
 
     except Exception as exc:
@@ -1216,12 +1490,12 @@ async def _detect_markdown_sections(
         raw = result.get("response", "").strip()
         logger.info("Section detection LLM → %d chars", len(raw))
 
-        parsed = _json.loads(raw)
+        parsed = _json.loads(_clean_json(raw))
         boundaries = parsed.get("sections", [])
         answer_info = parsed.get("answer_section", {})
 
     except Exception as exc:
-        logger.error("Section detection LLM failed: %s", exc)
+        logger.error("Section detection LLM failed: %s | raw=%s", exc, raw[:500] if raw else "(empty)")
         body = "\n".join(lines).strip()
         if body:
             return (
@@ -1266,21 +1540,81 @@ async def _detect_markdown_sections(
 
     boundaries.sort(key=lambda s: int(s.get("line", 0)))
 
+    # ── 3b. Code-level QNO boundary recalculation (Direction B) ──
+    # LLM's line numbers are unreliable. Scan all QNOs in the body,
+    # group by continuity, and recalculate actual section boundaries.
+    boundaries = _recalculate_section_boundaries(body_lines, boundaries, answer_start)
+
     sections: list[tuple[str, str]] = []
     sections_meta: list[dict] = []
 
     for idx, section in enumerate(boundaries):
         header = str(section.get("header", f"Section {idx + 1}")).strip()
         start = int(section.get("line", 0))
-        end = int(boundaries[idx + 1]["line"]) if idx + 1 < len(boundaries) else body_len
+        # Use _end if set by recalculation, otherwise use next section's line
+        end = section.get("_end", body_len)
+        if "_end" not in section:
+            end = int(boundaries[idx + 1]["line"]) if idx + 1 < len(boundaries) else body_len
         body = "\n".join(body_lines[start:end]).strip()
 
         if body and len(body.strip()) >= _MIN_SECTION_CHARS:
+            # ── Defensive: verify qno_last vs actual QNOs in body ──
+            # If LLM's qno_last is far beyond the actual max QNO in body,
+            # trim the body to avoid cross-type contamination.
+            meta_qno_last = section.get("qno_last")
+            if meta_qno_last is not None:
+                actual_qnos = set()
+                body_lines_list = body.split("\n")
+                for bline in body_lines_list:
+                    bm = re.match(r'\s*(\d{1,3})\s*[.、．]', bline)
+                    if bm:
+                        try:
+                            qn = int(bm.group(1))
+                            if 1 <= qn <= 100:
+                                actual_qnos.add(qn)
+                        except ValueError:
+                            pass
+                if actual_qnos:
+                    max_actual = max(actual_qnos)
+                    declared_last = int(meta_qno_last)
+                    if declared_last > max_actual + 2:
+                        logger.warning(
+                            "QD section [%s]: qno_last=%d but max QNO in body=%d, "
+                            "trimming qno_last to %d",
+                            header[:40], declared_last, max_actual, max_actual,
+                        )
+                        meta_qno_last = str(max_actual)
+                    # Also trim body: find lines where QNO falls outside
+                    # the declared [qno_first, qno_last] range.
+                    meta_qno_first_val = section.get("qno_first")
+                    if meta_qno_first_val is not None:
+                        first_qno = int(meta_qno_first_val)
+                        trim_line = len(body_lines_list)
+                        for bi, bline in enumerate(body_lines_list):
+                            bm = re.match(r'\s*(\d{1,3})\s*[.、．]', bline)
+                            if bm:
+                                try:
+                                    qn = int(bm.group(1))
+                                    if 1 <= qn <= 100:
+                                        # QNO jumped backward or beyond declared range
+                                        if qn < first_qno or qn > int(meta_qno_last):
+                                            trim_line = bi
+                                            break
+                                except ValueError:
+                                    pass
+                        if trim_line < len(body_lines_list):
+                            body = "\n".join(body_lines_list[:trim_line]).strip()
+                            logger.warning(
+                                "QD section [%s]: trimmed body at line %d "
+                                "(QNO outside declared range %s-%s)",
+                                header[:40], trim_line, meta_qno_first_val, meta_qno_last,
+                            )
+
             sections.append((header, body))
             sections_meta.append({
                 "type_hint": section.get("type_hint", "other"),
                 "qno_first": section.get("qno_first"),
-                "qno_last": section.get("qno_last"),
+                "qno_last": meta_qno_last,
                 "is_composite": section.get("is_composite", False),
                 "material_shared": section.get("material_shared", False),
                 "note": section.get("note", ""),
@@ -1296,261 +1630,494 @@ async def _detect_markdown_sections(
     return sections, sections_meta, answer_start
 
 
+def _count_questions_in_body(body: str) -> int:
+    """Count question numbers in a section body using regex patterns."""
+    qnos = set()
+    # Pattern: "N." or "N、" at line start (question numbers)
+    for m in re.finditer(r'(?:^|\n)\s*(\d{1,3})\s*[.、．]', body):
+        try:
+            qno = int(m.group(1))
+            if 1 <= qno <= 100:
+                qnos.add(qno)
+        except ValueError:
+            pass
+    return len(qnos)
+
+
+def _recalculate_section_boundaries(
+    body_lines: list[str],
+    boundaries: list[dict],
+    answer_start: int | None = None,
+) -> list[dict]:
+    """Code-level QNO boundary recalculation (Direction B).
+
+    LLM's line numbers are unreliable. This function scans all QNOs
+    (question numbers) in the body and recalculates actual section
+    boundaries based on QNO positions.
+
+    Key insight: QNOs in the document are LOCAL (restart at 1 in each
+    section). The algorithm uses the ORDER of sections from LLM (which
+    is usually correct) and finds actual boundaries by scanning for
+    QNO patterns.
+
+    Algorithm:
+    1. Scan body_lines for all QNO markers, record (line_idx, qno)
+    2. For each section, find where it actually starts by looking for
+       the first QNO after the previous section ends
+    3. Update qno_first/qno_last from actual QNOs found in that range
+
+    Args:
+        body_lines: Full document lines (before answer section)
+        boundaries: LLM-detected section boundaries
+        answer_start: Line where answer section begins (skip sections beyond this)
+
+    Returns:
+        Corrected boundaries with accurate line numbers
+    """
+    if not boundaries or not body_lines:
+        return boundaries
+
+    # Use answer_start as the upper bound for question sections
+    max_line = answer_start if answer_start is not None else len(body_lines)
+
+    # ── 1. Scan all QNOs and record positions ──
+    qno_positions: list[tuple[int, int]] = []  # (line_idx, qno)
+    for i, line in enumerate(body_lines):
+        m = re.match(r'\s*(\d{1,3})\s*[.、．]', line)
+        if m:
+            try:
+                qno = int(m.group(1))
+                if 1 <= qno <= 100:
+                    qno_positions.append((i, qno))
+            except ValueError:
+                pass
+
+    if not qno_positions:
+        logger.warning("QD: No QNOs found in body, skipping boundary recalculation")
+        return boundaries
+
+    # ── 2. For each section, find actual QNO range ──
+    # Strategy: Use LLM's section ORDER (usually correct) but find
+    # actual boundaries by scanning QNOs after previous section ends.
+    corrected: list[dict] = []
+    prev_end_line = 0  # Start from beginning
+
+    for section in boundaries:
+        header = section.get("header", "")
+        type_hint = section.get("type_hint", "")
+        llm_qno_first = section.get("qno_first")
+        llm_qno_last = section.get("qno_last")
+
+        # Find QNOs after prev_end_line
+        section_qnos = [
+            (line_idx, qno) for line_idx, qno in qno_positions
+            if line_idx >= prev_end_line
+        ]
+
+        if not section_qnos:
+            # No QNOs left — skip if original line is in answer area
+            orig_line = int(section.get("line", 0))
+            if orig_line >= max_line:
+                logger.info(
+                    "QD boundary recalc: [%s] skipped (no QNOs, line=%d in answer area)",
+                    header[:40], orig_line,
+                )
+                continue
+            corrected.append(section)
+            continue
+
+        # Find the first QNO that could start this section
+        # For local numbering, each section starts with QNO 1
+        # For global numbering, it continues from previous
+        first_qno_in_section = section_qnos[0][1]
+
+        # Determine if this section starts with QNO 1 (local) or continues
+        # by checking if there's a QNO 1 right after prev_end_line
+        candidates = [qno for _, qno in section_qnos[:5]]  # First 5 QNOs
+
+        if 1 in candidates:
+            # Local numbering: section starts at first QNO 1
+            actual_start = min(
+                line_idx for line_idx, qno in section_qnos
+                if qno == 1
+            )
+        else:
+            # Global numbering or continuation: use first QNO found
+            actual_start = section_qnos[0][0]
+
+        # Find where this section ends (next section's start or max QNO)
+        # Look for a jump in QNOs or significant gap
+        actual_qnos_in_section: list[int] = []
+        end_line = max_line  # Default to answer boundary
+
+        for i, (line_idx, qno) in enumerate(section_qnos):
+            actual_qnos_in_section.append(qno)
+
+            # Check if next QNO suggests a new section
+            if i + 1 < len(section_qnos):
+                next_line, next_qno = section_qnos[i + 1]
+
+                # QNO jumped back to 1 or small number (new section)
+                if next_qno < qno and next_qno <= 3:
+                    end_line = next_line
+                    break
+
+                # Large gap in line numbers (possible section break)
+                if (next_line - line_idx) > 30 and next_qno == 1:
+                    end_line = next_line
+                    break
+
+        # Determine actual qno_first and qno_last
+        if actual_qnos_in_section:
+            actual_first = min(actual_qnos_in_section)
+            actual_last = max(actual_qnos_in_section)
+        else:
+            actual_first = llm_qno_first
+            actual_last = llm_qno_last
+
+        # Skip sections where start > end or start is in answer area
+        if actual_start >= end_line or actual_start >= max_line:
+            logger.info(
+                "QD boundary recalc: [%s] skipped (start=%d, end=%d, max=%d)",
+                header[:40], actual_start, end_line, max_line,
+            )
+            continue
+
+        # Clamp end_line to max_line (answer boundary)
+        if end_line > max_line:
+            end_line = max_line
+
+        # Update section with corrected values
+        corrected_section = {
+            **section,
+            "line": actual_start,
+            "_end": end_line,
+            "qno_first": str(actual_first) if actual_first else llm_qno_first,
+            "qno_last": str(actual_last) if actual_last else llm_qno_last,
+        }
+
+        logger.info(
+            "QD boundary recalc: [%s] LLM line=%d→%d, "
+            "qno_first=%s→%s, qno_last=%s→%s",
+            header[:40],
+            section.get("line"), actual_start,
+            llm_qno_first, actual_first,
+            llm_qno_last, actual_last,
+        )
+
+        corrected.append(corrected_section)
+        prev_end_line = end_line
+
+    # ── 3. Ensure _end is set for all sections ──
+    for i in range(len(corrected) - 1):
+        if "_end" not in corrected[i]:
+            corrected[i]["_end"] = int(corrected[i + 1].get("line", 0))
+    if corrected and "_end" not in corrected[-1]:
+        corrected[-1]["_end"] = len(body_lines)
+
+    logger.info(
+        "QD boundary recalculation complete: %d sections, corrected lines: %s",
+        len(corrected),
+        [f"{s.get('header', '?')[:30]}:L{s.get('line')}-{s.get('_end')}" for s in corrected],
+    )
+
+    return corrected
+
+
+def _split_section_into_batches(body: str, batch_size: int = 5) -> list[str]:
+    """Split a section body into batches by question number boundaries.
+
+    Finds question number markers (e.g., "1.", "2.") and splits the body
+    into batches of approximately batch_size questions each.
+    """
+    lines = body.split("\n")
+    # Find question start lines (lines starting with a question number)
+    q_starts: list[tuple[int, int]] = []  # (line_idx, qno)
+    for i, line in enumerate(lines):
+        m = re.match(r'\s*(\d{1,3})\s*[.、．]', line)
+        if m:
+            try:
+                qno = int(m.group(1))
+                if 1 <= qno <= 100:
+                    q_starts.append((i, qno))
+            except ValueError:
+                pass
+
+    if len(q_starts) <= batch_size:
+        return [body]
+
+    # Split into batches
+    batches: list[str] = []
+    for i in range(0, len(q_starts), batch_size):
+        start_line = q_starts[i][0]
+        end_line = q_starts[i + batch_size][0] if i + batch_size < len(q_starts) else len(lines)
+        batch = "\n".join(lines[start_line:end_line]).strip()
+        if batch:
+            batches.append(batch)
+
+    return batches if batches else [body]
+
+
+# ═══ Simplified QD Extraction Prompt (Annotation Paradigm) ══════════════════
+# Design principle: ONE LLM call reads the entire OCR markdown document
+# with line numbers, outputs line number ranges for each question.  Code
+# extracts content from the original markdown — no LaTeX-in-JSON issues.
+# No section detection, no batch splitting, no QNO remapping.
+
+_QD_SIMPLE_ANNOTATION_PROMPT = """You are an exam question extractor using ANNOTATION PARADIGM.
+
+The input has line numbers [0], [1], [2]... at the start of each line.
+Your task: for EVERY question, output LINE NUMBER RANGES where its content is located.
+DO NOT copy or rewrite content — only output LINE NUMBERS.
+
+For EACH question, output:
+- "qno": question number (integer)
+- "type": question type: "choice", "fill", "cloze", "reading", "grammar_fill",
+  "word_select", "seven_to_five", "writing", "experiment", "calculation",
+  "essay", "multi_choice", "material_analysis", "proof", "other"
+- "stem_lines": [start, end] line range for the question body (stem + passage if composite)
+- "options_lines": array of [[start, end], ...] one per option, or [] if no options
+- "answer": the correct answer AS A STRING — for choice: letter (e.g. "A"),
+  for fill: the value, for essay: "" (answer content is in answer_lines)
+- "answer_lines": [start, end] where the answer/solution text is located, or null
+- "explanation_lines": [start, end] where detailed explanation is located, or null
+
+CRITICAL RULES:
+1. Extract EVERY question. Count them against visible question numbers.
+2. If the document has an answer key section ("参考答案"/"答案"), LOOK UP each
+   question's answer from it and set "answer" to the correct value.
+3. Line numbers MUST be within the document's range. Use EXACT line numbers.
+4. For composite questions (reading/cloze):
+   - Include the shared passage in the FIRST sub-question's stem_lines
+   - Each sub-question is a SEPARATE entry with its own stem_lines and options_lines
+5. For questions WITHOUT visible answer text, set answer_lines to null.
+6. For choice questions, options_lines should capture each option line.
+7. Question numbers appear as "N.", "N、", "N)", "(N)" at line start — recognize all.
+
+Return ONLY a JSON object:
+{"questions": [
+  {
+    "qno": 1,
+    "type": "choice",
+    "stem_lines": [5, 12],
+    "options_lines": [[13, 13], [14, 14], [15, 15], [16, 16]],
+    "answer": "A",
+    "answer_lines": null,
+    "explanation_lines": null
+  }
+]}"""
+
+
 async def extract_questions_from_markdown(
     markdown: str,
     subject_code: str = "",
-    max_concurrent: int = 3,
-    timeout_per_section: float = 120.0,
+    max_concurrent: int = 3,          # kept for API compatibility, unused
+    timeout_per_section: float = 180.0,  # kept for API compatibility, unused
 ) -> dict[str, Any] | None:
-    """Extract questions from PP-StructureV3 markdown (text-first subjects).
+    """Extract questions from OCR markdown — simplified annotation pipeline.
 
-    Replaces the Anchor mode / V3 text extraction flow with section-aware
-    question-driven extraction.  Detects section boundaries in the markdown,
-    then passes each section's full context to LLM for question identification.
+    DESIGN (S#167): ONE LLM call with the full markdown (line-numbered).
+    LLM outputs line number ranges for each question.  Code extracts
+    content from the original lines.  This avoids ALL LaTeX-in-JSON
+    escaping issues while keeping the pipeline dead simple.
 
     Args:
-        markdown: Full PP-StructureV3 markdown text.
-        subject_code: Subject identifier for prompt tuning.
-        max_concurrent: Max concurrent LLM calls for sections.
-        timeout_per_section: Per-section LLM timeout.
+        markdown: Full OCR markdown text.
+        subject_code: Subject identifier (reserved for future prompt tuning).
+        max_concurrent: Unused — kept for backward API compatibility.
+        timeout_per_section: Unused — kept for backward API compatibility.
 
     Returns:
-        Same shape as extract_questions_from_blocks().
+        {
+            "questions": list[dict],
+            "metadata": {"extraction_source": str, "question_count": int, ...}
+        }
+        or None if extraction failed.
     """
     if not markdown or len(markdown.strip()) < 50:
-        logger.warning("Markdown too short for extraction (%d chars)", len(markdown))
+        logger.warning("QD simple: markdown too short (%d chars)", len(markdown or ""))
         return None
 
     logger.info(
-        "Question-driven markdown extraction: %d chars for %s",
-        len(markdown),
-        subject_code or "unknown",
+        "QD simple: extracting from %d chars markdown [%s]",
+        len(markdown), subject_code or "unknown",
     )
 
-    # Detect sections via LLM semantic understanding
-    raw_sections, sections_meta, answer_start = await _detect_markdown_sections(markdown)
+    # ── Build line-numbered text ──
+    raw_lines = markdown.split("\n")
+    condensed: list[str] = []
+    for i, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if stripped:
+            condensed.append(f"[{i}] {stripped}")
 
-    if not raw_sections:
-        logger.warning("No meaningful sections after LLM detection")
+    if not condensed:
+        logger.warning("QD simple: no content lines after filtering")
         return None
 
-    # ── S#162: Extract answers from answer section ──
-    # answer_start comes from LLM semantic detection (no regex re-scan).
-    lines = markdown.split("\n")
-    answer_items: list[dict] = []
-    if answer_start is not None:
-        answer_text = "\n".join(lines[answer_start:])
-        logger.info(
-            "QD markdown: answer section at line %d/%d (%d chars)",
-            answer_start, len(lines), len(answer_text),
-        )
-        answer_items = await _extract_answers_from_section(answer_text)
-    else:
-        logger.info("QD markdown: no answer section detected")
+    condensed_text = "\n".join(condensed)
+    full_prompt = f"{_QD_SIMPLE_ANNOTATION_PROMPT}\n\n```\n{condensed_text}\n```"
 
-    # ── S#159: Split reading comprehension sections into passages ──
-    # English and other subjects with composite reading sections pack
-    # multiple passages (A/B/C/D) under one section header.  Splitting
-    # them into individual sub-sections gives the LLM manageable
-    # context sizes (~3k chars each vs 12k+ combined).
-    expanded: list[tuple[str, str]] = []
-    expanded_meta: list[dict] = []
-    for idx, (header, body) in enumerate(raw_sections):
-        meta = sections_meta[idx]
-        passages_found = _PASSAGE_MARKER_RE.findall(body)
-        is_reading_section = (
-            len(passages_found) >= 2
-            and "七选五" not in header
-            and "选词" not in header
-        )
-        if is_reading_section:
-            logger.info(
-                "QD markdown: splitting reading section [%s] (%d passage markers: %s)",
-                header[:60], len(passages_found), passages_found,
-            )
-            subs = _split_reading_passages(body, header)
-            expanded.extend(subs)
-            # Each sub-passage is still a composite reading question
-            for _ in subs:
-                expanded_meta.append({
-                    "type_hint": "reading",
-                    "is_composite": True,
-                    "material_shared": True,
-                    "note": "split from multi-passage reading section",
-                })
-        else:
-            expanded.append((header, body))
-            expanded_meta.append(meta)
-
-    raw_sections = expanded
-    sections_meta = expanded_meta
     logger.info(
-        "Detected %d sections in markdown for %s",
-        len(raw_sections),
-        subject_code,
+        "QD simple: %d condensed lines (%d chars) for LLM",
+        len(condensed), len(condensed_text),
     )
 
-    # Extract from each section concurrently
-    semaphore = asyncio.Semaphore(max_concurrent)
+    # ── Single LLM call ──
+    try:
+        from app.gateway.router import llm_gateway
 
-    async def _process(header: str, body: str) -> tuple[list[dict], dict]:
-        async with semaphore:
-            md = f"## {header}\n\n{body}" if header else body
-            if len(md.strip()) < 10:
-                return [], {"status": "skipped_empty"}
-            return await extract_questions_from_section(
-                section_markdown=md,
-                subject_code=subject_code,
-                section_label=header,
-                timeout=timeout_per_section,
-            )
-
-    tasks = [_process(h, b) for h, b in raw_sections]
-    results = await asyncio.gather(*tasks)
-
-    # ── S#158 diagnostic: per-section LLM results ──
-    all_questions: list[dict] = []
-    validation_results: list[dict] = []
-    section_summaries: list[dict] = []
-
-    for idx, ((header, body), (qs, val)) in enumerate(zip(raw_sections, results)):
-        q_count = len(qs)
-        v_status = val.get("status", "unknown")
-        meta = sections_meta[idx]
-
-        # ── S#161: Composite merge from LLM metadata ──
-        # The LLM tells us directly which sections are composite — no more
-        # header keyword guessing.
-        is_composite = meta.get("is_composite", False)
-        type_hint = meta.get("type_hint", "other")
-
-        if is_composite and len(qs) > 1:
-            # Merge over-split questions back into one composite
-            combined_stem_parts = []
-            combined_options = []
-            first_qno = meta.get("qno_first")
-            for q in qs:
-                s = (q.get("stem") or "").strip()
-                if s:
-                    combined_stem_parts.append(s)
-                opts = q.get("options") or []
-                combined_options.extend(opts)
-                if first_qno is None and q.get("qno") is not None:
-                    first_qno = q.get("qno")
-            merged = {
-                **qs[0],
-                "qno": first_qno,
-                "stem": "\n\n".join(combined_stem_parts),
-                "options": combined_options,
-            }
-            qs = [merged]
-            q_count = 1
-            logger.info(
-                "QD post-process: merged %d questions → 1 for [%s] "
-                "(type=%s, qno_first=%s)",
-                len(combined_stem_parts), header[:60],
-                type_hint, meta.get("qno_first"),
-            )
-
-        elif is_composite and len(qs) == 1:
-            # Fix QNO using LLM metadata (instead of regex body scan)
-            q = qs[0]
-            current_qno = q.get("qno")
-            meta_qno_first = meta.get("qno_first")
-            if meta_qno_first is not None and current_qno != meta_qno_first:
-                q["qno"] = meta_qno_first
-                logger.info(
-                    "QD post-process: fixed QNO %s → %s for [%s] "
-                    "(type=%s, from metadata)",
-                    current_qno, meta_qno_first, header[:60], type_hint,
-                )
-
-        all_questions.extend(qs)
-        validation_results.append(val)
-        section_summaries.append({
-            "header": header[:60],
-            "questions": q_count,
-            "validation": v_status,
-            "type_hint": type_hint,
-            "is_composite": is_composite,
-        })
+        result = await asyncio.wait_for(
+            llm_gateway.generate(
+                mode="reasoning",
+                prompt=full_prompt,
+                response_format={"type": "json_object"},
+                max_tokens=131072,
+            ),
+            timeout=600.0,
+        )
+        raw = result.get("response", "").strip()
+        model = result.get("model", "unknown")
+        usage = result.get("usage", {})
         logger.info(
-            "QD section [%s]: %d questions, validation=%s, composite=%s, type=%s",
-            header[:60], q_count, v_status, is_composite, type_hint,
+            "QD simple: LLM response %d chars from %s (prompt %d, completion %d tokens)",
+            len(raw), model,
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
         )
 
-    if not all_questions:
-        # ── S#158 diagnostic: structured failure summary ──
-        empty_sections = sum(
-            1 for s in section_summaries if s["questions"] == 0
-        )
-        error_sections = sum(
-            1 for vr in validation_results
-            if vr.get("status") in ("error", "timeout")
-        )
-        logger.warning(
-            "QD markdown: no questions from %d sections "
-            "(empty_sections=%d, error_sections=%d, summaries=%s)",
-            len(raw_sections), empty_sections, error_sections,
-            section_summaries,
+    except asyncio.TimeoutError:
+        logger.error("QD simple: LLM timeout after 600s for %d chars markdown", len(markdown))
+        return None
+    except Exception as exc:
+        logger.error("QD simple: LLM call failed: %s", exc)
+        return None
+
+    # ── Parse JSON (annotation format → no LaTeX, safe to parse) ──
+    try:
+        parsed = _json.loads(_clean_json(raw))
+        questions_data = parsed.get("questions", [])
+        if not questions_data:
+            for val in parsed.values():
+                if isinstance(val, list) and val and isinstance(val[0], dict):
+                    questions_data = val
+                    break
+    except (_json.JSONDecodeError, TypeError) as e:
+        logger.error(
+            "QD simple: JSON parse failed: %s | raw[:500]=%s",
+            e, raw[:500],
         )
         return None
 
-    # Deduplicate — key by (qno, section) to avoid cross-section QNO collisions.
-    # Each section naturally starts QNO from 1; without section in the key,
-    # questions from different sections would overwrite each other.
-    seen: dict[tuple, dict] = {}
-    for q in all_questions:
-        qno = q.get("qno")
-        section = q.get("section", "")
-        if qno is None:
+    if not questions_data:
+        logger.warning("QD simple: LLM returned no questions")
+        return None
+
+    # ── Extract content from line ranges ──
+    normalized: list[dict] = []
+    qnos_seen: set[int] = set()
+    for q in questions_data:
+        qno_raw = q.get("qno")
+        try:
+            qno = int(qno_raw)
+        except (ValueError, TypeError):
+            logger.warning("QD simple: skipping question with invalid qno=%r", qno_raw)
             continue
-        key = (qno, section)
-        if key not in seen or len(q.get("stem", "")) > len(
-            seen[key].get("stem", ""),
-        ):
-            seen[key] = q
-    deduped = sorted(seen.values(), key=lambda x: (x.get("section", ""), x.get("qno", 0)))
 
-    # ── S#162: Merge extracted answers into questions by QNO ──
-    # OCR answer section is authoritative — always overwrite LLM-generated answers.
-    if answer_items:
-        answer_map = {item["qno"]: item for item in answer_items}
-        merged_count = 0
-        for q in deduped:
-            qno = q.get("qno")
-            if qno is not None and qno in answer_map:
-                ans = answer_map[qno]
-                if ans["answer"]:
-                    q["answer"] = ans["answer"]
-                if ans["explanation"]:
-                    q["explanation"] = ans["explanation"]
-                merged_count += 1
-        logger.info(
-            "QD answer merge: %d/%d questions got answers from answer section",
-            merged_count, len(deduped),
-        )
+        if qno in qnos_seen:
+            logger.warning("QD simple: duplicate qno=%d, skipping", qno)
+            continue
+        qnos_seen.add(qno)
 
-    total_mismatches = sum(
-        1 for v in validation_results if v.get("status") != "ok"
-    )
+        # Extract content from line number ranges
+        stem = _extract_text_from_lines(raw_lines, q.get("stem_lines"))
+
+        options_raw = _extract_multiple_ranges(raw_lines, q.get("options_lines"))
+        options = [o.strip() for o in options_raw.split("\n") if o.strip()] if options_raw else []
+
+        answer = q.get("answer")
+        if answer is not None:
+            answer = str(answer).strip()
+
+        qtype = str(q.get("type", "other")).strip().lower()
+
+        # If LLM provided answer_lines, use it ONLY when:
+        # - string answer is empty, OR
+        # - it's NOT a choice/multi_choice type (where answer should be a letter)
+        # This prevents the answer table HTML from replacing "D" with the full table.
+        answer_lines = q.get("answer_lines")
+        if answer_lines is not None and (not answer or qtype not in ("choice", "multi_choice")):
+            answer_from_lines = _extract_text_from_lines(raw_lines, answer_lines)
+            if answer_from_lines:
+                answer = answer_from_lines
+
+        explanation = _extract_text_from_lines(raw_lines, q.get("explanation_lines"))
+        if not explanation:
+            explanation = ""
+
+        # Normalize unicode math → LaTeX
+        stem = _normalize_unicode_math(stem)
+        options = [_normalize_unicode_math(o) for o in options]
+        answer = _normalize_unicode_math(answer) if answer else ""
+
+        normalized.append({
+            "qno": qno,
+            "type": qtype,
+            "section": "",
+            "stem": stem,
+            "options": options,
+            "answer": answer,
+            "explanation": explanation,
+            "score": None,
+            "difficulty": None,
+            "knowledge_points": [],
+        })
+
+    # Sort by QNO
+    normalized.sort(key=lambda x: x["qno"])
+    actual_qnos = [q["qno"] for q in normalized]
+
+    # ── Diagnostics ──
+    with_stem = sum(1 for q in normalized if q["stem"])
+    with_answer = sum(1 for q in normalized if q["answer"])
+    with_explanation = sum(1 for q in normalized if q["explanation"])
+    missing_qnos = _detect_missing_qnos(actual_qnos)
 
     logger.info(
-        "Question-driven markdown extraction complete: %d questions from %d sections",
-        len(deduped),
-        len(raw_sections),
+        "QD simple: extracted %d questions (Q%d-Q%d), "
+        "stem=%d/%d, answer=%d/%d, explanation=%d/%d",
+        len(normalized),
+        actual_qnos[0] if actual_qnos else 0,
+        actual_qnos[-1] if actual_qnos else 0,
+        with_stem, len(normalized),
+        with_answer, len(normalized),
+        with_explanation, len(normalized),
     )
+    if missing_qnos:
+        logger.warning("QD simple: missing QNOs: %s", missing_qnos)
 
     return {
-        "questions": deduped,
+        "questions": normalized,
         "metadata": {
-            "extraction_source": "question_driven_markdown",
-            "question_count": len(deduped),
-            "sections_processed": len(raw_sections),
-            "validation_summary": {
-                "sections_processed": len(raw_sections),
-                "sections_with_mismatch": total_mismatches,
-                "per_section": validation_results,
+            "extraction_source": "qd_simple_v2",
+            "question_count": len(normalized),
+            "qno_range": [actual_qnos[0], actual_qnos[-1]] if actual_qnos else [],
+            "missing_qnos": missing_qnos,
+            "model": model,
+            "tokens": {
+                "prompt": usage.get("prompt_tokens", 0),
+                "completion": usage.get("completion_tokens", 0),
             },
         },
     }
+
+
+def _detect_missing_qnos(qnos: list[int]) -> list[int]:
+    """Detect gaps in sequential QNO list."""
+    if not qnos or len(qnos) < 2:
+        return []
+    missing = []
+    for i in range(min(qnos), max(qnos) + 1):
+        if i not in qnos:
+            missing.append(i)
+    return missing

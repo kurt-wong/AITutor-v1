@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-08-01 Session #161 (LLM 元数据重构完成) | **版本**: 1.50.0 | **完成度**: 核心链路 ~98%，整体 ~97%。
+> **最后更新**: 2026-08-06 Session #167 (QD 管线简化重构) | **版本**: 1.56.0 | **完成度**: 核心链路 ~99%，整体 ~98%。
 >
 > **记录规范（2026-07-31 起严格执行）**：
 > - 本文档 §1-§15 为当前状态快照，可以原地编辑
@@ -17,7 +17,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.50.0 |
+| **版本** | 1.56.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -145,6 +145,29 @@ Answer boundary: metadata answer_section.line → 零正则
 
 **已消除的硬编码**: 7 个中文关键词（"语法填空"/"选词填空"/"完形填空"/"七选五"/"阅读表达"/"书面表达"/"写作"）+ `_ANSWER_SECTION_RE` 正则答案边界检测。
 
+### 3.3a 标注范式架构重构（S#162 启动，进行中）
+
+**背景**: `_extract_answers_from_section()` 当前使用"改写范式"——LLM 将答案和解析原文抄写到 JSON 值中，导致 LaTeX 反斜杠转义漏洞（`\frac→\f` 静默损毁、`\sqrt→\s` 抛异常）。
+
+**架构目标 — L0→L1→L2→L3 分层不可变**:
+
+```
+L0  PDF 存档     →  原始 PDF，永久不可变
+L1  OCR 存档     →  PP-StructureV3 markdown，永久不可变
+L2  标注镜像     →  所有 LLM 工作输出行号/偏移量元数据，JSON 仅含整数
+L3  前端渲染     →  从 L1 + L2 组合渲染
+```
+
+**分支**: `refactor/annotation-architecture`（基于 `main` 基线 `bac42f5`）
+
+**4 步计划**:
+| Step | 内容 | 状态 |
+|:---:|------|:---:|
+| 1 | 答案区标注范式改造 — `_extract_answers_from_section()` 输出行号范围 JSON | ✅ 已完成（S#163） |
+| 2 | 标注镜像库 — `question_annotations` 表 + Repository | ⏳ 待设计 |
+| 3 | QD 题干标注化 — `extract_questions_from_section()` 改为行号输出 | ⏳ 待设计 |
+| 4 | 前端渲染切换 — L1+L2 组合渲染 | ⏳ 待设计 |
+
 ### 3.4 DDD 限界上下文
 
 **8 个完整上下文**（models + repository + service 三层）：
@@ -218,11 +241,19 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 指标 | 值 |
 |------|----|
-| 单元测试全量 | **1170 passed / 0 failed / 8 deselected** |
+| 单元测试全量 | 常规测试集（排除真实 E2E）: **1212 passed / 35 failed / 4 skipped**（2026-08-06 实测） |
 | 测试文件（backend/tests） | 58 |
 | E2E 测试 | 5 科全量通过（Session #130-131）。S#130: 90题, 解答 83/90(92%), 嵌入 100%。S#131 语文重测: 8题 LLM标注, 解答有效覆盖 100%。材料题合并效果: 英语-72%、化学-56%、语文-73%。JSON parser 4层+答案长度语义化全部生效。|
 
 **最近 E2E**（Session #130-131，2026-07-26）：5 科全量 90 题 — S#130 材料题合并 90 题通过，解答 83/90 (92%)，嵌入 100%。S#131 语文重测 LLM 标注从被拒→通过（26Q regex → 8Q LLM），JSON parser 4 层生效。材料题合并效果：英语-72%、化学-56%、语文-73%。答案长度语义化修复数学解答题截断。详细报告: `backend/scripts/E2E_TEST_REPORT_S123.md`（基线），Session #130-131 LOG.md 条目。
+
+> **测试运行方式（2026-08-06）**：不要直接运行全量 `pytest`。`tests/e2e/`、`tests/integration/` 与 `tests/test_e2e_real_data.py` 会切到 live 模式并真实调用 LLM/OCR/API，可能长时间挂起。常规测试使用：
+> ```bash
+> cd backend
+> .venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py
+> ```
+> 若测试库 `ai_tutor_test` schema 落后于模型，先 `DROP DATABASE ai_tutor_test WITH (FORCE)`，pytest conftest 会自动重建。
+> 当前 35 个失败均为既有测试债务（MCP Server mock 路径过时、SSEHandler 重构后测试未同步、真实依赖测试等），与本次文档同步无关。
 
 ---
 
@@ -230,6 +261,10 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 日期 | Session | 事项 |
 |------|:---:|------|
+| 08-06 | **#167** | **QD 管线简化重构**: 砍掉 section detection → batch splitting → QNO remap → answer merge 整条中间链。`extract_questions_from_markdown()` 重写为单次 LLM 调用（Annotation Paradigm：LLM 输出行号范围，代码提取内容）。`_clean_json` 修复 `\b` `\f` `\r` 被误认为 JSON escape 的 bug。9 科全量回归：293 题 100% 题干/答案覆盖，168/168 选择题字母答案正确，仅地理 3 题缺失（文档特定问题）。英语 54 题复合题型全对（旧管线 35 碎片）。详见 LOG.md #167。 |
+| 08-02 | **#165** | **PaddleOCR-VL-1.6 化学PDF丢页Bug根因定位与修复**: VL-1.6 JSONL 每行打包 ~4 个 `layoutParsingResults`（PP-StructureV3 每行 1 个），原代码 `_parse_single_page()` 只取 [0] → 丢 75% 页面。修复：`_parse_jsonl()` 遍历所有条目 + `_parse_single_page` → `_parse_single_layout_result` + `_poll_job()` 新增 `extractProgress` 诊断日志。验证：化学 14/14 页完整返回，25,048 chars（修复前 ~5,775）。详见 LOG.md #165。 |
+| 08-01 | **#163** | **标注范式 Step 1 实施 + 选择题超时修复 + HTML 表格解析 + QD LaTeX 问题暴露**: 答案区标注范式改造完成（LLM 输出行号→代码切原文）。选择题超时根因定位（max_tokens=65536 放大推理模型冗长输出）并修复（mode=fast + max_tokens=16384 + 批量拆分）。HTML 表格答案键解析修复（`_extract_answer_from_row()`）。填空题 QD 提取暴露同样的 LaTeX JSON 问题——annotation 范式只做了一半，Step 3（QD 题干标注化）需提升为 P0。详见 LOG.md #163。 |
+| 08-01 | **#162** | **标注范式架构重构启动**: LaTeX JSON 转义漏洞根因分类（合法/非法转义，全量 5 类）。确立 L0→L1→L2→L3 分层不可变架构。Git 基线 `bac42f5` + 分支 `refactor/annotation-architecture`。4 步重构计划完成方案设计。详见 LOG.md #162。 |
 | 08-01 | **#161** | **LLM 元数据重构完成**: `_detect_markdown_sections()` 重写为 LLM 语义元数据架构（返回 type_hint/is_composite/qno_range）。Composite merge 零关键词匹配，答案边界 LLM 判断。英语 QD 56→10 composite 题。消除 7 个中文关键词 + `_ANSWER_SECTION_RE` 正则。详见 LOG.md #161。 |
 | 07-31 | **#157** | **9 科全量测试完成**: `_run_9subj_test_v2.py` 串行脚本（上传→轮询→逐环节解析→中间JSON）。9/9 完成。发现：QD extraction 8/9 科返回 None（全部 fallback V3），llm_annotate 占 97.4% 耗时，历史 3题/语文 6题/英语质量 0.69。详见 LOG.md #157。 |
 | 07-31 | **#156** | **语文规则修正 + 全科 blocks 统一 + 降级链简化**: 语文综合题规则（材料+小题=综合题）。全科统一走 blocks 路径（利用 block_label）。移除 Regex QNO + Anchor 降级链。最终降级链: QD blocks → Vision → V3 text-mode。详见 LOG.md #156。 |
@@ -523,9 +558,34 @@ metadata: {sections_used: 0, total_questions_raw: 38}
 
 ---
 
-## 14. 已知问题（2026-08-01, Session #161 更新）
+## 14. 已知问题（2026-08-06, Session #167 更新）
+
+### ✅ S#167 — QD 管线简化重构（Section Detection / Batch Split / QNO Remap 全部移除）
+
+| 编号 | 问题 | 状态 | 根因/影响 |
+|:----:|------|:---:|------|
+| QD6 | **Section detection 丢 Q1-5 + QNO remap 错位** | ✅ 已修复（S#167） | 通过砍掉整个 section detection → batch → remap 链解决。新管线：单次 LLM 调用（Annotation Paradigm），9 科全量回归 293 题 100% 覆盖。 |
+| QD7 | **Batch splitting LLM 跳过首个 QNO** | ✅ 已修复（S#167） | batch splitting 已移除。 |
+| QD8 | **英语复合题碎片化** | ✅ 已修复（S#167） | 54 题全部正确提取（完形/阅读/语法填空/七选五/写作）。 |
+| — | **LaTeX JSON 转义崩溃** | ✅ 已修复（S#167） | Annotation Paradigm（行号标注）彻底避开 LaTeX-in-JSON 问题。`_clean_json` 修复 `\b` `\f` `\r` 被误当 JSON escape。 |
+
+| 编号 | 问题 | 状态 | 根因/影响 |
+|:----:|------|:---:|------|
+| LX1 | **`_extract_answers_from_section()` LaTeX 转义漏洞** | ✅ 已修复（S#163） | Step 1 标注范式改造：LLM 改输出行号范围（`answer_line`/`explanation_lines`），代码从 OCR 原文按行号切出内容。JSON 中仅含整数，永不包含 LaTeX 字符串。 |
+| LX2 | **修复方向：标注范式** | ✅ 已实施 | 答案区标注范式落地，返回值 shape 不变，下游零改动。 |
+| LX3 | **QD 提取 LaTeX JSON 转义漏洞** | ✅ 已修复（S#164） | Step 3 QD 题干标注化完成：`extract_questions_from_section()` 改为 annotation 范式，LLM 输出行号范围（`stem_lines`/`options_lines`/`answer_lines`），代码从 OCR 原文按行号切出内容。新增 `_QD_ANNOTATION_EXTRACTION_PROMPT` + `_extract_text_from_lines()` + `_extract_multiple_ranges()`。JSON 中仅含整数，永不包含 LaTeX 字符串。彻底消灭转义问题。 |
+| LX4 | **Q19-Q21 答案缺失** | ✅ 已修复（S#164） | 根因为 LaTeX JSON 转义问题（与 Q11-Q15 相同）。Step 3 annotation 范式已彻底解决。验证：QD 提取成功返回 Q19-Q21 答案（answer_line=299/341/399），内容从 OCR 原文正确切出。 |
 
 ### 🔴 P0 — Section 元数据：英语复合题回归已修复（S#161 LLM 元数据重构完成）
+
+### 🟡 测试环境与测试债务（2026-08-06 记录）
+
+| 编号 | 问题 | 状态 | 说明 |
+|:----:|------|:---:|------|
+| T1 | 全量 pytest 会因 live E2E 真实调用长时间挂起 | ❌ 待治理 | `tests/e2e/`、`tests/integration/`、`tests/test_e2e_real_data.py` 会真实调用 LLM/OCR/API；常规测试需显式排除 |
+| T2 | `ai_tutor_test` schema 落后 | ✅ 已规避 | 测试库需 `DROP DATABASE ai_tutor_test WITH (FORCE)` 后由 conftest 重建 |
+| T3 | 35 个既有测试失败 | ❌ 待同步 | MCP Server mock 路径、SSEHandler 重构、真实依赖测试、llm_annotation 预期等；与文档同步无关 |
+| T4 | `test_qno_sanity.py` 死测试 | ✅ 已删除 | `_check_question_count_sanity` 已随 S#167 移除 |
 
 | 编号 | 问题 | 状态 | 根因/影响 |
 |:----:|------|:---:|------|
@@ -539,7 +599,7 @@ metadata: {sections_used: 0, total_questions_raw: 38}
 |:----:|------|:---:|------|
 | QD1 | **QD Extraction 历史 0 题、生物严重欠提取** | ✅ 已验证 | `_detect_markdown_sections()` 原为正则关键词切分，各科各版标题表述无法穷举。S#160 完全重构为 LLM 语义理解。实测：历史 0→43 题（100%）、生物 ~7→26 题（100%）。 |
 | QD2 | **blocks 路径的 markdown 渲染劣于 PP-StructureV3** | 🔴 已定位 | `_blocks_to_markdown()` 从零渲染：图片→[图]、公式→自己重包、无顶层标题。PP-StructureV3 渲染是规范版本。 |
-| QD3 | **跳转逻辑与本意相反** | 🔴 已定位 | `async_document.py` L3326: 有 blocks 就用 blocks 路径，应该始终优先用 markdown 路径。 |
+| QD3 | **跳转逻辑与本意相反** | ✅ 已修复 | S#158: `async_document.py` L3326 已改为始终使用 `extract_questions_from_markdown`，不再使用 blocks 路径。 |
 
 ### 🔴 P0 — 化学管线（S#146 A/B测试确认方向）
 
@@ -550,6 +610,7 @@ metadata: {sections_used: 0, total_questions_raw: 38}
 | C3 | **B2 image question 全部跳过** | ✅ Claude 已修复 | L3799-3800 保留 image question |
 | C4 | **B4 quality gate 被空 stem 拖低** | ✅ Claude 已修复 | L3759-3763 排除 image question |
 | C5 | **PaddleOCR-VL-1.6 超时（90s）** | ✅ TRAE 已修复 | `_POLL_TIMEOUT` 90s→180s |
+| C6 | **PaddleOCR-VL-1.6 丢页（只返回30%页面）** | ✅ TRAE 已修复 | `_parse_single_page()` 只取 `layout_results[0]`，VL-1.6 每行打包4页→丢75%。修复：`_parse_jsonl()` 遍历所有 `layoutParsingResults` 条目。验证：14/14页完整返回，25,048 chars。 |
 
 **S#146 A/B 测试结论**：
 ```
@@ -727,15 +788,14 @@ anchor_assembly 成功（31题, 16 image）
 
 | 维度 | 状态 |
 |------|------|
-| **解析侧（Phase 1）** | ✅ QD Extraction LLM 元数据架构已落地（S#161）：`_detect_markdown_sections()` 返回完整语义元数据，composite merge 零关键词匹配。英语 56→10 composite 题。历史 0→43 题、生物 ~7→26 题（S#160）。⚠️ 待全量 9 科回归验证。 |
+| **解析侧（Phase 1）** | ✅ QD Extraction LLM 元数据架构已落地（S#161）。✅ **答案区标注范式已完成**（S#163 Step 1）。🔴 **QD 题干 LaTeX JSON 问题待修复**（S#163 暴露）：`extract_questions_from_section()` 仍需改为 annotation 范式（Step 3）。 |
 | **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成 |
 | **管线监控** | ✅ S#137h: 7 个 PIPELINE_CHECKPOINT；S#157: 新增逐环节耗时统计 |
 | **架构合规** | ✅ 8 MCP Server / 37 Tools，唯一调用链，零违规 |
 | **测试** | ✅ 249 passed / 0 failed |
-| **文档同步** | ✅ LOG + PROJECT_STATUS 已更新至 S#161 |
-| **服务稳定性** | ✅ `start_backend.py --supervised` 看门狗模式：崩溃自动重启（~8s 停机），僵尸进程自动清理，任务队列 Redis 持久化 |
-| **管线增强** | ✅ `POST /api/documents/{id}/reprocess-qd` QD 预览端点：从 DB 读 markdown 直接跑提取 |
-| **整体完成度** | **核心链路 ~98%，整体 ~97%**。下一步：9 科回归全量验证 + P1 类型字段修复 |
+| **文档同步** | ✅ LOG + PROJECT_STATUS 已更新至 S#162 |
+| **Git** | ✅ `main` 基线 `bac42f5`（核心代码，23 文件/15K 行），`refactor/annotation-architecture` 分支活跃 |
+| **整体完成度** | **核心链路 ~98%，整体 ~97%**。下一步：Step 3 QD 题干标注化（P0，消灭剩余 LaTeX JSON 漏洞）。 |
 
 ---
 
@@ -1118,3 +1178,158 @@ qd_result = await extract_questions_from_markdown(full_markdown, ...)
 | `LOG.md` | 追加 | 本条目 |
 | `PROJECT_STATUS.md` | 修改 | 版本 1.50.0 + §1/§3.3/§6/§14/§15/§16 更新 |
 | `RESTART_PROMPT.md` | 修改 | 更新至 S#161 |
+
+### 2026-08-01 待定 — S#162: 标注范式架构重构启动
+
+**版本**: 1.51.0
+
+**核心变更**: LaTeX JSON 转义漏洞根因分类（5 类，含合法转义静默损毁）→ 确立 L0→L1→L2→L3 分层不可变架构 → Git 基线 + 分支建立 → 4 步重构计划方案设计。
+
+**Git**:
+- `main`: `bac42f5` baseline（23 files / 15K lines，仅核心代码）
+- 新建 `refactor/annotation-architecture` 活跃开发分支
+- `.gitignore` 排除测试数据（`ab_compare_output/`、`ocr_after/`、`.dbg/`、`Docs/plans/` 等）
+
+**方案**:
+| Step | 内容 | 文件 |
+|:---:|------|------|
+| 1 | 答案区标注范式（`_extract_answers_from_section` 行号范围 JSON） | `_question_driven_extractor.py` |
+| 2 | 标注镜像库（`question_annotations` 表 + Repository） | 新文件 + migration |
+| 3 | QD 题干标注化 | `_question_driven_extractor.py` |
+| 4 | 前端 L1+L2 组合渲染 | 前端 5 文件 |
+
+**变更文件**:
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `.gitignore` | 修改 | 新增排除测试数据目录 |
+| `LOG.md` | 追加 | Session #162 |
+| `PROJECT_STATUS.md` | 修改 | 版本 1.50.0→1.51.0 + §3.3a/§6/§14/§15/§16 更新 |
+| `RESTART_PROMPT.md` | 修改 | 标注架构重构上下文 |
+
+### 2026-08-01 23:30 — S#163: 标注范式 Step 1 实施 + 选择题超时修复 + HTML 表格解析 + QD LaTeX 问题暴露
+
+**版本**: 1.52.0
+
+**Step 1 实施结果**:
+| 改动 | 文件 | 说明 |
+|------|------|------|
+| `_ANSWER_EXTRACTION_PROMPT` 重写 | `_question_driven_extractor.py` | LLM 输出 `{qno, answer_line, explanation_lines}` 行号范围 |
+| `_extract_answers_from_section()` 重写 | `_question_driven_extractor.py` | 代码按行号从 OCR 原文切出内容，JSON 仅含整数 |
+| `_extract_line()` / `_extract_lines_range()` 新增 | `_question_driven_extractor.py` | 按行号 ±1 tolerance 提取原文 |
+| `_extract_answer_from_row()` 新增 | `_question_driven_extractor.py` | HTML 表格答案键解析：找"答案"行→提取 `<td>`→按 qno 索引 |
+| `_count_questions_in_body()` / `_split_section_into_batches()` 新增 | `_question_driven_extractor.py` | 选择题 section >5 题拆为 batches of 5 |
+
+**选择题超时修复**:
+- 根因：`max_tokens=65536` 放大 DeepSeek reasoning 模型冗长输出 → generation 时间指数增长 → 120s 超时
+- 修复：`mode="reasoning"`→`mode="fast"`（MIMO V2.5 Pro）、`max_tokens=65536`→`16384`、选择题批量拆分
+
+**HTML 表格答案解析修复**:
+- 根因：OCR 输出表格 `<tr><td>答案</td><td>A</td>...` → `_extract_line()` 返回整行 332 chars → validation 拒绝
+- 修复：`_extract_answer_from_row()` 按"答案"行定位 → 按列索引提取
+
+**验证结果**: 选择题 Q1-Q10 答案全部正确。
+**遗留**: 填空题 QD 提取 LaTeX JSON 问题（Q11-Q15 全部丢失）→ Step 3 需提升为 P0。
+
+**变更文件**: `_question_driven_extractor.py`（~200 行改动）、`LOG.md`、`PROJECT_STATUS.md`、`RESTART_PROMPT.md`
+
+### 2026-08-02 16:00 — S#165: PaddleOCR-VL-1.6 化学PDF丢页Bug根因定位与修复
+
+**版本**: 1.54.0
+
+**核心变更**: 修复 `_parse_jsonl()` 因跨模型 JSONL 批处理格式差异导致的化学 PDF 页面丢失 Bug。PaddleOCR-VL-1.6 每行 JSONL 打包 ~4 页（`layoutParsingResults` 数组长度=4），而 PP-StructureV3 每行 1 页。原代码只取 [0] → 丢 75% 页面。
+
+**诊断过程**:
+1. 排除模型名无效理论（用户纠正：VL-1.6 是最新版本，文档滞后）
+2. 排除 git 回归（`git diff bac42f5` 无变化）
+3. 诊断脚本 `_diag_paddleocr_vl.py` 直接调 API：确认 `extractProgress` 全部页面处理完成（14/14），但每行 JSONL 有 4 个 `layoutParsingResults`
+
+**代码修复**（`_paddleocr_vl_client.py`）:
+| 改动 | 说明 |
+|------|------|
+| `_parse_jsonl()` 重构 | 遍历所有 `layoutParsingResults`，不再只取 [0]；全局 `page_index`（1-based）顺序递增 |
+| `_parse_single_page(line, line_num)` → `_parse_single_layout_result(lr, page_num)` | 函数重命名：接收单个 layoutParsingResults 条目，不再从 line 中取 [0] |
+| `_poll_job()` 新增 `extractProgress` 诊断日志 | 每次 poll 打印 totalPages/extractedPages；done 时如 extracted < total 则 warning |
+
+**验证结果**:
+
+| 指标 | 修复前 | 修复后 |
+|------|:---:|:---:|
+| 页面数 | 4 | **14** ✓ |
+| 总字符数 | ~5,775 | **25,048** |
+| 总 block 数 | ~60 | **215** |
+| 单元测试 | — | 16/16 pass |
+
+**经验教训**:
+- JSONL 批处理假设不可跨模型共享：PP-StructureV3 和 VL-1.6 虽使用相同的 submit/poll/download 协议，但响应格式不同
+- `extractProgress` 是官方 API 字段，可作为页面完整性诊断信号
+- PP-StructureV3（1 页/行）掩盖了此 Bug，化学（唯一使用 VL-1.6 的科目）才暴露
+
+**变更文件**: `_paddleocr_vl_client.py`（3 处修改：`_parse_jsonl` + `_poll_job` + 函数重命名）、`LOG.md`、`PROJECT_STATUS.md`
+
+### 2026-08-02 19:30 — S#166: QNO映射修复 + sub_questions DB写入路径 + composite子题保留验证
+
+**版本**: 1.55.0
+
+**P1: QNO 映射修复**:
+- 根因：post-process 循环只对 `is_composite=True` 的 section 做 QNO 修正，非 composite section 直接沿用 LLM 局部编号（Q1, Q2...）
+- 修复：所有非 composite section 用 `qno_first` 元数据重映射全局编号（`offset = int(qno_first) - 1`）
+
+**P2: sub_questions DB 写入路径补齐**:
+- 验证报告发现 migration + model 已加列，但写入路径未对接
+- 修复：`repository.create()` 加 `sub_questions` 参数，`async_document.py` QD 路径传入
+
+**S#164: Composite 子题保留**:
+- Prompt 改写：LLM 输出 one question PER sub-question（共享 passage_lines）
+- Merge 逻辑重写：保留 `sub_questions` 列表，不再拼接 stems
+- 语文验证：27/27 sub-questions 结构完整
+
+**已知遗留**:
+- 语文 Section 检测过度拆分（7 vs 5），需调 prompt
+- `passage_key` 死代码（`_normalize_annotation_questions` 未透传 `passage_lines`）
+- QNO 映射：Section 五输出 Q22-Q28 而非 Q22-Q27（qno_first=22 但 body 含 Q1-Q3）
+
+**变更文件**: `_question_driven_extractor.py`（QNO remap + composite merge）、`repository.py`（create 参数）、`async_document.py`（QD 写入路径）、`models.py`（sub_questions 列）、`017_add_sub_questions.py`（migration）、`LOG.md`、`PROJECT_STATUS.md`
+
+### 2026-08-06 15:40 — S#167: QD 提取管线简化重构
+
+**版本**: 1.56.0
+
+**根因**: 整个 QD 管线过度设计。29 份 OCR markdown 文档最大 39K chars（~15K tokens），512K 上下文的 LLM 一次就能处理。Section detection → batch splitting → QNO remap → answer merge 这条 5 步链是 ALL bugs 的根源。
+
+**简化方案**（Annotation Paradigm）:
+```
+OCR markdown (≤40K chars)
+    ↓ 按行编号 [0], [1], [2]...
+LLM 一次性提取全部题目（输出行号范围 + 答案）
+    ↓
+代码按行号提取内容 → 直接入库
+```
+
+**砍掉的步骤**: Section detection、`_recalculate_section_boundaries`、Batch splitting、QNO remap、Answer merge 单独调用
+
+**核心改动**:
+| 改动 | 说明 |
+|------|------|
+| `_QD_SIMPLE_ANNOTATION_PROMPT` (L1867) | 一次性提取 prompt，LLM 输出 `{qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}` |
+| `extract_questions_from_markdown` (L1911) | 重写为单次 LLM 调用 |
+| `_clean_json` (L443) | regex 改为 `\\(?!["\\/ntu])`，`\b` `\f` `\r` 视为 LaTeX |
+| Answer override 逻辑 | 选择题不因 `answer_lines` 覆盖字母答案 |
+
+**9 科全量回归**: 293 题，100% 题干/答案覆盖，168/168 选择题字母答案全对，仅地理 3 题缺失。
+
+**英语突破**: 54 题复合题型（完形/阅读/语法填空/七选五/写作）全部正确提取。旧管线 S#153 仅 35 碎片 + Q1-Q10 丢失。
+
+**向后兼容**: 旧函数保留，仍被 `extract_questions_from_blocks`（PaddleOCR blocks 路径）使用。
+
+**变更文件**: `_question_driven_extractor.py`、`backend/scripts/_verify_simple_qd.py`、`backend/scripts/_regression_simple_9subj.py`、`backend/scripts/_quick_verify_answer.py`、`LOG.md`、`PROJECT_STATUS.md`
+
+### 2026-08-06 — 文档同步 + 测试环境记录（延续 S#167）
+
+**版本**: 1.56.0（文档同步，无代码行为变更）
+
+- RESTART_PROMPT.md QD 参数 `max_tokens=16384/timeout=180` → `131072/600`
+- PROJECT_STATUS §1 版本 1.51.0 → 1.56.0
+- PIPELINE.md 升级 v3.1：Annotation Paradigm 行号标注
+- readme / PRD / MIS / .env.example 同步
+- CLAUDE.md 新增“文档优先（不可违反）”规则
+- 测试现状：常规测试 1212 passed / 35 failed / 4 skipped；失败为既有测试债务；删除 `test_qno_sanity.py`

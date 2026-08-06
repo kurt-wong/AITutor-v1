@@ -29,6 +29,7 @@ class QuestionRepository:
         image_key: str | None = None,
         question_type: str | None = None,
         passage_text: str | None = None,
+        sub_questions: list | None = None,
     ) -> Question:
         """Create a new question record."""
         question = Question(
@@ -41,6 +42,7 @@ class QuestionRepository:
             source_type=source_type,
             question_type=question_type,
             passage_text=passage_text,
+            sub_questions=sub_questions,
         )
         self.session.add(question)
         await self.session.flush()

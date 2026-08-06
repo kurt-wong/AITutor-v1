@@ -4957,6 +4957,10 @@ class _DocumentProcessing:
                     # cloze, experiments, etc.)
                     _passage = q.get("passage_text", "")
                     _passage = _passage.strip() if _passage else None
+                    # S#164: Extract sub_questions for composite question groups.
+                    _sub_qs = q.get("sub_questions")
+                    if _sub_qs and not isinstance(_sub_qs, list):
+                        _sub_qs = None  # safety: only pass list or None
 
                     db_q = await q_repo.create(
                         content=content,
@@ -4966,6 +4970,7 @@ class _DocumentProcessing:
                         source_type="llm_annotation",
                         question_type=qtype,
                         passage_text=_passage,
+                        sub_questions=_sub_qs,
                     )
                     await session.flush()
 
