@@ -1,9 +1,10 @@
 # AI Tutor — 文档解析管线规范
 
-> **版本**: 3.0 | **日期**: 2026-07-24 | **状态**: LLM 全量提取主路径 (Session #114)
+> **版本**: 3.1 | **日期**: 2026-08-06 | **状态**: Annotation Paradigm 主路径 (Session #167)
 >
 > 本文档是 PDF 处理管线的**唯一权威参考**。
 >
+> **v3.1 重大变更**: QD 提取改为 **Annotation Paradigm（行号标注）**。LLM 只输出每道题的行号范围，代码从 OCR Markdown 原文按行号切出内容，JSON 中不再包含 LaTeX 字符串。`_question_driven_extractor.py::extract_questions_from_markdown()` 成为主入口；旧的 section detection / batch splitting / QNO remap / composite merge 已从 markdown 路径移除，保留为 blocks 路径兼容函数。
 > **v3.0 重大变更**: **LLM 全量提取替代正则管线成为主路径。** PP-StructureV3 Markdown → DeepSeek reasoning 一次性提取每道题的完整 stem + 标注 JSON → 直接入库。正则管线（QuestionStructurer + 跨页合并 + P2 答案配对）降级为回退路径。
 > **v2.2 变更**: LLM 标注分支接入 `response_format: {"type": "json_object"}` — API 保证合法 JSON，根除 LaTeX 转义崩溃；Gateway 层透传支持。
 > **v2.1 变更**: 新增 LLM 标注分支 — 一次性 LLM 调用标注完整 Markdown → JSON → 直接入库，绕过正则管线。
@@ -27,26 +28,28 @@
 
 ### 核心原则
 
-**PP-StructureV3 是唯一的文档解析引擎。LLM 全量提取是主路径。**
+**PP-StructureV3 是唯一的文档解析引擎。Annotation Paradigm 是主路径。**
 
 ```
 用户上传 PDF
   → MinIO 存储
   → PP-StructureV3 /layout-parsing（同步，Markdown + 图片输出）
   → **Markdown 持久化到 documents.ocr_markdown（S#131，source of truth）**
-  → DeepSeek reasoning 一次性提取（完整 stem + type + answer + KP + difficulty）
-  → 直接入库（一次事务）
+  → extract_questions_from_markdown()：单次 LLM 调用，输出行号范围（Annotation Paradigm）
+  → 代码按行号从 OCR Markdown 切出 stem/options/answer/explanation
+  → 交叉验证 → 直接入库（一次事务）
   → 异步富化（solve + difficulty + embed + explain）
 ```
 
 ### 主路径 vs 回退路径
 
 ```
-主路径（v3.0）:
-  PP-StructureV3 Markdown → DeepSeek 全量提取 → JSON → 入库
-  细则: LLM 输出每道题的完整 stem（从 Markdown 原文逐字复制，不改写）
-        + type + answer + explanation + difficulty + knowledge_points
-        → _save_annotated_questions() 一次事务入库
+主路径（v3.1）:
+  PP-StructureV3 Markdown → 按行编号 → LLM 输出行号范围 → 代码按行号切题 → 入库
+  细则: LLM 输出 {qno, type, stem_lines, options_lines, answer,
+        answer_lines, explanation_lines}
+        代码从原始 markdown_lines 按范围提取内容
+        → 交叉验证 → _save_annotated_questions() 一次事务入库
 
 回退路径（触发条件: LLM 失败 / JSON 解析失败 / questions < 动态阈值 / stem_quality 过低）:
   PP-StructureV3 TaggedTextBlock[] → QuestionStructurer.structure()
@@ -57,7 +60,8 @@
 
 ```
 PP-StructureV3 API:      旧 submit/poll 模式（待迁移到 /layout-parsing）
-LLM 提取 (主):           DeepSeek reasoning + response_format={"type":"json_object"}
+LLM 提取 (主):           extract_questions_from_markdown() — Annotation Paradigm
+                          mode="reasoning", max_tokens=131072, timeout=600
 正则管线 (回退):          QuestionStructurer (保留，仅 LLM 失败时运行)
 MIMO V2.5:               图像分析 + Whole-PDF VL（回退路径中的 low-yield fallback）
 qwen2.5vl:3b:            本地 per-page VL fallback（回退链末端）
@@ -166,13 +170,13 @@ PADDLEOCR_VL_LAYOUT_MODE=vl (legacy):
 │    - GET /api/v2/ocr/jobs/{job_id} → 90s 轮询 / 150s 超时      │
 │    - 输出: 完整 Markdown（含 LaTeX + 图片引用 + 表格）          │
 ├──────────────────────────────────────────────────────────────┤
-│ 3. LLM 全量提取（主路径）                                      │
-│    - DeepSeek reasoning: 完整 Markdown → JSON                   │
-│    - 输出: {metadata, questions: [{stem, options, type,        │
-│      answer, explanation, difficulty, knowledge_points}]}     │
-│    - stem = Markdown 原文逐字复制，不改写                       │
-│    - 一次 LLM 调用完成切分 + 标注 + 答案配对                     │
-│    - 失败时回退到正则管线（Step 4）                              │
+│ 3. Annotation Paradigm（主路径）                                │
+│    - 完整 Markdown 按行编号 [0], [1], ...                       │
+│    - 单次 LLM 调用输出行号范围:                                  │
+│      {qno, type, stem_lines, options_lines, answer,             │
+│       answer_lines, explanation_lines}                          │
+│    - 代码按行号从原文切出内容，JSON 不含 LaTeX 字符串            │
+│    - 交叉验证后直接入库；失败时回退到正则管线（Step 4）          │
 ├──────────────────────────────────────────────────────────────┤
 │ 4. 正则管线（回退，仅 LLM 失败时触发）                           │
 │    - QuestionStructurer: QNO 切分 + 跨页合并 + P2 答案配对      │
@@ -199,55 +203,67 @@ PADDLEOCR_VL_LAYOUT_MODE=vl (legacy):
 
 ---
 
-## 3.5 LLM 全量提取（v3.0 主路径，替代正则管线）
+## 3.5 Annotation Paradigm（v3.1 主路径，替代 text-copy paradigm）
 
-当 `LLM_ANNOTATION_ENABLED=true`（默认）时，管线走 LLM 全量提取路径，完全绕过正则切分管线：
+当 `QUESTION_DRIVEN_EXTRACTION_ENABLED=true`（默认）时，管线走
+`_question_driven_extractor.py::extract_questions_from_markdown()`，完全绕过旧的多步切分管线：
 
 ```
-PP-StructureV3 → 完整 Markdown（full_markdown）
-  → _step_llm_annotate(): DeepSeek reasoning mode + response_format={"type":"json_object"}
-    → 输出: {
-        metadata: {year, district, school, subject, exam_type, grade},
-        questions: [{qno, stem, options, type, answer, explanation, difficulty, knowledge_points}]
-      }
-  → _save_annotated_questions(): 解析 JSON → questions + solutions 表（一次事务）
+OCR markdown (≤40K chars)
+  │ 按行编号 [0], [1], [2]...
+  ▼
+单次 LLM 调用（_QD_SIMPLE_ANNOTATION_PROMPT）
+  │ 输出: {qno, type, stem_lines, options_lines,
+  │        answer, answer_lines, explanation_lines}
+  ▼
+代码按行号从原文切出 stem/options/answer/explanation
+  ▼
+交叉验证 → _save_annotated_questions() → questions + solutions 表
 ```
 
-### 与正则管线对比
+### 为什么用行号标注
 
-| 维度 | 正则管线 (回退) | LLM 全量提取 (主) |
+- LaTeX 命令（`\frac`、`\sqrt` 等）放入 JSON 需要转义，LLM 经常输出未转义字符，导致 `json.loads` 失败并整题丢失。
+- Annotation Paradigm 只让 LLM 输出整数行号范围，代码从原始 markdown 提取内容，JSON 永不包含 LaTeX 字符串。
+- 一次 LLM 调用即可处理完整 OCR markdown，不需要 section detection、batch splitting、QNO remap、composite merge。
+
+### 关键参数（当前实现）
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `mode` | `reasoning` | DeepSeek V4 Pro，处理复杂题型 |
+| `max_tokens` | `131072` | S#166 起提升，flash 无 thinking tokens |
+| `timeout` | `600` | 大文档 + reasoning 模式需要更长等待 |
+| `response_format` | `{"type": "json_object"}` | Gateway 透传，保证合法 JSON |
+
+### 与旧管线对比
+
+| 维度 | 旧多步管线 (S#162-#166) | Annotation Paradigm (S#167) |
 |------|---------|---------|
-| 切分方式 | regex QNO + 跨页合并 (4000+ 行) | LLM 语义理解，一次完成 |
-| LLM 调用 | N 道题需要 N 次（答案提取 + 类型分类） | 1 次/文档（DeepSeek reasoning） |
-| stem 来源 | TaggedTextBlock 拼装（易截断/污染） | LLM 从 Markdown 原文逐字复制 |
-| 答案匹配 | P2 regex 配对 ~44% + LLM 补答 | LLM 一次性标注 |
-| 跨页问题 | 三层打分 + VL 验证 | 不存在（LLM 看全文） |
-| 一题多问 | regex 子题分组 | LLM 语义理解 |
-| 来源信息 | 仅文件名推断 | LLM 从 Markdown 标题行提取 |
-
-### Prompt 策略
-
-- 输入: 完整 Markdown（含 `##` 标题、LaTeX `$...$`、`<img>` 图片引用、`<table>` 表格）
-- 输出: `metadata` + `questions[]`（每个 question 含完整 `stem`（原文逐字复制）、`options`、`type`、`answer`、`explanation`、`difficulty`、`knowledge_points`）
-- stem 策略: **完整原文，不改写** — LLM 从输入 Markdown 原样复制从题号到下一题号之间的全文。保留所有 LaTeX、图片引用、表格。不改写、不总结、不省略。
-- 使用 DeepSeek reasoning mode + `response_format: {"type": "json_object"}` + `max_tokens=16384`
+| 切分方式 | section detection → batch splitting → QNO remap | 单次 LLM 调用，无中间步骤 |
+| LLM 输出 | 文本/JSON 内容，LaTeX 需转义 | 行号范围，JSON 仅含整数 |
+| stem 来源 | LLM 抄写或代码拼装 | 代码按 `stem_lines` 从原文剪切 |
+| 答案匹配 | 单独 answer extraction + merge | 单次输出 `answer` + `answer_lines` |
+| 跨页问题 | 多步拼接 | LLM 看全文，天然解决 |
+| 一题多问 | composite merge 关键词/元数据 | LLM 直接输出子题行号 |
+| 来源信息 | 正则/文件名推断 | LLM 从 Markdown 标题行提取 |
 
 ### 回退策略
 
-LLM 全量提取失败（空响应、JSON 解析失败、questions < 动态阈值、stem_quality 平均 < 0.5）→ 自动回退到正则管线（`QuestionStructurer.structure()`）。
+QD 提取失败（空响应、JSON 解析失败、questions 为空）→ 回退到 V3 text-mode / MIMO Vision / 正则管线。
 
 ### 相关配置
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `LLM_ANNOTATION_ENABLED` | `true` (v3.0) | 启用 LLM 全量提取主路径 |
+| `QUESTION_DRIVEN_EXTRACTION_ENABLED` | `true` | 启用 QD Annotation Paradigm 主路径 |
+| `LLM_ANNOTATION_ENABLED` | `true` | 启用 LLM 标注/入库主路径 |
 
-### 阶段规划
+### 现状
 
-| 阶段 | 内容 | 状态 |
-|:---:|------|:---:|
-| 1 | stem 提取 + 质量验证（教师版内嵌格式） | 实施中 (Session #114) |
-| 2 | body/answer 分割（独立答案区格式） | 待实施 |
+- 9 科回归：293 题，题干/答案 100% 覆盖，168/168 选择题字母答案正确，仅地理 3 题缺失（文档特定问题）。
+- 英语复合题：54 题全部正确提取（旧管线仅 35 碎片 + Q1-Q10 丢失）。
+- 旧函数 `_detect_markdown_sections()` / `_extract_answers_from_section()` / `extract_questions_from_section()` 仍保留，仅 blocks 路径兼容使用。
 
 ---
 
@@ -259,7 +275,7 @@ LLM 全量提取失败（空响应、JSON 解析失败、questions < 动态阈�
 |------|------|------|:---:|
 | PP-StructureV3 | 百度星河 API | **唯一文档解析引擎** | ⚠️ 旧 API |
 | MIMO V2.5 | 云 API (`api.xiaomimimo.com`) | 图像二次分析、图表、Whole-PDF VL | ✅ |
-| Qwen 3.6 Plus | 云 API (DashScope) | 复杂布局理解、题目边界优化 | ⬜ 待替换 |
+| Qwen 3.6 Plus | 云 API (DashScope) | VL 备选（布局理解 / 题目边界优化） | ✅ 备选 |
 | DeepSeek Pro | 云 API | 推理、详解生成、知识分类 | ✅ |
 | MIMO V2.5 Pro | 云 API | 可视化解析 | ✅ |
 | qwen2.5vl:3b | 本地 Ollama (RTX 4060) | per-page VL fallback | ⚠️ 降级保留 |
@@ -296,7 +312,7 @@ extract_pdf_whole(pdf_path)
 | `QWEN_VL_API_KEY` | Qwen VL 云 API |
 | `QWEN_VL_MODEL` | `qwen3.6-plus` |
 | `VL_PRIMARY` | 主力 VL 后端 (`mimo`) |
-| `VL_OCR_MODEL` | 本地 Ollama VL (`qwen2.5vl:3b`) |
+| `VL_OCR_MODEL` | 主力 VL 模型（当前 `mimo-v2.5`；Ollama 兜底 `qwen2.5vl:3b`） |
 
 ---
 
@@ -305,7 +321,8 @@ extract_pdf_whole(pdf_path)
 | 文件 | 职责 | 路径角色 |
 |------|------|:---:|
 | `app/domains/document/parallel_extraction/_paddleocr_vl_client.py` | **PP-StructureV3 API 客户端** | 主+回退 |
-| `app/domains/document/async_document.py` | **LLM 全量提取主路径**: `_step_llm_annotate()` + `_save_annotated_questions()` + Prompt V2 + `_clean_stem_for_db()` + `_score_stem_quality()` | 主 |
+| `app/domains/document/async_document.py` | **管线入口**: `_step_llm_annotate()` + `_save_annotated_questions()` + 质量门控 + 图片关联 | 主 |
+| `app/domains/question/_question_driven_extractor.py` | **QD Annotation Paradigm 主路径**: `extract_questions_from_markdown()` + `_QD_SIMPLE_ANNOTATION_PROMPT` | 主 |
 | `app/domains/document/async_pipeline.py` | 管线编排 + enrich/explain worker + 3-queue | 主+回退 |
 | `app/domains/question/structurer.py` | 正则管线（回退）: QuestionStructurer + 跨页合并 + P2 答案配对 | 回退 |
 | `app/domains/question/_page_vl_extractor.py` | Whole-PDF VL 提取（回退路径中的 low-yield fallback） | 回退 |
@@ -329,4 +346,4 @@ extract_pdf_whole(pdf_path)
 
 ---
 
-> **最后更新**: 2026-07-16 — v2.0 架构对齐版。PP-StructureV3 单引擎 + 8 阶段管线。
+> **最后更新**: 2026-08-06 — v3.1 Annotation Paradigm 对齐版。PP-StructureV3 单引擎 + QD 行号标注主路径 + 异步富化。

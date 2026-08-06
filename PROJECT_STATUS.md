@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-08-02 Session #166 (QNO映射修复 + sub_questions DB写入路径) | **版本**: 1.55.0 | **完成度**: 核心链路 ~98%，整体 ~97%。
+> **最后更新**: 2026-08-06 Session #167 (QD 管线简化重构) | **版本**: 1.56.0 | **完成度**: 核心链路 ~99%，整体 ~98%。
 >
 > **记录规范（2026-07-31 起严格执行）**：
 > - 本文档 §1-§15 为当前状态快照，可以原地编辑
@@ -17,7 +17,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.51.0 |
+| **版本** | 1.56.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -253,6 +253,7 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 日期 | Session | 事项 |
 |------|:---:|------|
+| 08-06 | **#167** | **QD 管线简化重构**: 砍掉 section detection → batch splitting → QNO remap → answer merge 整条中间链。`extract_questions_from_markdown()` 重写为单次 LLM 调用（Annotation Paradigm：LLM 输出行号范围，代码提取内容）。`_clean_json` 修复 `\b` `\f` `\r` 被误认为 JSON escape 的 bug。9 科全量回归：293 题 100% 题干/答案覆盖，168/168 选择题字母答案正确，仅地理 3 题缺失（文档特定问题）。英语 54 题复合题型全对（旧管线 35 碎片）。详见 LOG.md #167。 |
 | 08-02 | **#165** | **PaddleOCR-VL-1.6 化学PDF丢页Bug根因定位与修复**: VL-1.6 JSONL 每行打包 ~4 个 `layoutParsingResults`（PP-StructureV3 每行 1 个），原代码 `_parse_single_page()` 只取 [0] → 丢 75% 页面。修复：`_parse_jsonl()` 遍历所有条目 + `_parse_single_page` → `_parse_single_layout_result` + `_poll_job()` 新增 `extractProgress` 诊断日志。验证：化学 14/14 页完整返回，25,048 chars（修复前 ~5,775）。详见 LOG.md #165。 |
 | 08-01 | **#163** | **标注范式 Step 1 实施 + 选择题超时修复 + HTML 表格解析 + QD LaTeX 问题暴露**: 答案区标注范式改造完成（LLM 输出行号→代码切原文）。选择题超时根因定位（max_tokens=65536 放大推理模型冗长输出）并修复（mode=fast + max_tokens=16384 + 批量拆分）。HTML 表格答案键解析修复（`_extract_answer_from_row()`）。填空题 QD 提取暴露同样的 LaTeX JSON 问题——annotation 范式只做了一半，Step 3（QD 题干标注化）需提升为 P0。详见 LOG.md #163。 |
 | 08-01 | **#162** | **标注范式架构重构启动**: LaTeX JSON 转义漏洞根因分类（合法/非法转义，全量 5 类）。确立 L0→L1→L2→L3 分层不可变架构。Git 基线 `bac42f5` + 分支 `refactor/annotation-architecture`。4 步重构计划完成方案设计。详见 LOG.md #162。 |
@@ -549,9 +550,16 @@ metadata: {sections_used: 0, total_questions_raw: 38}
 
 ---
 
-## 14. 已知问题（2026-08-02, Session #164 更新）
+## 14. 已知问题（2026-08-06, Session #167 更新）
 
-### ✅ P0 — 答案区 + QD 提取 LaTeX JSON 转义漏洞（S#163 Step 1 + S#164 Step 3 已全部修复）
+### ✅ S#167 — QD 管线简化重构（Section Detection / Batch Split / QNO Remap 全部移除）
+
+| 编号 | 问题 | 状态 | 根因/影响 |
+|:----:|------|:---:|------|
+| QD6 | **Section detection 丢 Q1-5 + QNO remap 错位** | ✅ 已修复（S#167） | 通过砍掉整个 section detection → batch → remap 链解决。新管线：单次 LLM 调用（Annotation Paradigm），9 科全量回归 293 题 100% 覆盖。 |
+| QD7 | **Batch splitting LLM 跳过首个 QNO** | ✅ 已修复（S#167） | batch splitting 已移除。 |
+| QD8 | **英语复合题碎片化** | ✅ 已修复（S#167） | 54 题全部正确提取（完形/阅读/语法填空/七选五/写作）。 |
+| — | **LaTeX JSON 转义崩溃** | ✅ 已修复（S#167） | Annotation Paradigm（行号标注）彻底避开 LaTeX-in-JSON 问题。`_clean_json` 修复 `\b` `\f` `\r` 被误当 JSON escape。 |
 
 | 编号 | 问题 | 状态 | 根因/影响 |
 |:----:|------|:---:|------|
@@ -1264,3 +1272,36 @@ qd_result = await extract_questions_from_markdown(full_markdown, ...)
 - QNO 映射：Section 五输出 Q22-Q28 而非 Q22-Q27（qno_first=22 但 body 含 Q1-Q3）
 
 **变更文件**: `_question_driven_extractor.py`（QNO remap + composite merge）、`repository.py`（create 参数）、`async_document.py`（QD 写入路径）、`models.py`（sub_questions 列）、`017_add_sub_questions.py`（migration）、`LOG.md`、`PROJECT_STATUS.md`
+
+### 2026-08-06 15:40 — S#167: QD 提取管线简化重构
+
+**版本**: 1.56.0
+
+**根因**: 整个 QD 管线过度设计。29 份 OCR markdown 文档最大 39K chars（~15K tokens），512K 上下文的 LLM 一次就能处理。Section detection → batch splitting → QNO remap → answer merge 这条 5 步链是 ALL bugs 的根源。
+
+**简化方案**（Annotation Paradigm）:
+```
+OCR markdown (≤40K chars)
+    ↓ 按行编号 [0], [1], [2]...
+LLM 一次性提取全部题目（输出行号范围 + 答案）
+    ↓
+代码按行号提取内容 → 直接入库
+```
+
+**砍掉的步骤**: Section detection、`_recalculate_section_boundaries`、Batch splitting、QNO remap、Answer merge 单独调用
+
+**核心改动**:
+| 改动 | 说明 |
+|------|------|
+| `_QD_SIMPLE_ANNOTATION_PROMPT` (L1867) | 一次性提取 prompt，LLM 输出 `{qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}` |
+| `extract_questions_from_markdown` (L1911) | 重写为单次 LLM 调用 |
+| `_clean_json` (L443) | regex 改为 `\\(?!["\\/ntu])`，`\b` `\f` `\r` 视为 LaTeX |
+| Answer override 逻辑 | 选择题不因 `answer_lines` 覆盖字母答案 |
+
+**9 科全量回归**: 293 题，100% 题干/答案覆盖，168/168 选择题字母答案全对，仅地理 3 题缺失。
+
+**英语突破**: 54 题复合题型（完形/阅读/语法填空/七选五/写作）全部正确提取。旧管线 S#153 仅 35 碎片 + Q1-Q10 丢失。
+
+**向后兼容**: 旧函数保留，仍被 `extract_questions_from_blocks`（PaddleOCR blocks 路径）使用。
+
+**变更文件**: `_question_driven_extractor.py`、`backend/scripts/_verify_simple_qd.py`、`backend/scripts/_regression_simple_9subj.py`、`backend/scripts/_quick_verify_answer.py`、`LOG.md`、`PROJECT_STATUS.md`

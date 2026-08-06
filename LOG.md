@@ -12175,3 +12175,111 @@ if meta_qno_first is not None and len(qs) > 0 and not is_composite:
 | `017_add_sub_questions.py` | 新增 | Alembic migration |
 | `LOG.md` | 追加 | 本条目 |
 | `PROJECT_STATUS.md` | 修改 | 版本 1.54.0→1.55.0 + §16 变更日志追加 |
+
+---
+
+## Session #167 — 2026-08-06: QD 提取管线简化重构（Section Detection / Batch Split / QNO Remap 移除）
+
+### 背景
+
+用户指出整个 QD 管线过度设计：39K 字符的文档（~10-15K tokens）完全不需要 section detection → batch splitting → QNO remap 这条 5 步链。512K 上下文的 LLM 一次就能读完整个 OCR markdown 并提取所有题目。
+
+已有的 section detection JSON 转义崩溃、`_recalculate_section_boundaries` 丢 Q1-5、batch split QNO 跳位等问题，根源都是这些不必要的中间步骤。
+
+### 根本原因
+
+OCR markdown 是准的，LLM 识别题目也是准的。问题出在连接两者的代码上——设计了 section detection（让 LLM "智能分段"）→ batch splitting（每段再分批）→ QNO remap（段之间重新编号）→ answer merge（单独提取答案区）这条 5 步链。每一步都可能出错，概率叠加。
+
+修复前最严重的 bug：Section detection JSON 转义修复后，LLM 第一次成功返回 sections，但它把第一个 section 定在 Q6 位置，代码盲目信任→ Q1-5 被丢弃。
+
+### 简化方案（Annotation Paradigm）
+
+```
+OCR markdown (≤40K chars)
+    ↓ 按行编号 [0], [1], [2]...
+LLM 一次性提取全部题目（输出行号范围 + 答案）
+    ↓
+代码按行号提取内容 → 直接入库
+```
+
+**砍掉的步骤**：
+- Section detection（`_detect_markdown_sections`）
+- `_recalculate_section_boundaries`（QNO 边界重算）
+- Batch splitting（`_split_section_into_batches`）
+- QNO remap（段间题号重映射）
+- Answer merge（`_extract_answers_from_section` 单独调用）
+
+**为什么用 Annotation Paradigm（行号标注）而不是直接输出内容**：
+LLM 输出行号范围，代码从原始 markdown 提取内容 → 避免 LaTeX（`\frac`、`\sqrt`）在 JSON 中的转义问题。
+
+### 核心改动
+
+| 改动 | 位置 | 说明 |
+|------|------|------|
+| `_QD_SIMPLE_ANNOTATION_PROMPT` | L1867 | 一次性提取 prompt，LLM 输出 `{qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}` |
+| `extract_questions_from_markdown` | L1911 | 重写为单次 LLM 调用，无分段/分批/重映射 |
+| `_clean_json` | L443 | regex 从 `\\(?!["\\/bfnrtu])` 改为 `\\(?!["\\/ntu])`，将 `\b` `\f` `\r` 视为 LaTeX 转义（非 JSON escape） |
+| Answer override 逻辑 | L2044 | 选择题不因 `answer_lines` 覆盖字母答案（防止 HTML 表格替换 "D"） |
+
+### 验证结果（9 科全量回归）
+
+| 学科 | 题目数 | 题干 | 答案 | 选择题字母 | 丢题 | 耗时 |
+|------|--------|------|------|-----------|------|------|
+| 化学 | 47 | 100% | 100% | 24/24 | **0** | 168s |
+| 历史 | 43 | 100% | 100% | 40/40 | **0** | 200s |
+| 地理 | 27 | 100% | 100% | 22/22 | 3 | 140s |
+| 政治 | 28 | 100% | 100% | 24/24 | **0** | 138s |
+| 数学 | 21 | 100% | 100% | 10/10 | **0** | 84s |
+| 物理 | 20 | 100% | 100% | 14/14 | **0** | 112s |
+| 生物 | 26 | 100% | 100% | 20/20 | **0** | 112s |
+| 英语 | 54 | 100% | 100% | N/A | **0** | 192s |
+| 语文 | 27 | 100% | 100% | 14/14 | **0** | 183s |
+| **合计** | **293** | **100%** | **100%** | **168/168** | **3** | 1328s |
+
+英语 54 题（完形/阅读/语法填空等复合题型）在新管线下全部正确提取。旧管线下是"35 道碎片化小题"。
+
+### 文档规模数据
+
+29 份 OCR markdown：最小 3,345 chars，最大 39,269 chars，平均 17,924 chars。**0 篇 >50K chars**。512K 上下文严重富余。
+
+### 安全网
+
+如果未来文档 >50K chars，加固定长度机械切分（非 LLM 智能分段）。
+
+### 变更文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 重写 | `extract_questions_from_markdown()` 简化为单次 LLM 调用 + `_QD_SIMPLE_ANNOTATION_PROMPT` + `_clean_json` 修复 + `_detect_missing_qnos` |
+| `backend/scripts/_verify_simple_qd.py` | 新增 | 简化管线验证脚本（3 文档逐题对比） |
+| `backend/scripts/_regression_simple_9subj.py` | 新增 | 9 科全量回归脚本 |
+| `backend/scripts/_quick_verify_answer.py` | 新增 | 答案覆盖修复验证脚本 |
+| `LOG.md` | 追加 | 本条目 |
+| `PROJECT_STATUS.md` | 修改 | 版本 1.55.0→1.56.0 + §16 变更日志追加 |
+
+---
+
+## 2026-08-06 — 文档同步：QD 参数 / 版本号 / Annotation Paradigm / 文档优先规则
+
+### 背景
+
+文档审计发现 RESTART_PROMPT.md 中 QD 提取参数仍写 `max_tokens=16384`、`timeout=180`，与 `_question_driven_extractor.py` 实际 `max_tokens=131072`、`timeout=600` 不一致；PROJECT_STATUS.md 头部已到 1.56.0，但 §1 项目概述仍写 1.51.0。同时 PIPELINE.md 仍描述旧的 text-copy LLM 全量提取，未反映 S#167 Annotation Paradigm。用户要求补充“代码修改必须严格遵循项目文档设定”的项目规则。
+
+### 变更文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `RESTART_PROMPT.md` | 修改 | QD 参数同步为 `max_tokens=131072` / `timeout=600`（3 处当前参数描述）；新增文档优先规则提示 |
+| `PROJECT_STATUS.md` | 修改 | §1 项目版本 1.51.0 → 1.56.0 |
+| `Docs/02_Architecture/PIPELINE.md` | 修改 | 升级 v3.1：LLM 提取章节改为 Annotation Paradigm、行号标注输出、QD 关键参数；同步模型分工、VL_OCR_MODEL、源文件地图与最后更新 |
+| `readme.md` | 修改 | 文档智能/核心链路描述改为当前多阶段链路；AI Models 表同步 MIMO 主 VL、化学 OCR、嵌入模型；Prompt 注册表索引修正为 `backend/prompts/prompt_registry.yaml` |
+| `Docs/01_Product/PRD.md` | 修改 | 顶部新增实现现状注记，声明 FROZEN 产品需求以 PIPELINE/PROJECT_STATUS 为当前实现权威 |
+| `Docs/02_Architecture/MIS.md` | 修改 | LLM Gateway Providers 列表更新为 DeepSeek / MIMO / Qwen VL 备选 / Ollama 本地文本与 VL fallback |
+| `backend/.env.example` | 修改 | `VL_PRIMARY=mimo`、`VL_OCR_MODEL=mimo-v2.5` 示例值与当前运行配置对齐 |
+| `CLAUDE.md` | 修改 | 新增“文档优先（不可违反）”开发规则与冲突处理规则；工作指令新增第 9 条“文档优先 / 偏离需沟通” |
+| `LOG.md` | 追加 | 本条目 |
+
+### 验证
+
+- `backend/scripts/validate_docs_vs_code.py`：MCP 工具、前端页面、关键文件、类名检查通过；仍保留既有的 `llm_server.generate` 解析偏差（MIS 文本中已包含该工具，脚本解析未命中，非本次引入）。
+- 本次仅做文档与配置模板同步，未修改业务代码。

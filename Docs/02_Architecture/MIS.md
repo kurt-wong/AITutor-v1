@@ -80,8 +80,8 @@ Providers:
 
 - DeepSeek API (reasoning mode)
 - MIMO API (fast mode)
-- Qwen 3.6 Plus (VL 云 API, Session #77)
-- Ollama qwen2.5:7b (local text fallback)
+- Qwen 3.6 Plus (VL 备选云 API)
+- Ollama qwen3.5:4b / qwen2.5vl:3b (local text / VL fallback)
 
 ---
 
