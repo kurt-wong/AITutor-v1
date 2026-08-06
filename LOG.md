@@ -12283,3 +12283,26 @@ LLM 输出行号范围，代码从原始 markdown 提取内容 → 避免 LaTeX�
 
 - `backend/scripts/validate_docs_vs_code.py`：MCP 工具、前端页面、关键文件、类名检查通过；仍保留既有的 `llm_server.generate` 解析偏差（MIS 文本中已包含该工具，脚本解析未命中，非本次引入）。
 - 本次仅做文档与配置模板同步，未修改业务代码。
+
+---
+
+## 2026-08-06 — 测试环境记录：pytest live E2E 挂起 + 既有测试债务
+
+### 问题
+
+1. 全量 `pytest` 会运行 `tests/e2e/`、`tests/integration/`、`tests/test_e2e_real_data.py`，这些测试会切 live 并真实调用 LLM/OCR/API，可能长时间挂起。
+2. `ai_tutor_test` 测试库 schema 落后于模型（缺 `passage_text`、`documents.year` 等列），重建测试库后解决。
+3. 常规测试集排除 live 后：**1212 passed / 35 failed / 4 skipped**。失败均为既有测试与重构后代码不一致（MCP mock 路径、SSEHandler 重构、真实依赖、llm_annotation 预期），与本次文档同步无关。
+
+### 已执行
+
+- 删除死测试 `backend/tests/test_qno_sanity.py`（`_check_question_count_sanity` 已随 S#167 移除）。
+- 修复前端 `QuestionEditPage.tsx` 未使用 `TextArea` 导入，前端 `npm run build` 通过。
+- 本地修复 `backend/scripts/validate_docs_vs_code.py` 的 expected 表，补入 `llm_server.generate`；该目录被 `.gitignore` 排除，不进入版本控制。
+
+### 推荐运行命令
+
+```bash
+cd backend
+.venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py
+```

@@ -241,11 +241,19 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 指标 | 值 |
 |------|----|
-| 单元测试全量 | **1170 passed / 0 failed / 8 deselected** |
+| 单元测试全量 | 常规测试集（排除真实 E2E）: **1212 passed / 35 failed / 4 skipped**（2026-08-06 实测） |
 | 测试文件（backend/tests） | 58 |
 | E2E 测试 | 5 科全量通过（Session #130-131）。S#130: 90题, 解答 83/90(92%), 嵌入 100%。S#131 语文重测: 8题 LLM标注, 解答有效覆盖 100%。材料题合并效果: 英语-72%、化学-56%、语文-73%。JSON parser 4层+答案长度语义化全部生效。|
 
 **最近 E2E**（Session #130-131，2026-07-26）：5 科全量 90 题 — S#130 材料题合并 90 题通过，解答 83/90 (92%)，嵌入 100%。S#131 语文重测 LLM 标注从被拒→通过（26Q regex → 8Q LLM），JSON parser 4 层生效。材料题合并效果：英语-72%、化学-56%、语文-73%。答案长度语义化修复数学解答题截断。详细报告: `backend/scripts/E2E_TEST_REPORT_S123.md`（基线），Session #130-131 LOG.md 条目。
+
+> **测试运行方式（2026-08-06）**：不要直接运行全量 `pytest`。`tests/e2e/`、`tests/integration/` 与 `tests/test_e2e_real_data.py` 会切到 live 模式并真实调用 LLM/OCR/API，可能长时间挂起。常规测试使用：
+> ```bash
+> cd backend
+> .venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py
+> ```
+> 若测试库 `ai_tutor_test` schema 落后于模型，先 `DROP DATABASE ai_tutor_test WITH (FORCE)`，pytest conftest 会自动重建。
+> 当前 35 个失败均为既有测试债务（MCP Server mock 路径过时、SSEHandler 重构后测试未同步、真实依赖测试等），与本次文档同步无关。
 
 ---
 
@@ -569,6 +577,15 @@ metadata: {sections_used: 0, total_questions_raw: 38}
 | LX4 | **Q19-Q21 答案缺失** | ✅ 已修复（S#164） | 根因为 LaTeX JSON 转义问题（与 Q11-Q15 相同）。Step 3 annotation 范式已彻底解决。验证：QD 提取成功返回 Q19-Q21 答案（answer_line=299/341/399），内容从 OCR 原文正确切出。 |
 
 ### 🔴 P0 — Section 元数据：英语复合题回归已修复（S#161 LLM 元数据重构完成）
+
+### 🟡 测试环境与测试债务（2026-08-06 记录）
+
+| 编号 | 问题 | 状态 | 说明 |
+|:----:|------|:---:|------|
+| T1 | 全量 pytest 会因 live E2E 真实调用长时间挂起 | ❌ 待治理 | `tests/e2e/`、`tests/integration/`、`tests/test_e2e_real_data.py` 会真实调用 LLM/OCR/API；常规测试需显式排除 |
+| T2 | `ai_tutor_test` schema 落后 | ✅ 已规避 | 测试库需 `DROP DATABASE ai_tutor_test WITH (FORCE)` 后由 conftest 重建 |
+| T3 | 35 个既有测试失败 | ❌ 待同步 | MCP Server mock 路径、SSEHandler 重构、真实依赖测试、llm_annotation 预期等；与文档同步无关 |
+| T4 | `test_qno_sanity.py` 死测试 | ✅ 已删除 | `_check_question_count_sanity` 已随 S#167 移除 |
 
 | 编号 | 问题 | 状态 | 根因/影响 |
 |:----:|------|:---:|------|
@@ -1305,3 +1322,14 @@ LLM 一次性提取全部题目（输出行号范围 + 答案）
 **向后兼容**: 旧函数保留，仍被 `extract_questions_from_blocks`（PaddleOCR blocks 路径）使用。
 
 **变更文件**: `_question_driven_extractor.py`、`backend/scripts/_verify_simple_qd.py`、`backend/scripts/_regression_simple_9subj.py`、`backend/scripts/_quick_verify_answer.py`、`LOG.md`、`PROJECT_STATUS.md`
+
+### 2026-08-06 — 文档同步 + 测试环境记录（延续 S#167）
+
+**版本**: 1.56.0（文档同步，无代码行为变更）
+
+- RESTART_PROMPT.md QD 参数 `max_tokens=16384/timeout=180` → `131072/600`
+- PROJECT_STATUS §1 版本 1.51.0 → 1.56.0
+- PIPELINE.md 升级 v3.1：Annotation Paradigm 行号标注
+- readme / PRD / MIS / .env.example 同步
+- CLAUDE.md 新增“文档优先（不可违反）”规则
+- 测试现状：常规测试 1212 passed / 35 failed / 4 skipped；失败为既有测试债务；删除 `test_qno_sanity.py`

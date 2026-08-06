@@ -338,6 +338,7 @@ Status:  简化管线已验证，待决定是否合并到 main
 == 关键注意事项 ==
 
 - 所有代码修改必须严格遵循项目文档设定，不能擅自越过项目文档；确需偏离时先充分沟通、明确告知影响并得到确认后再改代码
+- pytest 常规命令: `cd backend ; .venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py`（不要直接跑全量，live E2E 会真实调用外部 API 并可能长时间挂起）
 - 管线代码修改后必须 kill + restart（supervised 模式会自动重启）
 - QD 提取核心文件: `_question_driven_extractor.py`（~1900 行）
 - Markdown 路径: `extract_questions_from_markdown()` — 简化管线，单次 LLM 调用
