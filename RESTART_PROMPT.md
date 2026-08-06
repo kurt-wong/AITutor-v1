@@ -195,8 +195,8 @@ _VISION_FIRST_SUBJECTS = frozenset({
 
 ```
 Remote:  https://github.com/kurt-wong/AITutor
-main:    bac42f5 (baseline)
-*refactor/annotation-architecture: ee72faa (简化管线，待合并到 main)
+main:    4580846 (merged annotation-architecture + doc sync)
+refactor/annotation-architecture: ee72faa → 已合并到 main
 ```
 
 ### 关键代码指标
@@ -208,7 +208,7 @@ main:    bac42f5 (baseline)
 
 ### 待定
 
-- 是否合并 `refactor/annotation-architecture` 到 `main`
+- ✅ 已合并 `refactor/annotation-architecture` 到 `main`（2026-08-06，merge commit `4580846`）
 - 全量 29 份文档入库验证（可选）
 - Step 2: 标注镜像库（`question_annotations` 表 + Repository）— P2 待设计
 - Step 4: 前端渲染切换（L1+L2 组合渲染）— P2 待设计
@@ -298,7 +298,7 @@ python scripts/reset_test_data.py
 
 == 当前重点 ==
 
-简化管线已落地（S#167）— `refactor/annotation-architecture` 分支，commit ee72faa：
+简化管线已落地（S#167）— 已合并到 `main`（merge commit 4580846，2026-08-06）：
 
 核心变化：
   OCR markdown (≤40K chars) → extract_questions_from_markdown() → 单次 LLM 调用 → 直接入库
@@ -325,8 +325,8 @@ Annotation Paradigm（行号标注）:
 == Git ==
 
 Remote:  https://github.com/kurt-wong/AITutor
-Current: refactor/annotation-architecture (commit: ee72faa)
-Status:  简化管线已验证，待决定是否合并到 main
+Current: main (merge commit 4580846)
+Status:  S#167 简化管线已合并到 main
 
 == 快速恢复步骤 ==
 
@@ -352,7 +352,7 @@ Status:  简化管线已验证，待决定是否合并到 main
 
 == 待办事项 ==
 
-1. 🟡 决定是否合并 refactor/annotation-architecture 到 main
+1. ✅ 合并 refactor/annotation-architecture 到 main（2026-08-06 完成，merge commit 4580846）
 2. 🟢 全量 29 份文档入库验证（可选）
 3. 🟡 P2 — 标注镜像库（question_annotations 表 + Repository）
 4. 🟡 P2 — 前端渲染切换（L1+L2 组合渲染）

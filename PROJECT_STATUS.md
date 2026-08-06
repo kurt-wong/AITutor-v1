@@ -158,7 +158,7 @@ L2  标注镜像     →  所有 LLM 工作输出行号/偏移量元数据，JSO
 L3  前端渲染     →  从 L1 + L2 组合渲染
 ```
 
-**分支**: `refactor/annotation-architecture`（基于 `main` 基线 `bac42f5`）
+**分支**: `refactor/annotation-architecture` 已合并到 `main`（merge commit `4580846`，2026-08-06）
 
 **4 步计划**:
 | Step | 内容 | 状态 |
@@ -794,7 +794,7 @@ anchor_assembly 成功（31题, 16 image）
 | **架构合规** | ✅ 8 MCP Server / 37 Tools，唯一调用链，零违规 |
 | **测试** | ✅ 249 passed / 0 failed |
 | **文档同步** | ✅ LOG + PROJECT_STATUS 已更新至 S#162 |
-| **Git** | ✅ `main` 基线 `bac42f5`（核心代码，23 文件/15K 行），`refactor/annotation-architecture` 分支活跃 |
+| **Git** | ✅ `main` 已合并 `refactor/annotation-architecture`（merge commit `4580846`，2026-08-06） |
 | **整体完成度** | **核心链路 ~98%，整体 ~97%**。下一步：Step 3 QD 题干标注化（P0，消灭剩余 LaTeX JSON 漏洞）。 |
 
 ---
@@ -1333,3 +1333,11 @@ LLM 一次性提取全部题目（输出行号范围 + 答案）
 - readme / PRD / MIS / .env.example 同步
 - CLAUDE.md 新增“文档优先（不可违反）”规则
 - 测试现状：常规测试 1212 passed / 35 failed / 4 skipped；失败为既有测试债务；删除 `test_qno_sanity.py`
+
+### 2026-08-06 — 合并 refactor/annotation-architecture 到 main
+
+**版本**: 1.56.0
+
+- merge commit: `4580846`
+- 内容：S#167 QD 简化管线、Annotation Paradigm、文档同步、测试清理
+- 验证：`validate_docs_vs_code.py` 0 discrepancies；前端 build 通过；后端常规测试 1212 passed / 35 failed / 4 skipped（既有测试债务）

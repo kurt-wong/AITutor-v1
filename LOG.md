@@ -12306,3 +12306,23 @@ LLM 输出行号范围，代码从原始 markdown 提取内容 → 避免 LaTeX�
 cd backend
 .venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py
 ```
+
+---
+
+## 2026-08-06 — 合并 refactor/annotation-architecture 到 main
+
+### 结果
+
+`refactor/annotation-architecture`（含 S#167 QD 简化管线、Annotation Paradigm、文档同步与测试清理）已合并到 `main`。
+
+### 合并信息
+
+- merge commit: `4580846`
+- 涉及 18 个文件，+2061 / -642
+- 包含：`_question_driven_extractor.py` 单次行号标注管线、`_paddleocr_vl_client.py` 修复、Alembic `017_add_sub_questions.py`、文档同步、删除死测试 `test_qno_sanity.py`、前端未使用导入清理
+
+### 验证状态
+
+- `validate_docs_vs_code.py`：0 discrepancies
+- 前端 `npm run build`：通过
+- 后端常规测试：1212 passed / 35 failed / 4 skipped（35 个既有测试债务，非本次改动引入；详见测试环境记录条目）
