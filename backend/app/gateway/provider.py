@@ -238,7 +238,7 @@ def create_deepseek_provider(
         api_key=api_key or settings.DEEPSEEK_API_KEY,
         base_url=base_url or settings.DEEPSEEK_BASE_URL,
         timeout=120.0,
-        max_tokens=65536,
+        max_tokens=131072,  # S#166: 128k output for flash (no thinking tokens)
     )
 
 

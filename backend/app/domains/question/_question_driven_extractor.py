@@ -439,7 +439,17 @@ def _clean_json(raw: str) -> str:
     start = raw.find("{")
     end = raw.rfind("}")
     if start >= 0 and end > start:
-        return raw[start:end + 1]
+        raw = raw[start:end + 1]
+    # S#167: Fix invalid JSON escape characters from LLM
+    # LLM output may contain LaTeX commands like \frac, \sqrt, \times etc.
+    # These backslashes are NOT valid JSON escapes but share the \ prefix
+    # with valid ones like \", \\, \/, \n, \t, \uXXXX.
+    #
+    # We preserve only the essential JSON escapes: \" \\ \/ \n \t \uXXXX
+    # \b, \f, \r are also valid JSON BUT they're extremely common LaTeX
+    # command prefixes (\begin, \beta, \frac, \right, \rho etc.) —
+    # treating them as LaTeX is always safe in this context.
+    raw = re.sub(r'\\(?!["\\/ntu])', r'\\\\', raw)
     return raw
 
 
@@ -601,7 +611,7 @@ async def extract_questions_from_section(
     section_markdown: str,
     subject_code: str,
     section_label: str = "",
-    timeout: float = 120.0,
+    timeout: float = 180.0,
 ) -> tuple[list[dict], dict[str, Any]]:
     """Call LLM to extract questions from a single section's markdown.
 
@@ -659,7 +669,7 @@ async def extract_questions_from_section(
             max_tokens = 8192
         else:
             mode = "reasoning"
-            max_tokens = 16384
+            max_tokens = 131072  # S#166: 128k — flash has no thinking tokens
 
         result = await asyncio.wait_for(
             llm_gateway.generate(
@@ -718,6 +728,14 @@ async def extract_questions_from_section(
             section_label or "unnamed",
         )
         return [], {"status": "empty", "section": section_label}
+
+    # S#165: Log raw LLM output for QNO diagnosis
+    logger.info(
+        "QD batch extraction raw: section=[%s], qnos=%s, count=%d",
+        section_label,
+        [q.get("qno") for q in questions_data],
+        len(questions_data),
+    )
 
     # Validate against regex QNO
     extracted_qnos = [
@@ -794,7 +812,7 @@ async def extract_questions_from_blocks(
     paddleocr_result: Any,
     subject_code: str = "",
     max_concurrent: int = 3,
-    timeout_per_section: float = 120.0,
+    timeout_per_section: float = 180.0,
 ) -> dict[str, Any] | None:
     """Main entry point: extract questions from PaddleOCR-VL structured blocks.
 
@@ -1472,12 +1490,12 @@ async def _detect_markdown_sections(
         raw = result.get("response", "").strip()
         logger.info("Section detection LLM → %d chars", len(raw))
 
-        parsed = _json.loads(raw)
+        parsed = _json.loads(_clean_json(raw))
         boundaries = parsed.get("sections", [])
         answer_info = parsed.get("answer_section", {})
 
     except Exception as exc:
-        logger.error("Section detection LLM failed: %s", exc)
+        logger.error("Section detection LLM failed: %s | raw=%s", exc, raw[:500] if raw else "(empty)")
         body = "\n".join(lines).strip()
         if body:
             return (
@@ -1840,329 +1858,266 @@ def _split_section_into_batches(body: str, batch_size: int = 5) -> list[str]:
     return batches if batches else [body]
 
 
+# ═══ Simplified QD Extraction Prompt (Annotation Paradigm) ══════════════════
+# Design principle: ONE LLM call reads the entire OCR markdown document
+# with line numbers, outputs line number ranges for each question.  Code
+# extracts content from the original markdown — no LaTeX-in-JSON issues.
+# No section detection, no batch splitting, no QNO remapping.
+
+_QD_SIMPLE_ANNOTATION_PROMPT = """You are an exam question extractor using ANNOTATION PARADIGM.
+
+The input has line numbers [0], [1], [2]... at the start of each line.
+Your task: for EVERY question, output LINE NUMBER RANGES where its content is located.
+DO NOT copy or rewrite content — only output LINE NUMBERS.
+
+For EACH question, output:
+- "qno": question number (integer)
+- "type": question type: "choice", "fill", "cloze", "reading", "grammar_fill",
+  "word_select", "seven_to_five", "writing", "experiment", "calculation",
+  "essay", "multi_choice", "material_analysis", "proof", "other"
+- "stem_lines": [start, end] line range for the question body (stem + passage if composite)
+- "options_lines": array of [[start, end], ...] one per option, or [] if no options
+- "answer": the correct answer AS A STRING — for choice: letter (e.g. "A"),
+  for fill: the value, for essay: "" (answer content is in answer_lines)
+- "answer_lines": [start, end] where the answer/solution text is located, or null
+- "explanation_lines": [start, end] where detailed explanation is located, or null
+
+CRITICAL RULES:
+1. Extract EVERY question. Count them against visible question numbers.
+2. If the document has an answer key section ("参考答案"/"答案"), LOOK UP each
+   question's answer from it and set "answer" to the correct value.
+3. Line numbers MUST be within the document's range. Use EXACT line numbers.
+4. For composite questions (reading/cloze):
+   - Include the shared passage in the FIRST sub-question's stem_lines
+   - Each sub-question is a SEPARATE entry with its own stem_lines and options_lines
+5. For questions WITHOUT visible answer text, set answer_lines to null.
+6. For choice questions, options_lines should capture each option line.
+7. Question numbers appear as "N.", "N、", "N)", "(N)" at line start — recognize all.
+
+Return ONLY a JSON object:
+{"questions": [
+  {
+    "qno": 1,
+    "type": "choice",
+    "stem_lines": [5, 12],
+    "options_lines": [[13, 13], [14, 14], [15, 15], [16, 16]],
+    "answer": "A",
+    "answer_lines": null,
+    "explanation_lines": null
+  }
+]}"""
+
+
 async def extract_questions_from_markdown(
     markdown: str,
     subject_code: str = "",
-    max_concurrent: int = 3,
-    timeout_per_section: float = 120.0,
+    max_concurrent: int = 3,          # kept for API compatibility, unused
+    timeout_per_section: float = 180.0,  # kept for API compatibility, unused
 ) -> dict[str, Any] | None:
-    """Extract questions from PP-StructureV3 markdown (text-first subjects).
+    """Extract questions from OCR markdown — simplified annotation pipeline.
 
-    Replaces the Anchor mode / V3 text extraction flow with section-aware
-    question-driven extraction.  Detects section boundaries in the markdown,
-    then passes each section's full context to LLM for question identification.
+    DESIGN (S#167): ONE LLM call with the full markdown (line-numbered).
+    LLM outputs line number ranges for each question.  Code extracts
+    content from the original lines.  This avoids ALL LaTeX-in-JSON
+    escaping issues while keeping the pipeline dead simple.
 
     Args:
-        markdown: Full PP-StructureV3 markdown text.
-        subject_code: Subject identifier for prompt tuning.
-        max_concurrent: Max concurrent LLM calls for sections.
-        timeout_per_section: Per-section LLM timeout.
+        markdown: Full OCR markdown text.
+        subject_code: Subject identifier (reserved for future prompt tuning).
+        max_concurrent: Unused — kept for backward API compatibility.
+        timeout_per_section: Unused — kept for backward API compatibility.
 
     Returns:
-        Same shape as extract_questions_from_blocks().
+        {
+            "questions": list[dict],
+            "metadata": {"extraction_source": str, "question_count": int, ...}
+        }
+        or None if extraction failed.
     """
     if not markdown or len(markdown.strip()) < 50:
-        logger.warning("Markdown too short for extraction (%d chars)", len(markdown))
+        logger.warning("QD simple: markdown too short (%d chars)", len(markdown or ""))
         return None
 
     logger.info(
-        "Question-driven markdown extraction: %d chars for %s",
-        len(markdown),
-        subject_code or "unknown",
+        "QD simple: extracting from %d chars markdown [%s]",
+        len(markdown), subject_code or "unknown",
     )
 
-    # Detect sections via LLM semantic understanding
-    raw_sections, sections_meta, answer_start = await _detect_markdown_sections(markdown)
+    # ── Build line-numbered text ──
+    raw_lines = markdown.split("\n")
+    condensed: list[str] = []
+    for i, line in enumerate(raw_lines):
+        stripped = line.strip()
+        if stripped:
+            condensed.append(f"[{i}] {stripped}")
 
-    if not raw_sections:
-        logger.warning("No meaningful sections after LLM detection")
+    if not condensed:
+        logger.warning("QD simple: no content lines after filtering")
         return None
 
-    # ── S#162: Extract answers from answer section ──
-    # answer_start comes from LLM semantic detection (no regex re-scan).
-    lines = markdown.split("\n")
-    answer_items: list[dict] = []
-    if answer_start is not None:
-        answer_text = "\n".join(lines[answer_start:])
+    condensed_text = "\n".join(condensed)
+    full_prompt = f"{_QD_SIMPLE_ANNOTATION_PROMPT}\n\n```\n{condensed_text}\n```"
+
+    logger.info(
+        "QD simple: %d condensed lines (%d chars) for LLM",
+        len(condensed), len(condensed_text),
+    )
+
+    # ── Single LLM call ──
+    try:
+        from app.gateway.router import llm_gateway
+
+        result = await asyncio.wait_for(
+            llm_gateway.generate(
+                mode="reasoning",
+                prompt=full_prompt,
+                response_format={"type": "json_object"},
+                max_tokens=131072,
+            ),
+            timeout=600.0,
+        )
+        raw = result.get("response", "").strip()
+        model = result.get("model", "unknown")
+        usage = result.get("usage", {})
         logger.info(
-            "QD markdown: answer section at line %d/%d (%d chars)",
-            answer_start, len(lines), len(answer_text),
+            "QD simple: LLM response %d chars from %s (prompt %d, completion %d tokens)",
+            len(raw), model,
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
         )
-        answer_items = await _extract_answers_from_section(answer_text)
-    else:
-        logger.info("QD markdown: no answer section detected")
 
-    # ── S#159 + S#163: Split large sections into manageable chunks ──
-    # Reading passages: split by A/B/C/D markers
-    # Choice sections: split into batches of ~5 questions to avoid timeout
-    expanded: list[tuple[str, str]] = []
-    expanded_meta: list[dict] = []
-    for idx, (header, body) in enumerate(raw_sections):
-        meta = sections_meta[idx]
-        type_hint = meta.get("type_hint", "other")
+    except asyncio.TimeoutError:
+        logger.error("QD simple: LLM timeout after 600s for %d chars markdown", len(markdown))
+        return None
+    except Exception as exc:
+        logger.error("QD simple: LLM call failed: %s", exc)
+        return None
 
-        # Split reading comprehension sections by passage markers
-        passages_found = _PASSAGE_MARKER_RE.findall(body)
-        is_reading_section = (
-            len(passages_found) >= 2
-            and "七选五" not in header
-            and "选词" not in header
-        )
-        if is_reading_section:
-            logger.info(
-                "QD markdown: splitting reading section [%s] (%d passage markers: %s)",
-                header[:60], len(passages_found), passages_found,
-            )
-            subs = _split_reading_passages(body, header)
-            expanded.extend(subs)
-            for _ in subs:
-                expanded_meta.append({
-                    "type_hint": "reading",
-                    "is_composite": True,
-                    "material_shared": True,
-                    "note": "split from multi-passage reading section",
-                })
-
-        # S#163: Split large choice/fill sections into batches
-        # A section with 10+ questions can timeout the reasoning model.
-        # Split into batches of ~5 questions each.
-        # S#165: Use LLM metadata qno_first/qno_last instead of regex body scan.
-        section_qno_first = int(meta.get("qno_first", 1))
-        section_qno_last = int(meta.get("qno_last", section_qno_first))
-        total_qnos = section_qno_last - section_qno_first + 1
-
-        if type_hint == "choice" and total_qnos > 5:
-            batch_size = 5
-            num_batches = (total_qnos + batch_size - 1) // batch_size  # ceil division
-            body_lines_list = body.split("\n")
-            total_lines = len(body_lines_list)
-            logger.info(
-                "QD markdown: splitting choice section [%s] into %d batches "
-                "(Q%d-Q%d, %d lines, %d chars)",
-                header[:60], num_batches,
-                section_qno_first, section_qno_last,
-                total_lines, len(body),
-            )
-            for batch_idx in range(num_batches):
-                start_line = int(batch_idx * total_lines / num_batches)
-                end_line = int((batch_idx + 1) * total_lines / num_batches)
-                batch_body = "\n".join(body_lines_list[start_line:end_line]).strip()
-                batch_header = f"{header} (Part {batch_idx + 1})"
-                batch_qno_first = section_qno_first + batch_idx * batch_size
-                batch_qno_last = min(section_qno_first + (batch_idx + 1) * batch_size - 1, section_qno_last)
-                expanded.append((batch_header, batch_body))
-                expanded_meta.append({
-                    **meta,
-                    "qno_first": str(batch_qno_first),
-                    "qno_last": str(batch_qno_last),
-                    "note": f"batch {batch_idx + 1}/{num_batches} from choice section",
-                })
-
-        else:
-            expanded.append((header, body))
-            expanded_meta.append(meta)
-
-    raw_sections = expanded
-    sections_meta = expanded_meta
-    logger.info(
-        "Detected %d sections in markdown for %s",
-        len(raw_sections),
-        subject_code,
-    )
-
-    # Extract from each section concurrently
-    semaphore = asyncio.Semaphore(max_concurrent)
-
-    async def _process(header: str, body: str) -> tuple[list[dict], dict]:
-        async with semaphore:
-            md = f"## {header}\n\n{body}" if header else body
-            if len(md.strip()) < 10:
-                return [], {"status": "skipped_empty"}
-            return await extract_questions_from_section(
-                section_markdown=md,
-                subject_code=subject_code,
-                section_label=header,
-                timeout=timeout_per_section,
-            )
-
-    tasks = [_process(h, b) for h, b in raw_sections]
-    results = await asyncio.gather(*tasks)
-
-    # ── S#158 diagnostic: per-section LLM results ──
-    all_questions: list[dict] = []
-    validation_results: list[dict] = []
-    section_summaries: list[dict] = []
-
-    for idx, ((header, body), (qs, val)) in enumerate(zip(raw_sections, results)):
-        q_count = len(qs)
-        v_status = val.get("status", "unknown")
-        meta = sections_meta[idx]
-
-        # ── S#161: Composite merge from LLM metadata ──
-        # The LLM tells us directly which sections are composite — no more
-        # header keyword guessing.
-        is_composite = meta.get("is_composite", False)
-        type_hint = meta.get("type_hint", "other")
-
-        if is_composite and len(qs) > 1:
-            # ── S#164+: Sub-question preservation ──
-            # LLM outputs one question per sub-question with shared passage_lines.
-            # Group by passage_lines and preserve sub_questions list.
-            first_qno = meta.get("qno_first")
-            passage_key = None
-            for q in qs:
-                pl = q.get("passage_lines")
-                if pl is not None:
-                    passage_key = tuple(pl) if isinstance(pl, list) else pl
+    # ── Parse JSON (annotation format → no LaTeX, safe to parse) ──
+    try:
+        parsed = _json.loads(_clean_json(raw))
+        questions_data = parsed.get("questions", [])
+        if not questions_data:
+            for val in parsed.values():
+                if isinstance(val, list) and val and isinstance(val[0], dict):
+                    questions_data = val
                     break
-            if first_qno is None:
-                first_qno = qs[0].get("qno")
-
-            # Build composite question with sub_questions
-            merged = {
-                **qs[0],
-                "qno": first_qno,
-                "qno_last": meta.get("qno_last"),
-                "passage_lines": list(passage_key) if passage_key else None,
-                "stem": qs[0].get("stem", ""),  # keep first sub-question stem as default
-                "sub_questions": qs,  # preserve all sub-questions
-            }
-            qs = [merged]
-            q_count = 1
-            logger.info(
-                "QD post-process: preserved %d sub-questions for [%s] "
-                "(type=%s, qno_first=%s)",
-                len(merged["sub_questions"]), header[:60],
-                type_hint, meta.get("qno_first"),
-            )
-
-        elif is_composite and len(qs) == 1:
-            # Fix QNO using LLM metadata (instead of regex body scan)
-            q = qs[0]
-            current_qno = q.get("qno")
-            meta_qno_first = meta.get("qno_first")
-            if meta_qno_first is not None and current_qno != meta_qno_first:
-                q["qno"] = meta_qno_first
-                logger.info(
-                    "QD post-process: fixed QNO %s → %s for [%s] "
-                    "(type=%s, from metadata)",
-                    current_qno, meta_qno_first, header[:60], type_hint,
-                )
-
-        # ── QNO remapping: correct local QNOs using section metadata ──
-        # LLM outputs local QNOs (Q1, Q2, ...) within each section.
-        # Metadata qno_first/qno_last give the global QNO range from the exam.
-        # Remap ALL questions, but skip merged composites (sub_questions already set).
-        meta_qno_first = meta.get("qno_first")
-        if meta_qno_first is not None and len(qs) > 0:
-            # Remap Q1→qno_first, Q2→qno_first+1, ...
-            # Skip questions that already have sub_questions (merged composites).
-            try:
-                offset = int(meta_qno_first) - 1  # Q1 → offset=0
-                for i, q in enumerate(qs):
-                    if q.get("sub_questions"):
-                        continue  # skip merged composites
-                    old_qno = q.get("qno")
-                    new_qno = str(offset + i + 1)
-                    if old_qno != new_qno:
-                        q["qno"] = new_qno
-                        logger.debug(
-                            "QD QNO remap: %s → %s in [%s]",
-                            old_qno, new_qno, header[:40],
-                        )
-            except (ValueError, TypeError):
-                pass  # skip if qno_first is not a valid integer
-
-        all_questions.extend(qs)
-        validation_results.append(val)
-        section_summaries.append({
-            "header": header[:60],
-            "questions": q_count,
-            "validation": v_status,
-            "type_hint": type_hint,
-            "is_composite": is_composite,
-        })
-        logger.info(
-            "QD section [%s]: %d questions, validation=%s, composite=%s, type=%s",
-            header[:60], q_count, v_status, is_composite, type_hint,
-        )
-
-    if not all_questions:
-        # ── S#158 diagnostic: structured failure summary ──
-        empty_sections = sum(
-            1 for s in section_summaries if s["questions"] == 0
-        )
-        error_sections = sum(
-            1 for vr in validation_results
-            if vr.get("status") in ("error", "timeout")
-        )
-        logger.warning(
-            "QD markdown: no questions from %d sections "
-            "(empty_sections=%d, error_sections=%d, summaries=%s)",
-            len(raw_sections), empty_sections, error_sections,
-            section_summaries,
+    except (_json.JSONDecodeError, TypeError) as e:
+        logger.error(
+            "QD simple: JSON parse failed: %s | raw[:500]=%s",
+            e, raw[:500],
         )
         return None
 
-    # Deduplicate — key by (qno, section) to avoid cross-section QNO collisions.
-    # Each section naturally starts QNO from 1; without section in the key,
-    # questions from different sections would overwrite each other.
-    seen: dict[tuple, dict] = {}
-    for q in all_questions:
-        qno = q.get("qno")
-        section = q.get("section", "")
-        if qno is None:
+    if not questions_data:
+        logger.warning("QD simple: LLM returned no questions")
+        return None
+
+    # ── Extract content from line ranges ──
+    normalized: list[dict] = []
+    qnos_seen: set[int] = set()
+    for q in questions_data:
+        qno_raw = q.get("qno")
+        try:
+            qno = int(qno_raw)
+        except (ValueError, TypeError):
+            logger.warning("QD simple: skipping question with invalid qno=%r", qno_raw)
             continue
-        key = (qno, section)
-        if key not in seen or len(q.get("stem", "")) > len(
-            seen[key].get("stem", ""),
-        ):
-            seen[key] = q
-    deduped = sorted(seen.values(), key=lambda x: (x.get("section", ""), x.get("qno", 0)))
 
-    # ── S#162: Merge extracted answers into questions by QNO ──
-    # OCR answer section is authoritative — always overwrite LLM-generated answers.
-    # S#165: Normalize QNO to int for matching (question QNOs may be strings).
-    if answer_items:
-        answer_map = {int(item["qno"]): item for item in answer_items}
-        merged_count = 0
-        for q in deduped:
-            try:
-                qno = int(q.get("qno"))
-            except (ValueError, TypeError):
-                continue
-            if qno in answer_map:
-                ans = answer_map[qno]
-                if ans["answer"]:
-                    q["answer"] = ans["answer"]
-                if ans["explanation"]:
-                    q["explanation"] = ans["explanation"]
-                merged_count += 1
-        logger.info(
-            "QD answer merge: %d/%d questions got answers from answer section",
-            merged_count, len(deduped),
-        )
+        if qno in qnos_seen:
+            logger.warning("QD simple: duplicate qno=%d, skipping", qno)
+            continue
+        qnos_seen.add(qno)
 
-    total_mismatches = sum(
-        1 for v in validation_results if v.get("status") != "ok"
-    )
+        # Extract content from line number ranges
+        stem = _extract_text_from_lines(raw_lines, q.get("stem_lines"))
+
+        options_raw = _extract_multiple_ranges(raw_lines, q.get("options_lines"))
+        options = [o.strip() for o in options_raw.split("\n") if o.strip()] if options_raw else []
+
+        answer = q.get("answer")
+        if answer is not None:
+            answer = str(answer).strip()
+
+        qtype = str(q.get("type", "other")).strip().lower()
+
+        # If LLM provided answer_lines, use it ONLY when:
+        # - string answer is empty, OR
+        # - it's NOT a choice/multi_choice type (where answer should be a letter)
+        # This prevents the answer table HTML from replacing "D" with the full table.
+        answer_lines = q.get("answer_lines")
+        if answer_lines is not None and (not answer or qtype not in ("choice", "multi_choice")):
+            answer_from_lines = _extract_text_from_lines(raw_lines, answer_lines)
+            if answer_from_lines:
+                answer = answer_from_lines
+
+        explanation = _extract_text_from_lines(raw_lines, q.get("explanation_lines"))
+        if not explanation:
+            explanation = ""
+
+        # Normalize unicode math → LaTeX
+        stem = _normalize_unicode_math(stem)
+        options = [_normalize_unicode_math(o) for o in options]
+        answer = _normalize_unicode_math(answer) if answer else ""
+
+        normalized.append({
+            "qno": qno,
+            "type": qtype,
+            "section": "",
+            "stem": stem,
+            "options": options,
+            "answer": answer,
+            "explanation": explanation,
+            "score": None,
+            "difficulty": None,
+            "knowledge_points": [],
+        })
+
+    # Sort by QNO
+    normalized.sort(key=lambda x: x["qno"])
+    actual_qnos = [q["qno"] for q in normalized]
+
+    # ── Diagnostics ──
+    with_stem = sum(1 for q in normalized if q["stem"])
+    with_answer = sum(1 for q in normalized if q["answer"])
+    with_explanation = sum(1 for q in normalized if q["explanation"])
+    missing_qnos = _detect_missing_qnos(actual_qnos)
 
     logger.info(
-        "Question-driven markdown extraction complete: %d questions from %d sections",
-        len(deduped),
-        len(raw_sections),
+        "QD simple: extracted %d questions (Q%d-Q%d), "
+        "stem=%d/%d, answer=%d/%d, explanation=%d/%d",
+        len(normalized),
+        actual_qnos[0] if actual_qnos else 0,
+        actual_qnos[-1] if actual_qnos else 0,
+        with_stem, len(normalized),
+        with_answer, len(normalized),
+        with_explanation, len(normalized),
     )
+    if missing_qnos:
+        logger.warning("QD simple: missing QNOs: %s", missing_qnos)
 
     return {
-        "questions": deduped,
+        "questions": normalized,
         "metadata": {
-            "extraction_source": "question_driven_markdown",
-            "question_count": len(deduped),
-            "sections_processed": len(raw_sections),
-            "validation_summary": {
-                "sections_processed": len(raw_sections),
-                "sections_with_mismatch": total_mismatches,
-                "per_section": validation_results,
+            "extraction_source": "qd_simple_v2",
+            "question_count": len(normalized),
+            "qno_range": [actual_qnos[0], actual_qnos[-1]] if actual_qnos else [],
+            "missing_qnos": missing_qnos,
+            "model": model,
+            "tokens": {
+                "prompt": usage.get("prompt_tokens", 0),
+                "completion": usage.get("completion_tokens", 0),
             },
         },
     }
+
+
+def _detect_missing_qnos(qnos: list[int]) -> list[int]:
+    """Detect gaps in sequential QNO list."""
+    if not qnos or len(qnos) < 2:
+        return []
+    missing = []
+    for i in range(min(qnos), max(qnos) + 1):
+        if i not in qnos:
+            missing.append(i)
+    return missing

@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-08-02 Session #165 (PaddleOCR-VL-1.6 化学PDF丢页Bug修复) | **版本**: 1.54.0 | **完成度**: 核心链路 ~98%，整体 ~97%。
+> **最后更新**: 2026-08-02 Session #166 (QNO映射修复 + sub_questions DB写入路径) | **版本**: 1.55.0 | **完成度**: 核心链路 ~98%，整体 ~97%。
 >
 > **记录规范（2026-07-31 起严格执行）**：
 > - 本文档 §1-§15 为当前状态快照，可以原地编辑
@@ -1240,3 +1240,27 @@ qd_result = await extract_questions_from_markdown(full_markdown, ...)
 - PP-StructureV3（1 页/行）掩盖了此 Bug，化学（唯一使用 VL-1.6 的科目）才暴露
 
 **变更文件**: `_paddleocr_vl_client.py`（3 处修改：`_parse_jsonl` + `_poll_job` + 函数重命名）、`LOG.md`、`PROJECT_STATUS.md`
+
+### 2026-08-02 19:30 — S#166: QNO映射修复 + sub_questions DB写入路径 + composite子题保留验证
+
+**版本**: 1.55.0
+
+**P1: QNO 映射修复**:
+- 根因：post-process 循环只对 `is_composite=True` 的 section 做 QNO 修正，非 composite section 直接沿用 LLM 局部编号（Q1, Q2...）
+- 修复：所有非 composite section 用 `qno_first` 元数据重映射全局编号（`offset = int(qno_first) - 1`）
+
+**P2: sub_questions DB 写入路径补齐**:
+- 验证报告发现 migration + model 已加列，但写入路径未对接
+- 修复：`repository.create()` 加 `sub_questions` 参数，`async_document.py` QD 路径传入
+
+**S#164: Composite 子题保留**:
+- Prompt 改写：LLM 输出 one question PER sub-question（共享 passage_lines）
+- Merge 逻辑重写：保留 `sub_questions` 列表，不再拼接 stems
+- 语文验证：27/27 sub-questions 结构完整
+
+**已知遗留**:
+- 语文 Section 检测过度拆分（7 vs 5），需调 prompt
+- `passage_key` 死代码（`_normalize_annotation_questions` 未透传 `passage_lines`）
+- QNO 映射：Section 五输出 Q22-Q28 而非 Q22-Q27（qno_first=22 但 body 含 Q1-Q3）
+
+**变更文件**: `_question_driven_extractor.py`（QNO remap + composite merge）、`repository.py`（create 参数）、`async_document.py`（QD 写入路径）、`models.py`（sub_questions 列）、`017_add_sub_questions.py`（migration）、`LOG.md`、`PROJECT_STATUS.md`

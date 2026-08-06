@@ -12108,3 +12108,70 @@ if state == "done" and ep:
 | `_verify_chem_fix.py` | 临时（已删除） | 验证脚本：OCR + QD 端到端验证，确认 14 页完整返回 |
 | `LOG.md` | 追加 | 本条目 |
 | `PROJECT_STATUS.md` | 修改 | §6 近期完成 + §16 变更日志追加 |
+
+---
+
+## Session #166 — 2026-08-02: QNO映射修复 + sub_questions DB写入路径
+
+### 任务概览
+
+| 编号 | 任务 | 状态 | 提交 |
+|:----:|------|:----:|:----:|
+| P1 | QNO 映射修复（非 composite section） | ✅ | `efc3fd4` |
+| P2 | sub_questions DB 写入路径补齐 | ✅ | `efc3fd4` |
+| S#164 | Composite 子题保留验证 | ✅ | `43505c5` |
+
+### P1: QNO 映射修复
+
+**根因**: `extract_questions_from_markdown()` 的 post-process 循环只对 `is_composite=True` 的 section 做 QNO 修正（L1740-1783），非 composite section 直接沿用 LLM 输出的局部编号（Q1, Q2...）。
+
+**修复**: 在 post-process 循环末尾（L1785-1803），对所有非 composite section 的每道题做 QNO 重映射：
+```python
+meta_qno_first = meta.get("qno_first")
+if meta_qno_first is not None and len(qs) > 0 and not is_composite:
+    offset = int(meta_qno_first) - 1
+    for i, q in enumerate(qs):
+        q["qno"] = str(offset + i + 1)
+```
+
+**验证**: 语文 Section 五（语言基础运用）从 Q1-Q7 → Q22-Q28，QNO 映射正确。
+
+### P2: sub_questions DB 写入路径
+
+**发现**: 用户验证报告指出 migration + model 已加列，但 `repository.create()` 和 `async_document.py` 未对接。
+
+**修复**:
+1. `repository.py`: `create()` 签名加 `sub_questions: list | None = None`
+2. `async_document.py`: QD 路径从 `q.get("sub_questions")` 提取并传入 `q_repo.create()`
+3. `models.py`: 新增 `sub_questions` JSON 列声明
+4. `017_add_sub_questions.py`: Alembic migration
+
+### S#164: Composite 子题保留验证
+
+**验证结果**: 语文试卷 Doc#12（24,473 chars）：
+- 11 道题，5 个 section
+- Section 一（阅读）: 7 sub-questions，结构完整
+- Section 二（阅读）: 6 sub-questions，结构完整
+- Section 三（阅读）: 6 sub-questions，结构完整
+- Section 四（阅读）: 4 sub-questions，结构完整
+- Section 五-七: 7 道独立题，QNO Q22-Q28
+
+### 已知遗留
+
+| 问题 | 优先级 | 说明 |
+|------|:------:|------|
+| 语文 Section 检测过度拆分 | P2 | 7 vs 5 sections，需调 prompt |
+| `passage_key` 死代码 | P3 | `_normalize_annotation_questions` 未透传 `passage_lines` |
+| QNO 尾部偏移 | P3 | Section 五输出 Q22-Q28 而非 Q22-Q27 |
+
+### 变更文件
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `_question_driven_extractor.py` | 修改 | QNO remap（L1785-1803）+ composite merge（L1740-1770） |
+| `repository.py` | 修改 | `create()` 加 `sub_questions` 参数 |
+| `async_document.py` | 修改 | QD 路径传入 `sub_questions` |
+| `models.py` | 修改 | `sub_questions` JSON 列声明 |
+| `017_add_sub_questions.py` | 新增 | Alembic migration |
+| `LOG.md` | 追加 | 本条目 |
+| `PROJECT_STATUS.md` | 修改 | 版本 1.54.0→1.55.0 + §16 变更日志追加 |
