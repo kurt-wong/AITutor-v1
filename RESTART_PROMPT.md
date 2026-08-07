@@ -195,8 +195,8 @@ _VISION_FIRST_SUBJECTS = frozenset({
 
 ```
 Remote:  https://github.com/kurt-wong/AITutor
-main:    ace906d (HEAD; merge 4580846 + doc sync commits)
-origin/main: 未同步（main ahead 16；未 push，待用户确认）
+main:    d551e3c (HEAD; S#168 L2 annotation mirror + L1+L2 admin render)
+origin/main: 已同步（S#168 已 push）
 refactor/annotation-architecture: ee72faa → 已合并到 main
 ```
 
@@ -210,14 +210,14 @@ refactor/annotation-architecture: ee72faa → 已合并到 main
 ### 待定
 
 - ✅ 已合并 `refactor/annotation-architecture` 到 `main`（2026-08-06，merge commit `4580846`）
-- ⚠️ `origin/main` 未 push（main ahead 16 commits）— 待用户确认后执行
+- ✅ `origin/main` 已 push（2026-08-07，HEAD `d551e3c`）
 - ✅ `PROJECT_STATUS.md §3.3/§3.3a` 已同步至 S#168
 - ✅ 后端常规测试：1250 passed / 5 skipped（live-only VL 测试默认跳过）
 - ✅ 全量 29 份 OCR markdown 验证：832 题，题干 831/832，答案 830/832，选择题字母 493/500
 - ✅ Step 2: 标注镜像库（`question_annotations` 表 + Repository + Service）
 - ✅ Step 4: 前端渲染切换（L1+L2 组合渲染，管理端题目编辑页）
 - 🟡 标注镜像历史回填（可选）
-- 🟡 S#168 工作区变更未提交，待确认后 commit/push
+- ✅ S#168 工作区变更已提交并 push（HEAD `d551e3c`）
 
 ---
 
@@ -331,8 +331,8 @@ Annotation Paradigm（行号标注）:
 == Git ==
 
 Remote:  https://github.com/kurt-wong/AITutor
-Current: main (HEAD ace906d, merge 4580846 + doc sync)
-Status:  S#167 简化管线已合并到 main；S#168 工作区变更未提交；origin/main 未同步（ahead 16），未 push
+Current: main (HEAD d551e3c, S#168 L2 annotation mirror + L1+L2 admin render)
+Status:  S#168 已提交并 push；origin/main 已同步
 
 == 最近验证快照 ==
 
@@ -367,12 +367,12 @@ Status:  S#167 简化管线已合并到 main；S#168 工作区变更未提交；
 == 待办事项 ==
 
 1. ✅ 合并 refactor/annotation-architecture 到 main（2026-08-06 完成，merge commit 4580846）
-2. ⚠️ 确认是否 git push origin main（当前 ahead 16；未 push）
+2. ✅ git push origin main（2026-08-07 完成，HEAD d551e3c）
 3. ✅ 更新 PROJECT_STATUS.md §3.3/§3.3a 快照为 S#168（2026-08-07）
 4. ✅ 全量 29 份文档验证（2026-08-07：832 题，无结构化错误）
 5. ✅ 后端测试债务清零（1250 passed / 5 skipped）
 6. ✅ Step 2 — 标注镜像库（question_annotations 表 + Repository + Service）
 7. ✅ Step 4 — 前端 L1+L2 组合渲染（管理端题目编辑页）
 8. 🟡 标注镜像历史回填（可选）
-9. 🟡 提交 S#168 工作区变更，待确认后 commit/push
+9. ✅ 提交并 push S#168（2026-08-07，HEAD d551e3c）
 ```

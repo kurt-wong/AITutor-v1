@@ -12392,3 +12392,11 @@ cd backend
 - 前端 `npm run build`：通过
 - `validate_docs_vs_code.py`：0 discrepancies
 - Alembic `018_add_question_annotations`：已应用
+
+---
+
+## 2026-08-07 — S#168 提交并 push
+
+- 提交：`d551e3c`（feat: S#168 L2 annotation mirror and L1+L2 admin rendering）
+- 已 push 到 `origin/main`
+- `RESTART_PROMPT.md` Git 快照同步为已 push 状态
