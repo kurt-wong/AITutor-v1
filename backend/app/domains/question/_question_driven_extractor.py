@@ -449,7 +449,7 @@ def _clean_json(raw: str) -> str:
     # \b, \f, \r are also valid JSON BUT they're extremely common LaTeX
     # command prefixes (\begin, \beta, \frac, \right, \rho etc.) —
     # treating them as LaTeX is always safe in this context.
-    raw = re.sub(r'\\(?!["\\/ntu])', r'\\\\', raw)
+    raw = re.sub(r'\\(?!(?:["\\/nt]|u[0-9a-fA-F]{4}))', r'\\\\', raw)
     return raw
 
 
@@ -2063,14 +2063,19 @@ async def extract_questions_from_markdown(
         normalized.append({
             "qno": qno,
             "type": qtype,
-            "section": "",
+            "section": q.get("section", ""),
             "stem": stem,
             "options": options,
             "answer": answer,
             "explanation": explanation,
-            "score": None,
-            "difficulty": None,
-            "knowledge_points": [],
+            "score": q.get("score"),
+            "difficulty": q.get("difficulty"),
+            "knowledge_points": q.get("knowledge_points", []),
+            "stem_lines": q.get("stem_lines"),
+            "options_lines": q.get("options_lines"),
+            "answer_lines": q.get("answer_lines"),
+            "explanation_lines": q.get("explanation_lines"),
+            "passage_lines": q.get("passage_lines"),
         })
 
     # Sort by QNO

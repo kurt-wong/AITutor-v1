@@ -34,8 +34,8 @@ class TestSaveWrongQuestion:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.wrong_question_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.wrong_question_server.WrongQuestionRepository") as MockRepo:
-                MockRepo.return_value.create = AsyncMock(return_value=mock_wq)
+            with patch("app.mcp.servers.wrong_question_server.WrongQuestionService") as MockService:
+                MockService.return_value.create = AsyncMock(return_value=mock_wq)
                 result = await server._save_wrong_question({
                     "question_id": 1,
                     "error_type": "calculation",
@@ -71,9 +71,9 @@ class TestGetWrongQuestions:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.wrong_question_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.wrong_question_server.WrongQuestionRepository") as MockRepo:
-                MockRepo.return_value.list_all = AsyncMock(return_value=[mock_wq])
-                MockRepo.return_value.count = AsyncMock(return_value=1)
+            with patch("app.mcp.servers.wrong_question_server.WrongQuestionService") as MockService:
+                MockService.return_value.repo.list_all = AsyncMock(return_value=[mock_wq])
+                MockService.return_value.repo.count = AsyncMock(return_value=1)
                 result = await server._get_wrong_questions({"skip": 0, "limit": 100})
                 assert result["success"] is True
                 assert len(result["data"]["wrong_questions"]) == 1

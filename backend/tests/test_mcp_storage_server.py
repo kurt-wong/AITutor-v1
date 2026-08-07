@@ -56,8 +56,8 @@ class TestSaveQuestion:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.storage_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.storage_server.QuestionRepository") as MockRepo:
-                MockRepo.return_value.create = AsyncMock(return_value=mock_question)
+            with patch("app.mcp.servers.storage_server.QuestionService") as MockService:
+                MockService.return_value.create = AsyncMock(return_value=mock_question)
                 result = await server._save_question({
                     "content": "1+1=?",
                     "question_number": 1,
@@ -84,8 +84,8 @@ class TestGetQuestion:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.storage_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.storage_server.QuestionRepository") as MockRepo:
-                MockRepo.return_value.get_by_id = AsyncMock(return_value=mock_question)
+            with patch("app.mcp.servers.storage_server.QuestionService") as MockService:
+                MockService.return_value.repo.get_by_id = AsyncMock(return_value=mock_question)
                 result = await server._get_question({"question_id": 1})
                 assert result["success"] is True
                 assert result["data"]["content"] == "1+1=?"
@@ -98,8 +98,8 @@ class TestGetQuestion:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.storage_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.storage_server.QuestionRepository") as MockRepo:
-                MockRepo.return_value.get_by_id = AsyncMock(return_value=None)
+            with patch("app.mcp.servers.storage_server.QuestionService") as MockService:
+                MockService.return_value.repo.get_by_id = AsyncMock(return_value=None)
                 result = await server._get_question({"question_id": 999})
                 assert result["success"] is False
                 assert result["error"]["code"] == "NOT_FOUND"
@@ -123,8 +123,8 @@ class TestSaveSolution:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.storage_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.storage_server.SolutionRepository") as MockRepo:
-                MockRepo.return_value.create = AsyncMock(return_value=mock_solution)
+            with patch("app.mcp.servers.storage_server.SolutionService") as MockService:
+                MockService.return_value.create_solution = AsyncMock(return_value=mock_solution)
                 result = await server._save_solution({
                     "question_id": 1,
                     "final_answer": "2",
@@ -162,8 +162,8 @@ class TestGetSolution:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.storage_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.storage_server.SolutionRepository") as MockRepo:
-                MockRepo.return_value.get_by_question = AsyncMock(return_value=mock_solution)
+            with patch("app.mcp.servers.storage_server.SolutionService") as MockService:
+                MockService.return_value.repo.get_by_question = AsyncMock(return_value=mock_solution)
                 result = await server._get_solution({"question_id": 1})
                 assert result["success"] is True
                 assert result["data"]["final_answer"] == "2"
@@ -176,8 +176,8 @@ class TestGetSolution:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.storage_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.storage_server.SolutionRepository") as MockRepo:
-                MockRepo.return_value.get_by_question = AsyncMock(return_value=None)
+            with patch("app.mcp.servers.storage_server.SolutionService") as MockService:
+                MockService.return_value.repo.get_by_question = AsyncMock(return_value=None)
                 result = await server._get_solution({"question_id": 999})
                 assert result["success"] is False
                 assert result["error"]["code"] == "NOT_FOUND"

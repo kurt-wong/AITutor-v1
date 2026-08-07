@@ -112,6 +112,7 @@ class TestFallback:
         gw._providers["deepseek"].generate = AsyncMock(
             return_value={"error": "fail2", "response": ""}
         )
+        gw._generate_ollama = AsyncMock(return_value=None)
         result = await gw.generate(prompt="test", mode="fast")
         assert result.get("error")
         assert result.get("response") == ""

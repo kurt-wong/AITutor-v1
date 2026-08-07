@@ -4,6 +4,7 @@ Phase 3 Integration Tests (T12)
 Tests VL Provider, Splitter VL mode, Event Logger, Config, MCP flow.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,10 @@ requires_image = pytest.mark.skipif(not has_test_image(), reason="No test image"
 class TestVLProvider:
 
     @requires_image
+    @pytest.mark.skipif(
+        os.getenv("LLM_GATEWAY_MODE", "") == "mock",
+        reason="Requires live VL/LLM provider",
+    )
     @pytest.mark.asyncio
     async def test_extract_structured(self):
         from app.domains.document.ocr.vl_ocr_provider import VLOCRProvider
@@ -35,6 +40,10 @@ class TestVLProvider:
         assert result["confidence"] > 0
 
     @requires_image
+    @pytest.mark.skipif(
+        os.getenv("LLM_GATEWAY_MODE", "") == "mock",
+        reason="Requires live VL/LLM provider",
+    )
     @pytest.mark.asyncio
     async def test_extract_text(self):
         from app.domains.document.ocr.vl_ocr_provider import VLOCRProvider

@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-08-06 Session #167 (QD 管线简化重构) | **版本**: 1.56.0 | **完成度**: 核心链路 ~99%，整体 ~98%。
+> **最后更新**: 2026-08-07 Session #168 (L2 标注镜像 + L1+L2 前端渲染) | **版本**: 1.57.0 | **完成度**: 核心链路 ~99%，整体 ~99%。
 >
 > **记录规范（2026-07-31 起严格执行）**：
 > - 本文档 §1-§15 为当前状态快照，可以原地编辑
@@ -17,7 +17,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.56.0 |
+| **版本** | 1.57.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -46,7 +46,7 @@
 | C | 题目结构化验证（27 份 PDF） | ✅ 完成（内部一致性 95.2%） |
 | D | 知识图谱人工校准 | ✅ 完成（基准 46% exact / 62% L2） |
 | E | 收尾打磨 | ✅ S#79-#112: 审计修复 + 管线重构 + 模型路由 + 嵌入100% + KP100%。S#113: E2E 5科21份全量测试通过(533题, 解答100%, 详解80%) |
-| F | **Question-Driven Pipeline** | ⚠️ **S#155-#157: 进行中** — 降级链简化 QD→Vision→V3，全科统一 blocks 路径。9 科全量测试 5/9 完成（地理处理中） |
+| F | **Question-Driven Pipeline** | ✅ **S#167 已完成** — OCR markdown 单次 LLM 调用（Annotation Paradigm），9 科全量回归 293 题通过 |
 
 ---
 
@@ -77,77 +77,44 @@ UI → API → Service → MCP Client → MCP Server → Infra
 | OCR | 4 | Wrong Question | 4 |
 | Embedding | 3 | Training | 3 |
 
-### 3.3 文档处理管线（#161 最新状态 — LLM 元数据架构已落地）
+### 3.3 文档处理管线（S#167 最新状态 — 单次 LLM 调用 Annotation Paradigm）
 
-**当前架构（S#160 实测验证）**:
+**当前架构（S#167 实测验证）**:
 ```
-所有科目
-  │
+OCR markdown (≤40K chars, ~15K tokens)
+  │ 按行编号 [0], [1], [2]...
   ▼
-Question-driven markdown extraction ←── LLM 语义识别 section 边界 + 完整元数据（_detect_markdown_sections）
-  │                                   └── ✅ S#161：返回 type_hint/is_composite/qno_range/material_shared 全量语义元数据
-  │
-  ├── 成功 → sections_meta 直接驱动 composite merge（零关键词匹配）→ per-section LLM 提取 → cross-validate → 返回
-  │
-  └── 失败（fallback）
-        │
-        ├── vision-first（化学/生物/地理）→ MIMO Vision
-        │
-        └── text-first（数学/物理/语文/英语/政治/历史）
-              └── V3 text-mode（兜底）
+extract_questions_from_markdown() ←── 单次 LLM 调用
+  │   _QD_SIMPLE_ANNOTATION_PROMPT
+  │   输出 {qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}
+  ▼
+代码按行号从 OCR 原文切出 stem/options/answer/explanation
+  ▼
+交叉验证 → 直接入库
 ```
 
-**S#160 QD Extraction 最终修复**:
+**S#167 移除的中间步骤**: section detection / batch splitting / QNO remap / composite merge / answer merge 单独调用。29 份 OCR markdown 最大 39,269 chars（~15K tokens），512K 上下文单次调用即可处理完整文档。
 
-`_detect_markdown_sections()` 从正则关键词切分（`_MD_SECTION_SPLIT_RE`）完全重构为 LLM 语义理解：
+**Annotation Paradigm 核心**: JSON 中只含整数行号，永不包含 LaTeX 字符串。代码从 `markdown_lines` 按 `stem_lines` / `options_lines` / `answer_lines` / `explanation_lines` 切出原文，避免 `\frac` / `\sqrt` 未转义导致的 JSON 解析失败。
 
-```
-旧（正则）：
-  正则 _MD_SECTION_SPLIT_RE 匹配关键词 → split 文本
-  └── 问题：关键词穷举不完，各科各版表述千差万别
+**关键参数**: `extract_questions_from_markdown()` 使用 `mode="reasoning"`、`max_tokens=131072`、`timeout=600`、`response_format={"type": "json_object"}`。
 
-新（LLM）：
-  1. 答案区边界检测（_ANSWER_SECTION_RE，仅此一处保留正则）
-  2. 构建行号索引压缩文本（≤500 行 token budget）
-  3. LLM 语义识别：返回 [{header, line}, ...]
-  4. 按 line 切分原文
-  └── 优势：理解语义，任意表述均能正确识别
-```
+**S#167 9 科回归**:
 
-**验证结果（实测）**:
+| 指标 | 结果 |
+|------|------|
+| 总题数 | 293 |
+| 题干覆盖 | 100% |
+| 答案覆盖 | 100% |
+| 选择题字母答案 | 168/168 (100%) |
+| 仅缺失 | 地理 3 题（文档特定问题，非结构性） |
+| 英语复合题型 | 54 题全对（旧管线 35 碎片 + Q1-Q10 丢失） |
 
-| 科目 | 文档 | 修复前 | 修复后 | 预期 | 延迟 |
-|------|:---:|:---:|:---:|:---:|:---:|
-| 历史 | doc 7 | **0** | **43** ✓ | 43 (40+3) | 63s |
-| 生物 | doc 8 | **~7** | **26** ✓ | 26 (20+6) | ~60s |
+**回退路径**: QD 失败（空响应 / JSON 解析失败 / questions 为空）→ V3 text-mode / MIMO Vision / 正则管线。`extract_questions_from_blocks()`（PaddleOCR blocks 场景）仍保留旧多步函数兼容；markdown 主路径不再使用。
 
-**设计原则**（S#160 确认）:
-- **Section 检测 = LLM 语义**：不依赖任何关键词/正则穷举，由 LLM 理解试卷结构
-- **Answer 边界 = 简单正则**：`参考答案`/`答题卡` 表述模式有限，正则足够且可靠
-- **QNO 正则 = 辅助校验**：不驱动切分，仅比较 LLM 输出与原始 QNO 指纹
+### 3.3a 标注范式架构重构（S#163/S#167 主路径已落地）
 
-**S#161 LLM 元数据重构 — 已实施并验证**:
-
-S#160 section detection 仅返回 `{header, line}`，语义信息不足导致 S#161 英语复合题严重回归（56 碎片）。S#161 将 `_detect_markdown_sections()` 完全重构为 LLM 元数据架构：
-
-```
-LLM 一次输出完整语义元数据 → 下游代码零规则直接消费
-
-_detect_markdown_sections() 返回:
-  - sections: [{header, line, type_hint, qno_first, qno_last, is_composite, material_shared}]
-  - answer_section: {exists, line, note}
-
-Composite merge: meta.get("is_composite") → 零关键词匹配
-Answer boundary: metadata answer_section.line → 零正则
-```
-
-**验证（英语 doc 17）**: 56 碎片 → **10 composite 题**（完形+语法+选词+4篇阅读+七选五+阅读表达+写作）。
-
-**已消除的硬编码**: 7 个中文关键词（"语法填空"/"选词填空"/"完形填空"/"七选五"/"阅读表达"/"书面表达"/"写作"）+ `_ANSWER_SECTION_RE` 正则答案边界检测。
-
-### 3.3a 标注范式架构重构（S#162 启动，进行中）
-
-**背景**: `_extract_answers_from_section()` 当前使用"改写范式"——LLM 将答案和解析原文抄写到 JSON 值中，导致 LaTeX 反斜杠转义漏洞（`\frac→\f` 静默损毁、`\sqrt→\s` 抛异常）。
+**背景**: 旧“改写范式”让 LLM 把答案/解析/题干原文抄写入 JSON，LaTeX 反斜杠转义漏洞导致丢题。Annotation Paradigm 改为 LLM 只输出行号/偏移量元数据，代码从 L1 OCR Markdown 组合渲染，JSON 中仅含整数。
 
 **架构目标 — L0→L1→L2→L3 分层不可变**:
 
@@ -164,9 +131,9 @@ L3  前端渲染     →  从 L1 + L2 组合渲染
 | Step | 内容 | 状态 |
 |:---:|------|:---:|
 | 1 | 答案区标注范式改造 — `_extract_answers_from_section()` 输出行号范围 JSON | ✅ 已完成（S#163） |
-| 2 | 标注镜像库 — `question_annotations` 表 + Repository | ⏳ 待设计 |
-| 3 | QD 题干标注化 — `extract_questions_from_section()` 改为行号输出 | ⏳ 待设计 |
-| 4 | 前端渲染切换 — L1+L2 组合渲染 | ⏳ 待设计 |
+| 2 | 标注镜像库 — `question_annotations` 表 + Repository + 入库写入 | ✅ 已完成（S#168） |
+| 3 | QD 题干标注化 — markdown 主路径 `extract_questions_from_markdown()` 行号输出 | ✅ 已完成（S#167）；blocks 兼容路径保留旧实现 |
+| 4 | 前端渲染切换 — L1+L2 组合渲染 | ✅ 已完成（S#168，管理端题目编辑页切换） |
 
 ### 3.4 DDD 限界上下文
 
@@ -241,7 +208,7 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 指标 | 值 |
 |------|----|
-| 单元测试全量 | 常规测试集（排除真实 E2E）: **1212 passed / 35 failed / 4 skipped**（2026-08-06 实测） |
+| 单元测试全量 | 常规测试集（排除真实 E2E）: **1250 passed / 5 skipped**（2026-08-07 实测） |
 | 测试文件（backend/tests） | 58 |
 | E2E 测试 | 5 科全量通过（Session #130-131）。S#130: 90题, 解答 83/90(92%), 嵌入 100%。S#131 语文重测: 8题 LLM标注, 解答有效覆盖 100%。材料题合并效果: 英语-72%、化学-56%、语文-73%。JSON parser 4层+答案长度语义化全部生效。|
 
@@ -253,7 +220,7 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 > .venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py
 > ```
 > 若测试库 `ai_tutor_test` schema 落后于模型，先 `DROP DATABASE ai_tutor_test WITH (FORCE)`，pytest conftest 会自动重建。
-> 当前 35 个失败均为既有测试债务（MCP Server mock 路径过时、SSEHandler 重构后测试未同步、真实依赖测试等），与本次文档同步无关。
+> 5 个 skipped 均为 live-only 外部测试（Ollama/MIMO VL），在 `LLM_GATEWAY_MODE=mock` 常规测试下自动跳过。常规套件不再挂起。
 
 ---
 
@@ -788,14 +755,14 @@ anchor_assembly 成功（31题, 16 image）
 
 | 维度 | 状态 |
 |------|------|
-| **解析侧（Phase 1）** | ✅ QD Extraction LLM 元数据架构已落地（S#161）。✅ **答案区标注范式已完成**（S#163 Step 1）。🔴 **QD 题干 LaTeX JSON 问题待修复**（S#163 暴露）：`extract_questions_from_section()` 仍需改为 annotation 范式（Step 3）。 |
+| **解析侧（Phase 1）** | ✅ S#167 markdown 主路径为单次 LLM 调用 Annotation Paradigm（行号输出，JSON 仅含整数）。✅ S#168 L2 标注镜像库 + 管理端 L1+L2 渲染切换。全量 29 份 OCR markdown 验证：832 题，题干 99.9%，答案 99.8%，选择题字母 98.6%。 |
 | **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成 |
 | **管线监控** | ✅ S#137h: 7 个 PIPELINE_CHECKPOINT；S#157: 新增逐环节耗时统计 |
 | **架构合规** | ✅ 8 MCP Server / 37 Tools，唯一调用链，零违规 |
-| **测试** | ✅ 249 passed / 0 failed |
-| **文档同步** | ✅ LOG + PROJECT_STATUS 已更新至 S#162 |
+| **测试** | ✅ 常规测试 1250 passed / 5 skipped（live-only VL 测试默认跳过，见 §5） |
+| **文档同步** | ✅ LOG + PROJECT_STATUS 已更新至 S#168；PIPELINE v3.2 |
 | **Git** | ✅ `main` 已合并 `refactor/annotation-architecture`（merge commit `4580846`，2026-08-06） |
-| **整体完成度** | **核心链路 ~98%，整体 ~97%**。下一步：Step 3 QD 题干标注化（P0，消灭剩余 LaTeX JSON 漏洞）。 |
+| **整体完成度** | **核心链路 ~99%，整体 ~99%**。下一步：标注镜像历史回填（可选）+ 确认 push。 |
 
 ---
 
@@ -1341,3 +1308,26 @@ LLM 一次性提取全部题目（输出行号范围 + 答案）
 - merge commit: `4580846`
 - 内容：S#167 QD 简化管线、Annotation Paradigm、文档同步、测试清理
 - 验证：`validate_docs_vs_code.py` 0 discrepancies；前端 build 通过；后端常规测试 1212 passed / 35 failed / 4 skipped（既有测试债务）
+
+### 2026-08-07 — S#168: 测试债务清零 + 全量 29 份验证 + L2 标注镜像 + L1+L2 前端渲染
+
+**版本**: 1.57.0
+
+- 常规测试债务清零：修复 MCP Server mock 路径、SSEHandler 重构、Gateway fallback、QD annotation 解析等测试/代码问题
+- 常规 pytest：1212 passed / 35 failed / 4 skipped → **1250 passed / 5 skipped**
+- live-only VL 测试（`test_phase3_integration`、parallel extraction L4）在 `LLM_GATEWAY_MODE=mock` 下自动跳过，默认套件不再挂起
+- 全量 29 份 OCR markdown 验证：**832 题**，题干覆盖 831/832，答案覆盖 830/832，选择题字母 493/500，缺失 QNO 仅地理 3 个
+- 新增 `question_annotations` L2 标注镜像表 + `QuestionAnnotationRepository` + `QuestionAnnotationService`
+- QD 简单管线保留 `stem_lines` / `options_lines` / `answer_lines` / `explanation_lines` / `passage_lines`，入库时同步写标注镜像
+- 新增 `GET /api/admin/questions/{id}/annotation`，返回 OCR Markdown + 行号重建内容
+- 管理端题目编辑页新增“题库内容 / L1+L2 标注渲染”切换，用 `MathRenderer` 展示重建后的题干/选项/答案/讲解
+- 修复 `_QNO_INLINE` 吞掉答案标记字符、年份行被误切为题目、`_clean_json` 对非法 `\u` 转义处理
+- 变更文件：`PROJECT_STATUS.md`、`RESTART_PROMPT.md`、`LOG.md`、`Docs/02_Architecture/PIPELINE.md`、QD extractor、SSE handler、MCP 测试、`question_annotations` 迁移、前端 QuestionEditPage
+
+### 2026-08-06 — PROJECT_STATUS §3.3/§3.3a 快照同步（S#167）
+
+**版本**: 1.56.0（文档同步，无代码行为变更）
+
+- §3.3 由 S#160/S#161 多步元数据架构更新为 S#167 单次 LLM 调用 Annotation Paradigm
+- 补充 S#167 关键参数、9 科 293 题回归结果、markdown 主路径回退策略
+- §3.3a Step 3 更新为 markdown 主路径已完成，blocks 兼容路径保留旧实现

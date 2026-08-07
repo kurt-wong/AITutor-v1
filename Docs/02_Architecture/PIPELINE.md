@@ -1,9 +1,10 @@
 # AI Tutor — 文档解析管线规范
 
-> **版本**: 3.1 | **日期**: 2026-08-06 | **状态**: Annotation Paradigm 主路径 (Session #167)
+> **版本**: 3.2 | **日期**: 2026-08-07 | **状态**: Annotation Paradigm 主路径 + L2 标注镜像 (Session #168)
 >
 > 本文档是 PDF 处理管线的**唯一权威参考**。
 >
+> **v3.2 变更**: QD 简单管线返回的行号元数据持久化到 `question_annotations`（L2 镜像库）；管理端题目编辑页新增 L1+L2 组合渲染切换，可直接从 OCR Markdown + 行号范围重建题目内容。
 > **v3.1 重大变更**: QD 提取改为 **Annotation Paradigm（行号标注）**。LLM 只输出每道题的行号范围，代码从 OCR Markdown 原文按行号切出内容，JSON 中不再包含 LaTeX 字符串。`_question_driven_extractor.py::extract_questions_from_markdown()` 成为主入口；旧的 section detection / batch splitting / QNO remap / composite merge 已从 markdown 路径移除，保留为 blocks 路径兼容函数。
 > **v3.0 重大变更**: **LLM 全量提取替代正则管线成为主路径。** PP-StructureV3 Markdown → DeepSeek reasoning 一次性提取每道题的完整 stem + 标注 JSON → 直接入库。正则管线（QuestionStructurer + 跨页合并 + P2 答案配对）降级为回退路径。
 > **v2.2 变更**: LLM 标注分支接入 `response_format: {"type": "json_object"}` — API 保证合法 JSON，根除 LaTeX 转义崩溃；Gateway 层透传支持。
@@ -37,7 +38,7 @@
   → **Markdown 持久化到 documents.ocr_markdown（S#131，source of truth）**
   → extract_questions_from_markdown()：单次 LLM 调用，输出行号范围（Annotation Paradigm）
   → 代码按行号从 OCR Markdown 切出 stem/options/answer/explanation
-  → 交叉验证 → 直接入库（一次事务）
+  → 交叉验证 → 直接入库（一次事务）→ L2 行号元数据写入 question_annotations
   → 异步富化（solve + difficulty + embed + explain）
 ```
 

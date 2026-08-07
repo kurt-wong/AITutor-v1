@@ -17,7 +17,7 @@ from app.models.base import Base, IDMixin, TimestampMixin  # noqa: F401
 import app.domains.document.models  # noqa: F401 - Document
 import app.domains.embedding.models  # noqa: F401 - QuestionEmbedding
 import app.domains.knowledge.models  # noqa: F401 - Subject, KnowledgeNode, QuestionKnowledge
-import app.domains.question.models  # noqa: F401 - Question, QuestionImage, Solution
+import app.domains.question.models  # noqa: F401 - Question, QuestionImage, Solution, QuestionAnnotation
 import app.domains.student.models  # noqa: F401 - StudentQuestion
 import app.domains.system.models  # noqa: F401 - System models
 import app.domains.training.models  # noqa: F401 - LearningRecord

@@ -151,6 +151,23 @@ async def get_admin_question(
     return create_response(question, request)
 
 
+@router.get("/questions/{question_id}/annotation")
+async def get_question_annotation(
+    question_id: int,
+    request: Request = None,
+    session: AsyncSession = Depends(get_db),
+    _admin: bool = Depends(admin_required),
+):
+    """Get the L2 annotation mirror and reconstructed L1+L2 rendering."""
+    from app.domains.question.annotation_service import QuestionAnnotationService
+
+    service = QuestionAnnotationService(session)
+    result = await service.get_render(question_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="题目未找到")
+    return create_response(result, request)
+
+
 # ── T11-04: Edit / Delete ─────────────────────────────────────
 
 @router.put("/questions/{question_id}")

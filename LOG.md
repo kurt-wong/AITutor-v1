@@ -12326,3 +12326,69 @@ cd backend
 - `validate_docs_vs_code.py`：0 discrepancies
 - 前端 `npm run build`：通过
 - 后端常规测试：1212 passed / 35 failed / 4 skipped（35 个既有测试债务，非本次改动引入；详见测试环境记录条目）
+
+---
+
+## 2026-08-06 — RESTART_PROMPT 验证快照更新
+
+### 变更
+
+- `RESTART_PROMPT.md` 更新为当前状态：HEAD `ace906d`，`origin/main` ahead 16 未 push（待用户确认）；补充最近验证快照：文档-代码校验 0 discrepancies、前端构建通过、后端常规测试 1212 passed / 35 failed / 4 skipped。
+- 待办清单同步：`PROJECT_STATUS.md §3.3` 快照待改为 S#167 单次 LLM 调用状态；后端 35 个既有测试失败待后续分组处理。
+
+### 说明
+
+本次仅为重启上下文快照同步，未修改业务代码。
+
+---
+
+## Session #168 — 2026-08-07: 测试债务清零 + 全量 29 份验证 + L2 标注镜像 + L1+L2 前端渲染
+
+### 任务概览
+
+| 编号 | 任务 | 状态 |
+|:----:|------|:----:|
+| 1 | PROJECT_STATUS §3.3 文档漂移同步 | ✅ |
+| 2 | 后端 35 个既有测试失败清零 | ✅ |
+| 3 | 全量 29 份 OCR markdown 验证 | ✅ |
+| 4 | Step 2: `question_annotations` L2 标注镜像库 | ✅ |
+| 5 | Step 4: 前端 L1+L2 组合渲染切换 | ✅ |
+
+### 1. 测试债务清零
+
+- 修复 MCP Server 测试 mock 路径：EmbeddingService / KnowledgeService / QuestionService / SolutionService / WrongQuestionService
+- 修复 SSEHandler 测试与重构后代码不同步：`StudentImageService` 委托、`_extract_pdf_text` 迁移、`_update_question_text` 签名
+- 修复 Gateway fallback 测试：本地 Ollama 均失败时才返回 error
+- 修复 QD/LLM annotation：`_QNO_INLINE` 吞掉答案标记、年份行误切题、`_clean_json` 非法 `\u`
+- live-only VL 测试（phase3、parallel L4）在 mock 模式自动跳过
+- 常规 pytest 结果：**1250 passed / 5 skipped**
+
+### 2. 全量 29 份文档验证
+
+结果文件：`test_data/regression_simple_qd_all29.json`
+
+| 指标 | 结果 |
+|------|------|
+| 文档数 | 29 |
+| 总题数 | 832 |
+| 题干覆盖 | 831/832 |
+| 答案覆盖 | 830/832 |
+| 选择题字母答案 | 493/500 |
+| 缺失 QNO | 3（地理 doc#24，文档特定问题） |
+| 结构化错误 | 0 |
+
+### 3. L2 标注镜像 + L1+L2 渲染
+
+- 新增 `question_annotations` 表 + `QuestionAnnotationRepository`
+- `extract_questions_from_markdown()` 保留 `stem_lines` / `options_lines` / `answer_lines` / `explanation_lines` / `passage_lines`
+- `_save_annotated_questions()` 入库时同步写标注镜像
+- 新增 `GET /api/admin/questions/{id}/annotation`，服务端按 OCR Markdown + 行号重建内容
+- 管理端题目编辑页新增“题库内容 / L1+L2 标注渲染”切换
+- 变更文件：`PROJECT_STATUS.md`、`RESTART_PROMPT.md`、`LOG.md`、`Docs/02_Architecture/PIPELINE.md`、`_question_driven_extractor.py`、`_clean_json`、`async_document.py`、`annotation_repository.py`、`annotation_service.py`、迁移 `018_add_question_annotations.py`、`QuestionEditPage.tsx`、MCP/SSE/QD 测试
+
+### 验证
+
+- 后端常规 pytest：1250 passed / 5 skipped
+- 前端 `npm run build`：通过
+- `validate_docs_vs_code.py`：0 discrepancies
+- Alembic `018_add_question_annotations`：已应用

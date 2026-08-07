@@ -48,7 +48,7 @@ _QNO_PAREN = re.compile(r"^\s*[（(]\s*(\d+)\s*[）)]\s*\S")
 # Inline QNO: "D.xxx 2.yyy" — split questions embedded in option lines
 # Session #101: also split when QNO follows non-ASCII text without whitespace
 # (e.g. "...质点4.如图所示..." — Chinese char then digit then dot)
-_QNO_INLINE = re.compile(r'(?:^|[\s一-鿿　-〿＀-￯])(\d+)\s*\\?[.、．](?!\d)\s*')
+_QNO_INLINE = re.compile(r'(^|[\s一-鿿　-〿＀-￯])(\d+)\s*\\?[.、．](?!\d)\s*')
 # Threshold: enable _QNO_PAREN only when _QNO_PRIMARY finds fewer than this many
 # blocks in the first N lines.  Prevents (1)(2) sub-questions from splitting.
 _QNO_PAREN_FALLBACK_THRESHOLD = 3
@@ -249,11 +249,11 @@ def split_blocks(markdown: str) -> tuple[list[QuestionBlock], str]:
     lines: list[str] = []
     for rl in raw_lines:
         stripped = rl.strip()
-        if stripped.startswith("<") or stripped.startswith("!["):
+        if stripped.startswith("<") or stripped.startswith("![") or "【答案】" in rl:
             lines.append(rl)
         else:
             # Replace inline QNO boundaries with newline + QNO
-            fixed = _QNO_INLINE.sub(r'\n\1.', rl)
+            fixed = _QNO_INLINE.sub(r'\1\n\2.', rl)
             lines.extend(fixed.split("\n"))
 
     answer_start = None
@@ -317,7 +317,7 @@ def split_blocks(markdown: str) -> tuple[list[QuestionBlock], str]:
 
         # Skip title metadata (first 8 lines)
         if not in_block and i < 8:
-            if re.match(r"^\d{4}\s", stripped):
+            if re.match(r"^\d{4}(?:\s|[.、．])", stripped):
                 continue
             if any(kw in stripped for kw in [
                 "命题人", "考试时间", "本试卷", "可能用到", "考生务必",

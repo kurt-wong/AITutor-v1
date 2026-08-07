@@ -80,6 +80,8 @@ class TestListQuestions:
         from app.domains.question.service import QuestionService
 
         service = QuestionService(db_session)
+        service.repo.list_all = AsyncMock(return_value=[])
+        service.repo.count_all = AsyncMock(return_value=0)
         result = await service.list_questions()
         assert result["questions"] == []
         assert result["total"] == 0
@@ -101,9 +103,15 @@ class TestSearchQuestions:
         # 验证 exclude_generated=True 被传递
         service.repo.search.assert_called_once_with(
             query="数学", subject_id=None, difficulty=None,
-            skip=0, limit=100, exclude_generated=True,
+            document_id=None, skip=0, limit=100, exclude_generated=True,
         )
-        service.repo.count_all.assert_called_once_with(exclude_generated=True)
+        service.repo.count_all.assert_called_once_with(
+            exclude_generated=True,
+            subject_id=None,
+            difficulty=None,
+            document_id=None,
+            query="数学",
+        )
 
 
 class TestUpdateAndDelete:

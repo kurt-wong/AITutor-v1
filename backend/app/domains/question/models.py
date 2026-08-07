@@ -10,6 +10,7 @@ DSD §6: Question Tables
 
 import sqlalchemy as sa
 from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, IDMixin, TimestampMixin
@@ -72,6 +73,37 @@ class Question(Base, IDMixin, TimestampMixin):
     images: Mapped[list["QuestionImage"]] = relationship(
         back_populates="question", cascade="all, delete-orphan"
     )
+    annotations: Mapped[list["QuestionAnnotation"]] = relationship(
+        back_populates="question", cascade="all, delete-orphan"
+    )
+
+
+class QuestionAnnotation(Base, IDMixin, TimestampMixin):
+    """L2 annotation mirror for LLM line/offset metadata.
+
+    Stores the raw LLM annotation ranges used to build a question, so L3
+    frontend rendering can reconstruct content from the immutable OCR
+    markdown instead of re-running the extraction model.
+    """
+
+    __tablename__ = "question_annotations"
+
+    question_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("questions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    annotation_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="qd_simple_v2"
+    )
+    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    stem_lines: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    options_lines: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    answer_lines: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    explanation_lines: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    passage_lines: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    question: Mapped["Question"] = relationship(back_populates="annotations")
 
 
 class QuestionImage(Base, IDMixin, TimestampMixin):

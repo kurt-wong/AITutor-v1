@@ -72,10 +72,10 @@ class TestGenerateWrongQuestionTraining:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.training_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.training_server.WrongQuestionRepository") as MockWQRepo:
-                MockWQRepo.return_value.list_all = AsyncMock(return_value=[mock_wrong_q])
-                with patch("app.mcp.servers.training_server.QuestionRepository") as MockQRepo:
-                    MockQRepo.return_value.get_by_id = AsyncMock(return_value=mock_question)
+            with patch("app.mcp.servers.training_server.WrongQuestionService") as MockWQService:
+                MockWQService.return_value.repo.list_all = AsyncMock(return_value=[mock_wrong_q])
+                with patch("app.mcp.servers.training_server.QuestionService") as MockQService:
+                    MockQService.return_value.repo.get_by_id = AsyncMock(return_value=mock_question)
                     with patch("app.mcp.servers.training_server.get_system_prompt", return_value="system"):
                         with patch("app.mcp.servers.training_server.llm_gateway") as mock_gateway:
                             mock_gateway.generate = AsyncMock(return_value={
@@ -94,8 +94,8 @@ class TestGenerateWrongQuestionTraining:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.training_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.training_server.WrongQuestionRepository") as MockRepo:
-                MockRepo.return_value.list_all = AsyncMock(return_value=[])
+            with patch("app.mcp.servers.training_server.WrongQuestionService") as MockService:
+                MockService.return_value.repo.list_all = AsyncMock(return_value=[])
                 result = await server._generate_wrong_question_training({"count": 5})
                 assert result["success"] is True
                 assert result["data"]["questions"] == []

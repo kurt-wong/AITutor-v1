@@ -37,15 +37,14 @@ class TestGenerateEmbedding:
             "model": "mock-model",
             "latency_ms": 10.0,
         })
+        server._embedding_service.store_embedding = AsyncMock()
         with patch("app.mcp.servers.embedding_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.embedding_server.EmbeddingRepository") as MockRepo:
-                MockRepo.return_value.create = AsyncMock()
-                result = await server._generate_embedding({
-                    "question_id": 1,
-                    "text": "1+1=?",
-                })
-                assert result["success"] is True
-                assert result["data"]["dimension"] == 1024
+            result = await server._generate_embedding({
+                "question_id": 1,
+                "text": "1+1=?",
+            })
+            assert result["success"] is True
+            assert result["data"]["dimension"] == 1024
 
     @pytest.mark.asyncio
     async def test_generate_embedding_missing_fields(self, server):
@@ -77,17 +76,16 @@ class TestSearchSimilar:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.embedding_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.embedding_server.EmbeddingRepository") as MockRepo:
-                MockRepo.return_value.search_similar = AsyncMock(return_value=[
-                    {"question_id": 2, "similarity": 0.95},
-                    {"question_id": 3, "similarity": 0.85},
-                ])
-                result = await server._search_similar({
-                    "question_id": 1,
-                    "top_k": 5,
-                })
-                assert result["success"] is True
-                assert len(result["data"]["similar_questions"]) == 2
+            server._embedding_service.search_similar = AsyncMock(return_value=[
+                {"question_id": 2, "similarity": 0.95},
+                {"question_id": 3, "similarity": 0.85},
+            ])
+            result = await server._search_similar({
+                "question_id": 1,
+                "top_k": 5,
+            })
+            assert result["success"] is True
+            assert len(result["data"]["similar_questions"]) == 2
 
     @pytest.mark.asyncio
     async def test_search_similar_missing_question_id(self, server):
@@ -104,11 +102,10 @@ class TestSearchSimilar:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.embedding_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.embedding_server.EmbeddingRepository") as MockRepo:
-                MockRepo.return_value.search_similar = AsyncMock(side_effect=Exception("DB error"))
-                result = await server._search_similar({"question_id": 1})
-                assert result["success"] is False
-                assert result["error"]["code"] == "SEARCH_FAILED"
+            server._embedding_service.search_similar = AsyncMock(side_effect=Exception("DB error"))
+            result = await server._search_similar({"question_id": 1})
+            assert result["success"] is False
+            assert result["error"]["code"] == "SEARCH_FAILED"
 
 
 class TestHealthCheck:

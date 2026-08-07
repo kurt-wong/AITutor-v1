@@ -46,22 +46,22 @@ class TestExtractQuestionContent:
 class TestPersistGeneratedQuestions:
     def _mocks(self):
         session = AsyncMock()
-        q_repo = MagicMock()
+        q_service = MagicMock()
         # 每次 create 返回带自增 id 的对象
         created = [SimpleNamespace(id=100 + i) for i in range(10)]
-        q_repo.create = AsyncMock(side_effect=created)
+        q_service.create = AsyncMock(side_effect=created)
         training_svc = MagicMock()
         training_svc.add_question_to_set = AsyncMock()
         exam_svc = MagicMock()
         exam_svc.add_question_to_exam = AsyncMock()
         sol_svc = MagicMock()
         sol_svc.create_solution = AsyncMock()
-        return session, q_repo, training_svc, exam_svc, sol_svc
+        return session, q_service, training_svc, exam_svc, sol_svc
 
     @pytest.mark.asyncio
     async def test_training_set_path(self, server):
-        session, q_repo, training_svc, exam_svc, sol_svc = self._mocks()
-        with patch("app.mcp.servers.training_server.QuestionRepository", return_value=q_repo), \
+        session, q_service, training_svc, exam_svc, sol_svc = self._mocks()
+        with patch("app.mcp.servers.training_server.QuestionService", return_value=q_service), \
              patch("app.mcp.servers.training_server.TrainingService", return_value=training_svc), \
              patch("app.mcp.servers.training_server.ExamService", return_value=exam_svc), \
              patch("app.mcp.servers.training_server.SolutionService", return_value=sol_svc):
@@ -70,9 +70,9 @@ class TestPersistGeneratedQuestions:
             )
 
         assert saved == 2  # 非 dict 与无题干的被跳过
-        assert q_repo.create.await_count == 2
+        assert q_service.create.await_count == 2
         # source_type 标记为 generated
-        for call in q_repo.create.await_args_list:
+        for call in q_service.create.await_args_list:
             assert call.kwargs["source_type"] == "generated"
         # 关联表写入
         training_svc.add_question_to_set.assert_any_await(7, 100)
@@ -84,14 +84,14 @@ class TestPersistGeneratedQuestions:
 
     @pytest.mark.asyncio
     async def test_exam_path_sequence_and_score(self, server):
-        session, q_repo, training_svc, exam_svc, sol_svc = self._mocks()
+        session, q_service, training_svc, exam_svc, sol_svc = self._mocks()
         items = [
             {"question": "Q1", "score": 5},
             {"question": "Q2", "score": "5.5"},   # 数字字符串应被解析
             {"question": "Q3", "score": "非数字"},  # 非法值置空
             {"question": "Q4", "score": True},     # bool 不当作分值
         ]
-        with patch("app.mcp.servers.training_server.QuestionRepository", return_value=q_repo), \
+        with patch("app.mcp.servers.training_server.QuestionService", return_value=q_service), \
              patch("app.mcp.servers.training_server.TrainingService", return_value=training_svc), \
              patch("app.mcp.servers.training_server.ExamService", return_value=exam_svc), \
              patch("app.mcp.servers.training_server.SolutionService", return_value=sol_svc):

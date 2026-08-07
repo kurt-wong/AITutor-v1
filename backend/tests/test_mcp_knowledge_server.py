@@ -94,18 +94,18 @@ class TestMapKnowledge:
         """成功映射知识点"""
         mock_node = MagicMock()
         mock_node.id = 1
-        mock_node.code = "MATH.01"
+        mock_node.code = "MATH-01"
         mock_node.name = "代数"
 
-        mock_response = '{"knowledge_nodes": [{"id": "1", "code": "MATH.01", "confidence": 0.9}]}'
+        mock_response = '{"knowledge_nodes": [{"id": "1", "code": "MATH-01", "confidence": 0.9}]}'
 
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.mcp.servers.knowledge_server.async_session_factory", return_value=mock_session):
-            with patch("app.mcp.servers.knowledge_server.KnowledgeRepository") as MockRepo:
-                MockRepo.return_value.list_all = AsyncMock(return_value=[mock_node])
+            with patch("app.mcp.servers.knowledge_server.KnowledgeService") as MockService:
+                MockService.return_value.list_all_nodes = AsyncMock(return_value=[mock_node])
                 with patch("app.mcp.servers.knowledge_server.format_prompt", return_value="prompt"):
                     with patch("app.mcp.servers.knowledge_server.llm_gateway") as mock_gateway:
                         mock_gateway.generate = AsyncMock(return_value={"response": mock_response})

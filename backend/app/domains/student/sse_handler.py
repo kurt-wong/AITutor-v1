@@ -405,7 +405,6 @@ class SSEHandler:
                 "error": "图片分析失败",
             }
 
-    @staticmethod
     async def _update_question_text(
         self, student_question_id: int, question_text: str
     ) -> None:

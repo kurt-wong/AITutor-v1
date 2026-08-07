@@ -4974,6 +4974,43 @@ class _DocumentProcessing:
                     )
                     await session.flush()
 
+                    # Step 2: persist L2 annotation mirror when line metadata exists
+                    try:
+                        _line_fields = (
+                            "stem_lines", "options_lines", "answer_lines",
+                            "explanation_lines", "passage_lines",
+                        )
+                        if any(q.get(k) is not None for k in _line_fields):
+                            from app.domains.question.annotation_repository import (
+                                QuestionAnnotationRepository,
+                            )
+                            await QuestionAnnotationRepository(session).create(
+                                question_id=db_q.id,
+                                annotation_type=metadata.get(
+                                    "extraction_source", "llm_annotation"
+                                ) or "llm_annotation",
+                                source="llm",
+                                payload={
+                                    "qno": qno,
+                                    "type": qtype,
+                                    "section": q.get("section", ""),
+                                    "score": q.get("score"),
+                                    "difficulty": q.get("difficulty"),
+                                    "knowledge_points": q.get("knowledge_points", []),
+                                },
+                                stem_lines=q.get("stem_lines"),
+                                options_lines=q.get("options_lines"),
+                                answer_lines=q.get("answer_lines"),
+                                explanation_lines=q.get("explanation_lines"),
+                                passage_lines=q.get("passage_lines"),
+                                model_name=metadata.get("model"),
+                            )
+                    except Exception as _ann_err:
+                        logger.warning(
+                            "Failed to persist annotation mirror for Q%s: %s",
+                            qno, _ann_err,
+                        )
+
                     # Session #115: Save LLM explanation when available.
                     # Non-empty explanations arrive for teacher-edition
                     # format docs with inline 【详解】 markers.

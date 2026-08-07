@@ -1,7 +1,7 @@
 # AI Tutors 系统重启提示词
 
 > **使用方式**：将此文件全部内容复制粘贴给新会话的 Claude/TRAE，即可快速恢复完整工作上下文。
-> **最后更新**: 2026-08-06 Session #167 | **版本**: 1.56.0
+> **最后更新**: 2026-08-07 Session #168 | **版本**: 1.57.0
 
 ---
 
@@ -84,7 +84,7 @@ UI → API → Service → MCP Client → MCP Server → Infra
 
 ---
 
-## 四、管线架构（Session #167 最新状态 — 简化管线已落地）
+## 四、管线架构（Session #168 最新状态 — 简化管线 + L2 标注镜像已落地）
 
 ### 核心架构：OCR Markdown → 单次 LLM 调用 → 直接入库
 
@@ -97,7 +97,7 @@ extract_questions_from_markdown()  ←── 单次 LLM 调用，Annotation Para
   │                                       LLM 输出: {qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}
   │                                       代码按行号从 OCR 原文切出内容
   │
-  └── 返回 questions → 入库
+  └── 返回 questions → 入库 + question_annotations（L2 镜像）
 ```
 
 **已砍掉的中间步骤**（S#167）:
@@ -166,7 +166,7 @@ _VISION_FIRST_SUBJECTS = frozenset({
 
 ---
 
-## 五、当前状态（Session #167 — 简化管线完成 + 9 科回归通过）
+## 五、当前状态（Session #168 — 简化管线 + 测试清零 + 29 份全量验证 + L2/L3 落地）
 
 ### S#167: 简化管线（✅ 已完成）
 
@@ -195,7 +195,8 @@ _VISION_FIRST_SUBJECTS = frozenset({
 
 ```
 Remote:  https://github.com/kurt-wong/AITutor
-main:    4580846 (merged annotation-architecture + doc sync)
+main:    ace906d (HEAD; merge 4580846 + doc sync commits)
+origin/main: 未同步（main ahead 16；未 push，待用户确认）
 refactor/annotation-architecture: ee72faa → 已合并到 main
 ```
 
@@ -209,9 +210,14 @@ refactor/annotation-architecture: ee72faa → 已合并到 main
 ### 待定
 
 - ✅ 已合并 `refactor/annotation-architecture` 到 `main`（2026-08-06，merge commit `4580846`）
-- 全量 29 份文档入库验证（可选）
-- Step 2: 标注镜像库（`question_annotations` 表 + Repository）— P2 待设计
-- Step 4: 前端渲染切换（L1+L2 组合渲染）— P2 待设计
+- ⚠️ `origin/main` 未 push（main ahead 16 commits）— 待用户确认后执行
+- ✅ `PROJECT_STATUS.md §3.3/§3.3a` 已同步至 S#168
+- ✅ 后端常规测试：1250 passed / 5 skipped（live-only VL 测试默认跳过）
+- ✅ 全量 29 份 OCR markdown 验证：832 题，题干 831/832，答案 830/832，选择题字母 493/500
+- ✅ Step 2: 标注镜像库（`question_annotations` 表 + Repository + Service）
+- ✅ Step 4: 前端渲染切换（L1+L2 组合渲染，管理端题目编辑页）
+- 🟡 标注镜像历史回填（可选）
+- 🟡 S#168 工作区变更未提交，待确认后 commit/push
 
 ---
 
@@ -325,8 +331,16 @@ Annotation Paradigm（行号标注）:
 == Git ==
 
 Remote:  https://github.com/kurt-wong/AITutor
-Current: main (merge commit 4580846)
-Status:  S#167 简化管线已合并到 main
+Current: main (HEAD ace906d, merge 4580846 + doc sync)
+Status:  S#167 简化管线已合并到 main；S#168 工作区变更未提交；origin/main 未同步（ahead 16），未 push
+
+== 最近验证快照 ==
+
+- 文档-代码校验 validate_docs_vs_code.py：0 discrepancies
+- 前端 npm run build：通过
+- 后端常规 pytest（排除 live）：1250 passed / 5 skipped
+- 全量 29 份 OCR markdown：832 题，题干 831/832，答案 830/832，选择题字母 493/500
+- L2 标注镜像 `question_annotations` + 管理端 L1+L2 渲染切换已落地
 
 == 快速恢复步骤 ==
 
@@ -338,7 +352,7 @@ Status:  S#167 简化管线已合并到 main
 == 关键注意事项 ==
 
 - 所有代码修改必须严格遵循项目文档设定，不能擅自越过项目文档；确需偏离时先充分沟通、明确告知影响并得到确认后再改代码
-- pytest 常规命令: `cd backend ; .venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py`（不要直接跑全量，live E2E 会真实调用外部 API 并可能长时间挂起）
+- pytest 常规命令: `cd backend ; .venv\Scripts\python.exe -m pytest -q --disable-warnings --ignore=tests/e2e --ignore=tests/integration --ignore=tests/test_e2e_real_data.py`（不要直接跑全量；live-only VL 测试在 mock 模式下自动跳过）
 - 管线代码修改后必须 kill + restart（supervised 模式会自动重启）
 - QD 提取核心文件: `_question_driven_extractor.py`（~1900 行）
 - Markdown 路径: `extract_questions_from_markdown()` — 简化管线，单次 LLM 调用
@@ -353,7 +367,12 @@ Status:  S#167 简化管线已合并到 main
 == 待办事项 ==
 
 1. ✅ 合并 refactor/annotation-architecture 到 main（2026-08-06 完成，merge commit 4580846）
-2. 🟢 全量 29 份文档入库验证（可选）
-3. 🟡 P2 — 标注镜像库（question_annotations 表 + Repository）
-4. 🟡 P2 — 前端渲染切换（L1+L2 组合渲染）
+2. ⚠️ 确认是否 git push origin main（当前 ahead 16；未 push）
+3. ✅ 更新 PROJECT_STATUS.md §3.3/§3.3a 快照为 S#168（2026-08-07）
+4. ✅ 全量 29 份文档验证（2026-08-07：832 题，无结构化错误）
+5. ✅ 后端测试债务清零（1250 passed / 5 skipped）
+6. ✅ Step 2 — 标注镜像库（question_annotations 表 + Repository + Service）
+7. ✅ Step 4 — 前端 L1+L2 组合渲染（管理端题目编辑页）
+8. 🟡 标注镜像历史回填（可选）
+9. 🟡 提交 S#168 工作区变更，待确认后 commit/push
 ```

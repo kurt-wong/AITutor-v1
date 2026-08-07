@@ -15,6 +15,7 @@ from app.domains.student.sse_handler import (
     SSEHandler, EVENT_DONE, EVENT_ERROR, EVENT_HINT,
     EVENT_SOLUTION, EVENT_REVEAL, EVENT_PROCESSING, STEP_MESSAGES
 )
+from app.domains.student.image_service import StudentImageService
 
 
 @pytest.fixture
@@ -164,18 +165,16 @@ class TestProcessQuestion:
         """带图片的题目处理"""
         with patch("app.domains.student.sse_handler.settings") as mock_settings:
             mock_settings.LLM_GATEWAY_MODE = "mock"
-            with patch("app.domains.student.sse_handler.download_file") as mock_download:
-                mock_download.return_value = b"fake image bytes"
-                with patch.object(handler, "_analyze_image") as mock_analyze:
-                    mock_analyze.return_value = {
-                        "success": True,
-                        "question_text": "从图片提取的题目",
-                    }
-                    with patch.object(handler, "_update_question_text") as mock_update:
-                        events = []
-                        async for event in handler.process_question(image_key="img_001"):
-                            events.append(event)
-                        assert len(events) >= 2
+            with patch.object(handler, "_analyze_image") as mock_analyze:
+                mock_analyze.return_value = {
+                    "success": True,
+                    "question_text": "从图片提取的题目",
+                }
+                with patch.object(handler, "_update_question_text") as mock_update:
+                    events = []
+                    async for event in handler.process_question(image_key="img_001"):
+                        events.append(event)
+                    assert len(events) >= 2
 
 
 class TestProcessAfterConfirm:
@@ -348,7 +347,8 @@ class TestAnalyzeImage:
     @pytest.mark.asyncio
     async def test_analyze_image_failure_returns_degradation(self, handler):
         """图片分析失败返回降级结果"""
-        with patch("app.domains.student.sse_handler.download_file", side_effect=Exception("Download failed")):
+        with patch("app.domains.student.sse_handler.StudentImageService") as MockService:
+            MockService.return_value.download_image = AsyncMock(side_effect=Exception("Download failed"))
             result = await handler._analyze_image("img_001")
             assert result["success"] is False
             assert result["needs_degradation"] is True
@@ -358,28 +358,29 @@ class TestAnalyzeImage:
     async def test_analyze_image_pdf_detection(self, handler):
         """PDF 文件检测"""
         pdf_bytes = b"%PDF-1.4 fake pdf content"
-        with patch("app.domains.student.sse_handler.download_file", return_value=pdf_bytes):
-            with patch.object(handler, "_extract_pdf_text") as mock_extract:
-                mock_extract.return_value = {"success": True, "question_text": "PDF text"}
-                result = await handler._analyze_image("doc.pdf")
-                assert result["success"] is True
-                mock_extract.assert_called_once()
+        with patch("app.domains.student.sse_handler.StudentImageService") as MockService:
+            service = MockService.return_value
+            service.download_image = AsyncMock(return_value=pdf_bytes)
+            service.analyze_image = AsyncMock(return_value={"success": True, "question_text": "PDF text"})
+            result = await handler._analyze_image("doc.pdf")
+            assert result["success"] is True
+            service.analyze_image.assert_called_once_with("doc.pdf", pdf_bytes)
 
 
 class TestExtractPdfText:
-    """_extract_pdf_text 测试"""
+    """StudentImageService._extract_pdf_text 测试"""
 
-    def test_extract_pdf_text_empty_pdf(self, handler):
+    def test_extract_pdf_text_empty_pdf(self):
         """空 PDF 返回失败"""
         with patch("pypdf.PdfReader") as MockReader:
             mock_page = MagicMock()
             mock_page.extract_text.return_value = ""
             MockReader.return_value.pages = [mock_page]
-            result = handler._extract_pdf_text(b"%PDF-1.4", "test.pdf")
+            result = StudentImageService._extract_pdf_text(b"%PDF-1.4", "test.pdf")
             assert result["success"] is False
             assert "error" in result
 
-    def test_extract_pdf_text_success(self, handler):
+    def test_extract_pdf_text_success(self):
         """PDF 提取成功"""
         with patch("pypdf.PdfReader") as MockReader:
             mock_page1 = MagicMock()
@@ -387,14 +388,14 @@ class TestExtractPdfText:
             mock_page2 = MagicMock()
             mock_page2.extract_text.return_value = "第二题内容"
             MockReader.return_value.pages = [mock_page1, mock_page2]
-            result = handler._extract_pdf_text(b"%PDF-1.4", "test.pdf")
+            result = StudentImageService._extract_pdf_text(b"%PDF-1.4", "test.pdf")
             assert result["success"] is True
             assert "第一题" in result["question_text"]
 
-    def test_extract_pdf_text_exception(self, handler):
+    def test_extract_pdf_text_exception(self):
         """PDF 提取异常"""
         with patch("pypdf.PdfReader", side_effect=Exception("Parse error")):
-            result = handler._extract_pdf_text(b"invalid", "test.pdf")
+            result = StudentImageService._extract_pdf_text(b"invalid", "test.pdf")
             assert result["success"] is False
             assert "error" in result
 
@@ -403,27 +404,17 @@ class TestAnalyzeImageVisionPath:
     """_analyze_image 视觉路径测试"""
 
     @pytest.mark.asyncio
-    async def test_analyze_image_non_pdf_calls_vision(self, handler):
+    async def test_analyze_image_non_pdf_calls_vision(self):
         """非 PDF 文件调用 VisionHandler（VL OCR 返回空后触发 fallback）"""
         image_bytes = b"\x89PNG\r\n\x1a\n fake png"
-        with patch("app.domains.student.sse_handler.download_file", return_value=image_bytes):
-            with patch("app.domains.document.ocr.vl_ocr_provider.VLOCRProvider") as MockVL:
-                # VL OCR returns no questions → triggers VisionHandler fallback
-                mock_vl = MagicMock()
-                mock_vl._resize_image = MagicMock(return_value="fake_b64")
-                mock_vl._call_mimo = AsyncMock(return_value='{"questions": []}')
-                mock_vl._parse_response = MagicMock(return_value={"questions": []})
-                MockVL.return_value = mock_vl
-                with patch("app.domains.student.sse_handler.VisionHandler") as MockHandler:
-                    mock_instance = MagicMock()
-                    mock_instance.analyze_image = AsyncMock(return_value={
-                        "success": True,
-                        "question_text": "从图片提取",
-                    })
-                    MockHandler.return_value = mock_instance
-                    result = await handler._analyze_image("img.png")
-                    assert result["success"] is True
-                    mock_instance.analyze_image.assert_called_once()
+        service = StudentImageService()
+        with patch.object(service, "_analyze_image_vl", new=AsyncMock(return_value={
+            "success": True,
+            "question_text": "从图片提取",
+        })) as mock_vl:
+            result = await service.analyze_image("img.png", image_bytes)
+            assert result["success"] is True
+            mock_vl.assert_called_once_with("img.png", image_bytes)
 
 
 class TestUpdateQuestionText:

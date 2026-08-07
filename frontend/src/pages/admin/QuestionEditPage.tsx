@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
-  Card, Typography, Input, Select, Button, Space, Spin, Alert, message, Tag, Divider, Image,
+  Card, Typography, Input, Select, Button, Space, Spin, Alert, message, Tag, Divider, Image, Segmented,
 } from "antd";
 import { EditOutlined, SaveOutlined, DeleteOutlined, PictureOutlined } from "@ant-design/icons";
 import { apiGet, apiPutForm, apiDelete } from "../../services/api";
@@ -39,6 +39,23 @@ interface QuestionDetail {
   } | null;
 }
 
+interface QuestionAnnotationData {
+  annotation: {
+    id: number;
+    annotation_type: string;
+    model_name: string | null;
+    payload: Record<string, unknown> | null;
+  } | null;
+  ocr_markdown: string | null;
+  rendered: {
+    stem: string;
+    options: string[];
+    answer: string;
+    explanation: string;
+    passage: string;
+  } | null;
+}
+
 export default function QuestionEditPage() {
   const [searchParams] = useSearchParams();
   const [questionId, setQuestionId] = useState(searchParams.get("id") || "");
@@ -49,6 +66,8 @@ export default function QuestionEditPage() {
   const [editAnswer, setEditAnswer] = useState("");
   const [editSteps, setEditSteps] = useState("");
   const [editExplanation, setEditExplanation] = useState("");
+  const [annotationData, setAnnotationData] = useState<QuestionAnnotationData | null>(null);
+  const [renderMode, setRenderMode] = useState<"db" | "mirror">("db");
 
   // Auto-fetch when navigated with ?id= param
   useEffect(() => {
@@ -76,6 +95,14 @@ export default function QuestionEditPage() {
         setEditAnswer(q.solution?.final_answer ?? "");
         setEditSteps(q.solution?.solution_steps ? JSON.stringify(q.solution.solution_steps, null, 2) : "");
         setEditExplanation(q.solution?.explanation ?? "");
+        try {
+          const ann = await apiGet<QuestionAnnotationData>(`/api/admin/questions/${questionId}/annotation`);
+          setAnnotationData(ann);
+          setRenderMode(ann?.rendered ? "mirror" : "db");
+        } catch {
+          setAnnotationData(null);
+          setRenderMode("db");
+        }
       } else {
         message.error("题目未找到");
       }
@@ -151,17 +178,76 @@ export default function QuestionEditPage() {
                 <Tag color="default">卷面题号: {question.question_number}</Tag>
               )}
             </Space>
-            {question.passage_text && (
-              <Paragraph style={{
-                marginTop: 8, padding: 12, whiteSpace: "pre-wrap",
-                background: "#f5f5f5", borderRadius: 6, borderLeft: "3px solid #1890ff",
-              }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>📖 阅读材料</Text>
-                <br />
-                <MathRenderer content={question.passage_text} />
-              </Paragraph>
+            {annotationData?.rendered && (
+              <div style={{ marginBottom: 12 }}>
+                <Segmented
+                  value={renderMode}
+                  onChange={(value) => setRenderMode(value as "db" | "mirror")}
+                  options={[
+                    { label: "题库内容", value: "db" },
+                    { label: "L1+L2 标注渲染", value: "mirror" },
+                  ]}
+                />
+              </div>
             )}
-            <Paragraph style={{ marginTop: 8, whiteSpace: "pre-wrap" }}><MathRenderer content={question.content || ""} /></Paragraph>
+            {renderMode === "mirror" && annotationData?.rendered ? (
+              <div style={{
+                marginTop: 8, padding: 12, borderRadius: 6,
+                background: "#fafafa", border: "1px solid #f0f0f0",
+              }}>
+                {annotationData.rendered.passage && (
+                  <Paragraph style={{
+                    padding: 10, whiteSpace: "pre-wrap",
+                    background: "#f5f5f5", borderRadius: 6,
+                    borderLeft: "3px solid #1890ff",
+                  }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>阅读材料</Text>
+                    <br />
+                    <MathRenderer content={annotationData.rendered.passage} />
+                  </Paragraph>
+                )}
+                <Paragraph style={{ whiteSpace: "pre-wrap" }}>
+                  <MathRenderer content={annotationData.rendered.stem || ""} />
+                </Paragraph>
+                {annotationData.rendered.options.map((option, index) => (
+                  <Paragraph key={index} style={{ marginBottom: 4, whiteSpace: "pre-wrap" }}>
+                    <Text strong>{String.fromCharCode(65 + index)}.</Text>{" "}
+                    <MathRenderer content={option} />
+                  </Paragraph>
+                ))}
+                {annotationData.rendered.answer && (
+                  <Paragraph style={{ whiteSpace: "pre-wrap" }}>
+                    <Text strong>答案：</Text>
+                    <MathRenderer content={annotationData.rendered.answer} />
+                  </Paragraph>
+                )}
+                {annotationData.rendered.explanation && (
+                  <Paragraph style={{ whiteSpace: "pre-wrap" }}>
+                    <Text strong>讲解：</Text>
+                    <MathRenderer content={annotationData.rendered.explanation} />
+                  </Paragraph>
+                )}
+                {annotationData.annotation && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    标注类型：{annotationData.annotation.annotation_type} · 模型：{annotationData.annotation.model_name || "unknown"}
+                  </Text>
+                )}
+              </div>
+            ) : (
+              <>
+                {question.passage_text && (
+                  <Paragraph style={{
+                    marginTop: 8, padding: 12, whiteSpace: "pre-wrap",
+                    background: "#f5f5f5", borderRadius: 6, borderLeft: "3px solid #1890ff",
+                  }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>阅读材料</Text>
+                    <br />
+                    <MathRenderer content={question.passage_text} />
+                  </Paragraph>
+                )}
+                <Paragraph style={{ marginTop: 8, whiteSpace: "pre-wrap" }}><MathRenderer content={question.content || ""} /></Paragraph>
+              </>
+            )}
             {question.subject_name && <Tag>{question.subject_name}</Tag>}
             {question.images && question.images.length > 0 && (
               <>

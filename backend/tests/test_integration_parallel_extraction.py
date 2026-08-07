@@ -36,6 +36,8 @@ def require_test_pdf():
 def require_ollama():
     if SKIP_VL_TESTS:
         pytest.skip("SKIP_VL_TESTS=1")
+    if os.getenv("LLM_GATEWAY_MODE", "mock").lower() == "mock":
+        pytest.skip("LLM_GATEWAY_MODE=mock requires live VL")
 
 
 # ═══ Level 1: C1 PyMuPDF Document De-layouting ═════════════════════════

@@ -60,7 +60,7 @@ class TestSolveQuestion:
     async def test_solve_question_llm_failure(self, server, mock_prompt):
         """LLM 调用失败（Gateway fallback chain 均失败）"""
         with patch("app.mcp.servers.llm_server.llm_gateway") as mock:
-            mock.generate = AsyncMock(side_effect=Exception("LLM error"))
+            mock.generate = AsyncMock(side_effect=RuntimeError("LLM error"))
             result = await server._solve_question({"question_text": "test"})
             assert result["success"] is False
             assert result["error"]["code"] == "LLM_FAILURE"
