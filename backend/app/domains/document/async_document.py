@@ -1799,6 +1799,31 @@ def _check_greek_preservation(ocr_text: str, questions: list[dict]) -> None:
                 )
 
 
+def _rebuild_content_from_lines(markdown: str, line_range: list | None) -> str:
+    """Rebuild OCR text from an inclusive [start, end] line range.
+
+    Line ranges are zero-based and inclusive, matching the Annotation
+    Paradigm used by the QD extractor.
+    """
+    if not line_range or not isinstance(line_range, list) or len(line_range) != 2:
+        return ""
+
+    try:
+        start, end = int(line_range[0]), int(line_range[1])
+    except (ValueError, TypeError):
+        return ""
+
+    if start < 0 or end < start:
+        return ""
+
+    lines = markdown.split("\n")
+    if start >= len(lines):
+        return ""
+
+    end = min(end, len(lines) - 1)
+    return "\n".join(lines[start:end + 1]).strip()
+
+
 def _validate_llm_answer(answer: str, qtype: str) -> str:
     """Validate and clean an LLM-returned answer before DB insertion.
 
@@ -1900,6 +1925,25 @@ def _validate_llm_answer(answer: str, qtype: str) -> str:
                     cleaned[:60],
                 )
                 return ""
+
+    if qtype == "choice":
+        choice_letters = re.findall(r"[A-D]", cleaned)
+        if len(choice_letters) != 1:
+            logger.warning(
+                "Answer validation: single choice must contain exactly one "
+                "A-D letter: %r",
+                cleaned[:60],
+            )
+            return ""
+    elif qtype == "multi_choice":
+        choice_letters = re.findall(r"[A-D]", cleaned)
+        if len(choice_letters) < 2:
+            logger.warning(
+                "Answer validation: multi choice must contain at least two "
+                "A-D letters: %r",
+                cleaned[:60],
+            )
+            return ""
 
     return cleaned
 
@@ -3265,7 +3309,10 @@ class _DocumentProcessing:
 
         return (
             question_blocks,
-            getattr(result, "paddleocr_markdown", ""),
+            (
+                getattr(result, "paddleocr_markdown", "")
+                or getattr(result, "full_markdown", "")
+            ),
             getattr(result, "paddleocr_job_id", ""),
             getattr(result, "paddleocr_result", None),
         )
@@ -3380,6 +3427,13 @@ class _DocumentProcessing:
                             "score": score,
                             "difficulty": difficulty,
                             "knowledge_points": kp_strs,
+                            "stem_lines": q.get("stem_lines"),
+                            "options_lines": q.get("options_lines"),
+                            "answer_lines": q.get("answer_lines"),
+                            "explanation_lines": q.get("explanation_lines"),
+                            "passage_lines": q.get("passage_lines"),
+                            "answer_from_document": q.get("answer_from_document", False),
+                            "explanation_from_document": q.get("explanation_from_document", False),
                         })
 
                     _pipeline_checkpoint(task_id, "qd_markdown_success", {
@@ -3615,6 +3669,13 @@ class _DocumentProcessing:
                         "score": score,
                         "difficulty": difficulty,
                         "knowledge_points": kp_strs,
+                        "stem_lines": q.get("stem_lines"),
+                        "options_lines": q.get("options_lines"),
+                        "answer_lines": q.get("answer_lines"),
+                        "explanation_lines": q.get("explanation_lines"),
+                        "passage_lines": q.get("passage_lines"),
+                        "answer_from_document": q.get("answer_from_document", False),
+                        "explanation_from_document": q.get("explanation_from_document", False),
                     })
 
                 _pipeline_checkpoint(task_id, "vision_normalized", {
@@ -5021,6 +5082,43 @@ class _DocumentProcessing:
                     # unconditionally — image questions (answer=null) cause
                     # UnboundLocalError.
                     llm_explanation = q.get("explanation", "")
+                    # S#170: Prefer L2 line reconstruction for teacher-edition
+                    # answer/explanation text.  This keeps solutions aligned
+                    # with the PDF answer key and lets enrichment skip
+                    # auto_solve when the extracted content is complete.
+                    if ocr_markdown:
+                        rebuilt_answer = _rebuild_content_from_lines(
+                            ocr_markdown, q.get("answer_lines")
+                        )
+                        if rebuilt_answer:
+                            if qtype in ("choice", "multi_choice"):
+                                from app.domains.question._question_driven_extractor import (
+                                    _validate_choice_answer,
+                                )
+                                candidate = _validate_choice_answer(
+                                    rebuilt_answer, qtype,
+                                )
+                                if candidate != rebuilt_answer or re.fullmatch(
+                                    r"[A-D]{1,4}", candidate or "",
+                                ):
+                                    answer = candidate
+                            else:
+                                answer = rebuilt_answer
+                        rebuilt_explanation = _rebuild_content_from_lines(
+                            ocr_markdown, q.get("explanation_lines")
+                        )
+                        if rebuilt_explanation:
+                            llm_explanation = rebuilt_explanation
+                    answer_from_document = bool(
+                        q.get("answer_from_document") or q.get("answer_lines")
+                    )
+                    explanation_from_document = bool(
+                        q.get("explanation_from_document") or q.get("explanation_lines")
+                    )
+                    solution_mode = "extracted" if answer_from_document else "llm_annotation"
+                    solution_source = (
+                        "document_extract" if answer_from_document else "llm_annotation"
+                    )
 
                     # Save solution if answer exists
                     if answer:
@@ -5029,17 +5127,25 @@ class _DocumentProcessing:
                         )
                         sol_repo = SolutionRepository(session)
                         cleaned_answer = _clean_text_for_db(answer, is_stem=False) if answer else ""
+                        validated_answer = _validate_llm_answer(cleaned_answer, qtype)
                         cleaned_explanation = (
                             _clean_text_for_db(llm_explanation, is_stem=False)
                             if llm_explanation else None
                         )
-                        await sol_repo.create(
-                            question_id=db_q.id,
-                            final_answer=cleaned_answer or "",
-                            explanation=cleaned_explanation,
-                            model_source="llm_annotation",
-                            mode="llm_annotation",
-                        )
+                        if validated_answer:
+                            await sol_repo.create(
+                                question_id=db_q.id,
+                                final_answer=validated_answer,
+                                explanation=cleaned_explanation,
+                                model_source=solution_source,
+                                mode=solution_mode,
+                            )
+                        else:
+                            logger.warning(
+                                "LLM annotation answer rejected for Q%s "
+                                "(type=%s): %r",
+                                qno, qtype, cleaned_answer[:80],
+                            )
 
                     # ── Session #115: Detect inline <img> tags ──────
                     # PP-StructureV3 outputs <img src="imgs/..."> for
@@ -5051,7 +5157,17 @@ class _DocumentProcessing:
                     _expl_text = str(q.get("explanation", ""))
                     _has_md_img = bool(q.get("_has_images", False))
                     _has_inline_img = "<img" in _stem_text or "<img" in _expl_text
-                    _q_has_image = _has_md_img or _has_inline_img
+                    # P2 fallback: OCR markdown often loses function graphs as
+                    # <img> tags, but the stem still says "如图/图象".  Associate
+                    # the estimated source page so the figure is not silently lost.
+                    _mentions_figure = bool(
+                        re.search(r"图|图象|图像", _stem_text)
+                    )
+                    _q_has_image = (
+                        _has_md_img
+                        or _has_inline_img
+                        or (_mentions_figure and bool(pages_to_process))
+                    )
 
                     # S#135: Track whether Fix 2 successfully associated
                     # precise figure images, so we can skip the whole-page
@@ -5175,10 +5291,13 @@ class _DocumentProcessing:
 
                     saved.append({
                         "id": db_q.id,
+                        "document_id": doc_id,
                         "content": content,
                         "answer": answer,
                         "explanation": llm_explanation or "",  # S#131: prevent enrichment explain overwrite
                         "question_type": qtype,
+                        "answer_from_document": answer_from_document,
+                        "explanation_from_document": explanation_from_document,
                         "has_image": _q_has_image,
                         "image_bbox": [0, 0, 0, 0],  # LLM annotation path has no per-figure bbox
                     })

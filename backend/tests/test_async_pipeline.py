@@ -10,7 +10,8 @@ test_async_pipeline.py — AsyncPipeline 单元测试
 import asyncio
 import json
 import pytest
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 from app.domains.document.async_pipeline import (
     AsyncPipeline,
     TASK_STATE_PENDING,
@@ -18,6 +19,13 @@ from app.domains.document.async_pipeline import (
     TASK_STATE_COMPLETED,
     TASK_STATE_FAILED,
 )
+
+
+def _make_session_factory(session: AsyncMock) -> MagicMock:
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=cm)
 
 
 @pytest.fixture
@@ -55,6 +63,32 @@ class TestTaskStates:
         assert TASK_STATE_PROCESSING == "processing"
         assert TASK_STATE_COMPLETED == "completed"
         assert TASK_STATE_FAILED == "failed"
+
+
+class TestSolveSkipsExistingSolution:
+    @pytest.mark.asyncio
+    async def test_step_solve_does_not_call_mcp_when_solution_exists(
+        self, pipeline,
+    ):
+        session = AsyncMock()
+        repo = MagicMock()
+        repo.get_by_question = AsyncMock(
+            return_value=SimpleNamespace(id=7, mode="extracted")
+        )
+
+        with patch(
+            "app.db.session.async_session_factory",
+            _make_session_factory(session),
+        ), patch(
+            "app.domains.question.solution_repository.SolutionRepository",
+            return_value=repo,
+        ), patch(
+            "app.mcp.client.mcp_client",
+        ) as mcp:
+            result = await pipeline._step_solve_question(1, "stem")
+
+        assert result["status"] == "skipped"
+        mcp.call_tool.assert_not_called()
 
 
 class TestEnqueue:

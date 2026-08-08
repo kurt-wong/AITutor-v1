@@ -80,6 +80,31 @@ _SUBMIT_SEMAPHORE = asyncio.Semaphore(3)
 _SUBMIT_COOLDOWN = 2.0     # seconds between submissions (smoothes load curve)
 
 
+def _reconstruct_markdown_from_blocks(
+    blocks: list[PaddleOCRBlock],
+) -> str:
+    """Rebuild per-page markdown when the API omits ``markdown.text``.
+
+    PP-StructureV3 sometimes returns ``parsing_res_list`` blocks while the
+    ``markdown`` field is missing/empty.  Blocks still preserve reading order,
+    so rebuilding from them keeps downstream QD/LLM annotation functional.
+    """
+    parts: list[str] = []
+    for block in sorted(blocks, key=lambda b: (b.page, b.block_order)):
+        content = (block.block_content or "").strip()
+        if not content:
+            continue
+        label = (block.block_label or "").lower()
+        if label == "display_formula":
+            if not content.startswith("$$"):
+                content = f"$${content}$$"
+        elif label == "inline_formula":
+            if not content.startswith("$"):
+                content = f"${content}$"
+        parts.append(content)
+    return "\n\n".join(parts)
+
+
 class PaddleOCRVlClient:
     """Async client for the 百度星河社区 document layout analysis API.
 
@@ -174,7 +199,7 @@ class PaddleOCRVlClient:
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
-                trust_env=False,
+                trust_env=True,
             )
         return self._http_client
 
@@ -524,6 +549,9 @@ class PaddleOCRVlClient:
 
         # Sort with None-safe key (PP-StructureV3 may have sparse block_order)
         blocks.sort(key=lambda b: b.block_order if b.block_order is not None else 0)
+
+        if not markdown_text:
+            markdown_text = _reconstruct_markdown_from_blocks(blocks)
 
         return PaddleOCRPageResult(
             page_num=page_num,

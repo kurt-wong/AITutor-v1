@@ -112,6 +112,119 @@ async def list_documents(
     return create_response(result, request)
 
 
+@router.get("/monitor/latest")
+async def get_pipeline_monitor(
+    request: Request = None,
+    session: AsyncSession = Depends(get_db),
+):
+    """Return the latest document pipeline snapshot for the frontend monitor."""
+    import json as _json
+
+    from app.db.redis import redis_client
+    from sqlalchemy import text as _text
+
+    async def _redis_text(value) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
+
+    doc = (
+        await session.execute(
+            _text(
+                "SELECT id, filename, processing_status, subject, grade, "
+                "created_at, length(ocr_markdown) AS ocr_markdown_chars "
+                "FROM documents ORDER BY id DESC LIMIT 1"
+            )
+        )
+    ).mappings().first()
+
+    logs = []
+    if doc:
+        rows = (
+            await session.execute(
+                _text(
+                    "SELECT stage, message, created_at "
+                    "FROM document_processing_logs "
+                    "WHERE document_id = :doc_id ORDER BY id DESC LIMIT 60"
+                ),
+                {"doc_id": doc["id"]},
+            )
+        ).mappings().all()
+        logs = [
+            {
+                "stage": r["stage"],
+                "message": r["message"],
+                "created_at": str(r["created_at"]),
+            }
+            for r in reversed(rows)
+        ]
+
+    counts: dict[str, int] = {}
+    for table in (
+        "document_pages",
+        "questions",
+        "question_annotations",
+        "solutions",
+        "question_images",
+        "question_knowledge",
+        "question_embeddings",
+    ):
+        counts[table] = (
+            await session.execute(_text(f'SELECT COUNT(*) FROM "{table}"'))
+        ).scalar()
+    counts["solutions_with_explanation"] = (
+        await session.execute(
+            _text(
+                "SELECT COUNT(*) FROM solutions "
+                "WHERE explanation IS NOT NULL "
+                "AND length(trim(explanation)) > 0"
+            )
+        )
+    ).scalar()
+
+    solutions_by = (
+        await session.execute(
+            _text(
+                "SELECT model_source, mode, COUNT(*) AS c "
+                "FROM solutions GROUP BY model_source, mode ORDER BY c DESC"
+            )
+        )
+    ).mappings().all()
+
+    status_keys = await redis_client.keys("async:task_b:status:*")
+    tasks = []
+    for key in sorted(status_keys):
+        task_id = key.rsplit(":", 1)[-1]
+        raw = await redis_client.get(key)
+        status = _json.loads(raw) if raw else {}
+        log_key = f"async:task_b:log:{task_id}"
+        raw_logs = await redis_client.lrange(log_key, 0, -1)
+        task_logs = []
+        for line in raw_logs[-40:]:
+            try:
+                task_logs.append(_json.loads(_redis_text(line)))
+            except Exception:
+                task_logs.append({"message": _redis_text(line)})
+        tasks.append({
+            "task_id": task_id,
+            "status": status,
+            "logs": task_logs,
+        })
+
+    doc_payload = dict(doc) if doc else None
+    if doc_payload and doc_payload.get("created_at"):
+        doc_payload["created_at"] = str(doc_payload["created_at"])
+
+    payload = {
+        "document": doc_payload,
+        "processing_logs": logs,
+        "counts": counts,
+        "solutions_by": [dict(r) for r in solutions_by],
+        "redis_tasks": tasks,
+    }
+    return create_response(payload, request)
+
+
 @router.get("/tasks/batch/{task_ids}")
 async def get_batch_task_status(
     task_ids: str,

@@ -1,7 +1,7 @@
 # AI Tutors 系统重启提示词
 
 > **使用方式**：将此文件全部内容复制粘贴给新会话的 Claude/TRAE，即可快速恢复完整工作上下文。
-> **最后更新**: 2026-08-07 Session #168 | **版本**: 1.57.0
+> **最后更新**: 2026-08-07 Session #170 | **版本**: 1.58.0
 
 ---
 
@@ -275,6 +275,8 @@ python scripts/reset_test_data.py
 ## 七、Session 历史（近期，倒序）
 
 | Session | 日期 | 内容 |
+| **#170** | **08-07** | **L2 回写 solutions + 选择题 answer_lines 防御清理**: LLM 语义识别为主，新增单选/多选 answer 规则与 HTML 答案表防御清理；L2 行号重建内容写回 solutions；富化已有 extracted solution 时跳过 auto_solve。常规 pytest 1284 passed / 5 skipped。 |
+| **#169** | **08-07** | **OCR markdown 兜底、答案校验、前端监控**: Route A 回退写入 paddleocr_markdown，extracted 答案入库前校验，新增监控页。 |
 |---------|------|------|
 | **#167** | **08-06** | **简化管线落地**: 砍掉 section detection / batch splitting / QNO remap，OCR markdown → 单次 LLM 调用 → 直接入库。新增 `_QD_SIMPLE_ANNOTATION_PROMPT`，重写 `extract_questions_from_markdown()`。修复 `_clean_json()` 中 `\b` `\f` `\r` 误判。9 科回归：293 题 100% 覆盖，168/168 选择题正确。提交 ee72faa，版本 1.56.0。 |
 | **#166** | **08-05** | **Annotation Paradigm 调试验证**: 首次尝试 LLM 直接输出内容（stem/options/answer）→ JSON parse 失败（LaTeX 未转义）。切换为行号标注：LLM 只输出行号范围，代码从原文切出。answer override 保护（选择题不被 `answer_lines` 覆盖字母答案）。 |
@@ -300,7 +302,7 @@ python scripts/reset_test_data.py
 ## 八、给 Claude/TRAE 的工作指令
 
 ```
-继续 AI Tutors 项目。版本 1.56.0。
+继续 AI Tutors 项目。版本 1.58.0。
 
 == 当前重点 ==
 
@@ -376,3 +378,51 @@ Status:  S#168 已提交并 push；origin/main 已同步
 8. 🟡 标注镜像历史回填（可选）
 9. ✅ 提交并 push S#168（2026-08-07，origin/main 已同步）
 ```
+
+---
+
+## Session #169 — 2026-08-07: OCR markdown 兜底、答案校验、前端监控
+
+### 本次根因
+
+- Codex 执行环境/后端进程外网受限：DNS 正常，但 TCP 443 被 `WinError 10013` 拒绝。
+- 后端进程无法连通 PP-StructureV3、DeepSeek、MIMO；PP-StructureV3 提交失败后管线回退 Route A。
+- Route A 原实现不生成 `paddleocr_markdown`，导致 OCR markdown 为空、LLM 标注被跳过、题目走 regex 兜底。
+
+### 代码改动
+
+- `_paddleocr_vl_client.py`：`trust_env=True`，并在 API 未返回 `markdown.text` 时从 blocks 重建 markdown。
+- `types.py`：新增 `ParallelExtractionResult.full_markdown`。
+- `pipeline.py`：Route A 回退时写入 `paddleocr_markdown`。
+- `async_document.py`：OCR markdown 兜底返回、答案入库前校验、保存 `document_id`。
+- `async_pipeline.py`：富化阶段进度、超时保护、节点持久化日志、extracted 答案校验。
+- `_question_driven_extractor.py`：answer-key pass 只补缺失答案，不再覆盖已有答案。
+- `documents.py`：新增 `GET /api/documents/monitor/latest`。
+- 前端：新增 `/monitor` 管线监控页。
+
+### 验证状态
+
+- OCR markdown 已成功落库：`17278 chars`。
+- 后端相关测试：`94 passed`。
+- 前端 `npm run build`：通过。
+- 当前测试数据已清空，后端与前端已启动。
+- 端到端 LLM 验证仍受外网限制阻塞；重启电脑/Codex 后需重新上传验证 L2 镜像与答案质量。
+
+## Session #170 — 2026-08-07: L2 回写 solutions + 选择题 answer_lines 防御清理
+
+### 本次范围
+
+- Step 1-3 P0 已完成；Step 4（图片关联）与 Step 5（监控 API、id2 重跑）后续处理。
+
+### 代码改动
+
+- `_QD_SIMPLE_ANNOTATION_PROMPT` 增加单选/多选 answer 与 `answer_lines` 规则，禁止指向整张 HTML 答案表。
+- `_question_driven_extractor.py` 新增 `_validate_choice_answer` / `_clean_choice_answer_lines`。
+- `async_document.py` 新增 `_rebuild_content_from_lines`，`_save_annotated_questions` 优先写入 L2 重建内容。
+- `async_pipeline.py` 在 `_step_solve_question` 调用 LLM 前检查已有 solution，避免 auto_solve 覆盖 extracted 内容。
+
+### 验证状态
+
+- 后端常规 pytest：`1284 passed / 5 skipped`。
+- 完整 live pytest：`1345 passed / 5 skipped`。
+- 新增/相关单测：`74 passed`。

@@ -274,8 +274,17 @@ class DocumentPipeline:
         ) = await self._service._step_parallel_extract(
             ctx.task_id, ctx.data, pages_to_process, subject=ctx.subject_code,
         )
+        from app.domains.question._question_driven_extractor import (
+            _normalize_qno_newlines,
+        )
+        paddleocr_markdown = _normalize_qno_newlines(paddleocr_markdown or "")
         ctx.merged_blocks = merged_blocks
         ctx.steps_completed.append("extract")
+        await _get_doc_processing()._log_to_db(
+            ctx.doc_id, "ocr_extract",
+            f"PP-StructureV3: {len(merged_blocks)} blocks, "
+            f"markdown={len(paddleocr_markdown)} chars",
+        )
 
         # Persist raw OCR Markdown to DB
         if paddleocr_markdown and ctx.doc_id:
@@ -298,8 +307,19 @@ class DocumentPipeline:
                     "blocks": len(merged_blocks),
                     "sample_first_300": paddleocr_markdown[:300],
                 })
+                await _get_doc_processing()._log_to_db(
+                    ctx.doc_id, "ocr_markdown",
+                    f"OCR markdown persisted: {len(paddleocr_markdown)} chars, "
+                    f"{len(merged_blocks)} blocks",
+                )
             except Exception as _mde:
                 logger.warning("Failed to save OCR Markdown for doc %d: %s", ctx.doc_id, _mde)
+        elif ctx.doc_id and not paddleocr_markdown:
+            await _get_doc_processing()._log_to_db(
+                ctx.doc_id, "ocr_markdown",
+                "PP-StructureV3 markdown empty; LLM annotation skipped, "
+                "using regex blocks",
+            )
 
         # LLM full extraction
         _llm_check = f"enabled={settings.LLM_ANNOTATION_ENABLED} markdown={len(paddleocr_markdown or '')} blocks={len(merged_blocks)}"
@@ -546,6 +566,7 @@ class DocumentPipeline:
                         subject_id=subject_id,
                     )
                     if saved_q:
+                        saved_q["document_id"] = ctx.doc_id
                         ctx.saved_questions.append(saved_q)
                 except Exception as e:
                     logger.warning("Failed to save Q%s: %s", block.get("question_no"), e)
@@ -553,6 +574,10 @@ class DocumentPipeline:
             await session.commit()
             await ctx.update_progress(60, "store", f"已保存 {len(ctx.saved_questions)} 道题目")
             ctx.steps_completed.append("store")
+            await _get_doc_processing()._log_to_db(
+                ctx.doc_id, "store",
+                f"Stored {len(ctx.saved_questions)} questions",
+            )
 
             # Update document status to completed early
             try:

@@ -605,6 +605,308 @@ _SUBJECT_COMPREHENSIVE_HINTS: dict[str, str] = {
 }
 
 
+# ── Subject-specific QD format hints ──────────────────────────────────────
+# These are appended to the shared Annotation Paradigm prompt.  They tune
+# how the LLM reads each subject's option/answer/image layout without
+# forking the core line-number schema.
+_SUBJECT_QD_FORMAT_HINTS: dict[str, str] = {
+    "mathematics": """
+MATH-SPECIFIC RULES:
+1. Options are usually on a SINGLE LINE: "A.xxx B.xxx C.xxx D.xxx"
+   -> options_lines should be ONE range: [[line, line]], not four ranges.
+2. The answer section may use an HTML table for choice questions, then
+   【答案】for Q11+.  Extract the choice letter from the table.
+3. Look for 【详解】/【小问N详解】 and set explanation_lines to its range.
+4. LaTeX formulas are part of the stem; do not rewrite or drop them.
+5. If the next question number appears inline after the last option, do
+   not include that next question's text in this question's options_lines.
+""",
+    "physics": """
+PHYSICS-SPECIFIC RULES:
+1. Preserve vectors, units, subscripts/superscripts, and LaTeX formulas.
+2. Experiment/calculation questions keep the full multi-part stem under one qno.
+3. Diagrams are referenced in the stem; preserve the figure reference.
+4. For multi-choice questions, keep all option letters in answer.
+""",
+    "chemistry": """
+CHEMISTRY-SPECIFIC RULES:
+1. Preserve chemical formulas, equations, reaction conditions, arrows, and subscripts.
+2. Experiment/process questions keep the full multi-part stem under one qno.
+3. Keep data tables and process steps exactly as OCR renders them.
+4. Answer may be a value with unit; extract it from the answer section.
+""",
+    "biology": """
+BIOLOGY-SPECIFIC RULES:
+1. Preserve organism names, genetic symbols, experimental groups, and diagrams.
+2. Experiment/pedigree questions keep the full multi-part stem under one qno.
+3. Answer text is usually in the answer section; map answer_lines to it.
+""",
+    "chinese": """
+CHINESE-SPECIFIC RULES:
+1. Reading/material questions keep the shared passage and all sub-questions in ONE question.
+2. Preserve classical Chinese, notes/annotations, poetry line breaks, and writing requirements.
+3. Answer section format is usually 【参考答案】 or 【答案与解析】; map answer_lines/explanation_lines to it.
+4. Writing questions have no fixed answer; keep answer empty unless the answer section gives a model answer.
+""",
+    "english": """
+ENGLISH-SPECIFIC RULES:
+1. Never translate English passage/options into Chinese.
+2. Cloze, reading, word select, seven-to-five are composite questions; keep shared material + sub-items in ONE question.
+3. Options may be inline or multi-line; if inline, output ONE options range per physical line.
+4. Preserve blanks, numbering, and answer-section text.
+""",
+    "history": """
+HISTORY-SPECIFIC RULES:
+1. Material-based questions keep all historical sources and sub-questions under one qno.
+2. Preserve source labels, dates, and citations.
+3. Answer section usually contains 【答案】+ analysis; map explanation_lines to analysis.
+""",
+    "politics": """
+POLITICS-SPECIFIC RULES:
+1. Material/case questions keep the shared material and all sub-questions under one qno.
+2. Preserve the case text and any quoted policy/material wording.
+3. Answer may be point-form; keep it as extracted from the answer section.
+""",
+    "geography": """
+GEOGRAPHY-SPECIFIC RULES:
+1. Map/chart/regional analysis questions keep the shared figure/context and all sub-questions under one qno.
+2. Preserve map labels, coordinates, climate/statistical data, and figure references.
+3. Answer section usually contains 【答案】+ analysis; map explanation_lines to analysis.
+""",
+}
+
+_SUBJECT_CODE_ALIASES: dict[str, str] = {
+    "数学": "mathematics",
+    "math": "mathematics",
+    "mathematics": "mathematics",
+    "物理": "physics",
+    "physics": "physics",
+    "化学": "chemistry",
+    "chemistry": "chemistry",
+    "生物": "biology",
+    "biology": "biology",
+    "语文": "chinese",
+    "chinese": "chinese",
+    "英语": "english",
+    "english": "english",
+    "历史": "history",
+    "history": "history",
+    "政治": "politics",
+    "politics": "politics",
+    "地理": "geography",
+    "geography": "geography",
+    "MATH": "mathematics",
+    "PHYS": "physics",
+    "CHEM": "chemistry",
+    "BIO": "biology",
+    "CHN": "chinese",
+    "ENG": "english",
+    "HIST": "history",
+    "POLI": "politics",
+    "GEOG": "geography",
+}
+
+
+def _normalize_subject_code(subject_code: str | None) -> str | None:
+    """Normalize Chinese/DB/English subject identifiers to lowercase keys."""
+    if not subject_code:
+        return None
+    normalized = _SUBJECT_CODE_ALIASES.get(subject_code)
+    return normalized or subject_code.lower()
+
+
+def _get_qd_subject_prompt_extra(subject_code: str | None) -> str:
+    """Return subject-specific instructions for a QD extraction prompt."""
+    key = _normalize_subject_code(subject_code)
+    if not key:
+        return ""
+    parts: list[str] = []
+    comprehensive = _SUBJECT_COMPREHENSIVE_HINTS.get(key)
+    if comprehensive:
+        parts.append(comprehensive)
+    format_hint = _SUBJECT_QD_FORMAT_HINTS.get(key)
+    if format_hint:
+        parts.append(format_hint)
+    return "\n\n".join(parts)
+
+
+def _build_qd_prompt(base_prompt: str, subject_code: str | None) -> str:
+    """Build a QD prompt with optional subject-specific instructions."""
+    extra = _get_qd_subject_prompt_extra(subject_code)
+    if not extra:
+        return base_prompt
+    return f"{base_prompt}\n\n{extra}"
+
+
+_INLINE_QNO_RE = re.compile(
+    r"(?<![0-9])([1-9]\d{0,2})[.、．](?=\s*[^\s\d])"
+)
+_OPTION_MARKER_IN_PREFIX_RE = re.compile(r"[A-H][.、．]")
+
+
+def _normalize_qno_newlines(markdown: str) -> str:
+    """Insert a newline before inline QNOs that follow inline choice options.
+
+    PP-StructureV3 frequently keeps "D.option5.已知..." on one line.  LLM
+    line-range annotation cannot split that line, so the next question is
+    swallowed by the previous option.  This normalizer splits the common
+    math case before line numbers are assigned.
+
+    It only splits when the prefix already contains an option marker, which
+    avoids breaking decimals such as "2.14" inside ordinary text.
+    """
+    if not markdown:
+        return markdown
+    normalized_lines: list[str] = []
+    for line in markdown.split("\n"):
+        matches = list(_INLINE_QNO_RE.finditer(line))
+        split_positions: list[int] = []
+        for m in matches:
+            if m.start() == 0:
+                continue
+            prefix = line[: m.start()]
+            if _OPTION_MARKER_IN_PREFIX_RE.search(prefix):
+                split_positions.append(m.start())
+        if not split_positions:
+            normalized_lines.append(line)
+            continue
+        chunks: list[str] = []
+        last = 0
+        for pos in split_positions:
+            chunks.append(line[last:pos])
+            last = pos
+        chunks.append(line[last:])
+        normalized_lines.append("\n".join(chunks))
+    return "\n".join(normalized_lines)
+
+
+_INLINE_CHOICE_MARKER_RE = re.compile(
+    r"(?<![A-Za-z])[A-H][.、．]|[(（][A-H][)）]"
+)
+
+
+def _split_inline_choice_text(text: str) -> list[str]:
+    """Split inline A/B/C/D options into separate option strings.
+
+    Handles both one-option-per-line output and compact single-line output
+    such as "A.1 B.2 C.3 D.4".  The negative lookbehind prevents splitting
+    letters that are part of an English word/abbreviation.
+    """
+    if not text:
+        return []
+    options: list[str] = []
+    for line in text.splitlines():
+        markers = list(_INLINE_CHOICE_MARKER_RE.finditer(line))
+        if len(markers) < 2:
+            if line.strip():
+                options.append(line.strip())
+            continue
+        prefix = line[: markers[0].start()].strip()
+        if prefix:
+            options.append(prefix)
+        for i, marker in enumerate(markers):
+            start = marker.start()
+            end = markers[i + 1].start() if i + 1 < len(markers) else len(line)
+            option = line[start:end].strip()
+            if option:
+                options.append(option)
+    return options
+
+
+_CHOICE_LETTER_RE = re.compile(r"[A-Da-d]")
+_HTML_ANSWER_TABLE_MARKERS = ("<table", "<html", "<body")
+_CHOICE_MARKER_IN_CONTENT_RE = re.compile(r"(?<![A-Za-z])[A-Da-d][.、．]")
+
+
+def _validate_choice_answer(answer: str, qtype: str) -> str:
+    """Normalize a choice answer to A-D letters when valid.
+
+    Single choice accepts exactly one A-D letter.  Multi choice accepts a
+    combination of two or more A-D letters.  If the value cannot be repaired,
+    the original value is preserved so the downstream DB validator can decide
+    whether to reject it instead of silently dropping a question.
+    """
+    if qtype not in ("choice", "multi_choice"):
+        return answer
+    if not answer:
+        return answer
+
+    letters = _CHOICE_LETTER_RE.findall(str(answer).upper())
+    if qtype == "choice" and len(letters) == 1:
+        return letters[0]
+    if qtype == "multi_choice" and len(letters) >= 2:
+        return "".join(dict.fromkeys(letters))
+    return answer
+
+
+def _clean_choice_answer_lines(
+    markdown_lines: list[str],
+    answer_lines: list | None,
+) -> list | None:
+    """Clear choice answer_lines that point to a whole answer table/block.
+
+    The LLM may label one shared HTML answer table as every choice question's
+    answer_lines.  Keeping those lines makes L2 render the entire table for
+    each question.  This helper only clears the line annotation; the letter in
+    ``answer`` is intentionally preserved.
+    """
+    if (
+        not answer_lines
+        or not isinstance(answer_lines, list)
+        or len(answer_lines) != 2
+    ):
+        return answer_lines
+
+    try:
+        start, end = int(answer_lines[0]), int(answer_lines[1])
+    except (ValueError, TypeError):
+        return answer_lines
+
+    if start < 0 or end < start:
+        return answer_lines
+    if not markdown_lines:
+        return answer_lines
+
+    start = min(start, len(markdown_lines) - 1)
+    end = min(end, len(markdown_lines) - 1)
+    content = "\n".join(markdown_lines[start:end + 1]).strip()
+    if not content:
+        return answer_lines
+
+    lowered = content.lower()
+    if any(marker in lowered for marker in _HTML_ANSWER_TABLE_MARKERS):
+        return None
+
+    option_markers = _CHOICE_MARKER_IN_CONTENT_RE.findall(content)
+    if len(option_markers) > 2:
+        return None
+
+    if len(content) > 200:
+        return None
+
+    return answer_lines
+
+
+def _dedupe_ranges(ranges: list | None) -> list:
+    """Deduplicate [start, end] ranges while preserving order."""
+    if not ranges:
+        return []
+    deduped: list[list[int]] = []
+    seen: set[tuple[int, int]] = set()
+    for r in ranges:
+        if not isinstance(r, list) or len(r) != 2:
+            continue
+        try:
+            key = (int(r[0]), int(r[1]))
+        except (ValueError, TypeError):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append([key[0], key[1]])
+    return deduped
+
+
 
 
 async def extract_questions_from_section(
@@ -629,6 +931,10 @@ async def extract_questions_from_section(
         (questions, validation_report) where questions is a list of
         question dicts and validation_report is the QNO validation result.
     """
+    # Split inline QNOs after options so line-number annotation can separate
+    # the next question from the previous option block.
+    section_markdown = _normalize_qno_newlines(section_markdown)
+
     # Split into lines for line-number annotation
     raw_lines = section_markdown.split("\n")
 
@@ -645,8 +951,11 @@ async def extract_questions_from_section(
 
     condensed_text = "\n".join(condensed)
 
-    # Build full prompt with annotation paradigm
-    full_prompt = f"{_QD_ANNOTATION_EXTRACTION_PROMPT}\n\n```\n{condensed_text}\n```"
+    # Build full prompt with annotation paradigm + subject hints
+    full_prompt = (
+        f"{_build_qd_prompt(_QD_ANNOTATION_EXTRACTION_PROMPT, subject_code)}"
+        f"\n\n```\n{condensed_text}\n```"
+    )
 
     try:
         from app.gateway.router import llm_gateway
@@ -773,9 +1082,7 @@ async def extract_questions_from_section(
         # Parse options from extracted text
         options = []
         if options_raw:
-            # Split by newlines and clean
-            option_lines = [o.strip() for o in options_raw.split("\n") if o.strip()]
-            options = option_lines
+            options = _split_inline_choice_text(options_raw)
 
         # S#162: Normalize Unicode subscripts/superscripts → LaTeX
         stem = _normalize_unicode_math(stem)
@@ -1263,12 +1570,12 @@ def _extract_multiple_ranges(
     """
     if not ranges:
         return ""
+    deduped = _dedupe_ranges(ranges)
     parts: list[str] = []
-    for r in ranges:
-        if isinstance(r, list) and len(r) == 2:
-            part = _extract_lines_range(lines, int(r[0]), int(r[1]), tolerance)
-            if part:
-                parts.append(part)
+    for r in deduped:
+        part = _extract_lines_range(lines, r[0], r[1], tolerance)
+        if part and part not in parts:
+            parts.append(part)
     return "\n\n".join(parts)
 
 
@@ -1297,7 +1604,8 @@ CRITICAL RULES:
   * All sub-questions in the same composite group share the same passage_lines
   * Each sub-question has its own stem_lines and options_lines
   * passage_lines = the FULL shared reading material (same for all sub-questions)
-- For choice questions: options_lines covers A/B/C/D option lines
+- For choice questions: options_lines covers A/B/C/D option lines. If the
+  options are on ONE physical line, use exactly one range: [[N, N]].
 - Line numbers refer to the [N] prefixed lines in the input
 - Extract ALL questions — do NOT skip any
 - NEVER output content strings — only integers, null, and arrays
@@ -1315,6 +1623,8 @@ Return a JSON object:
 async def _extract_answers_from_section(
     answer_text: str,
     timeout: float = 30.0,
+    source_lines: list[str] | None = None,
+    line_offset: int = 0,
 ) -> list[dict]:
     """Extract per-question answers from the answer section using LLM.
 
@@ -1324,9 +1634,13 @@ async def _extract_answers_from_section(
     Args:
         answer_text: The answer section markdown (lines after answer boundary).
         timeout: LLM call timeout in seconds.
+        source_lines: Original full markdown lines.  When provided, returned
+            line metadata is translated back to the full-document line space.
+        line_offset: Index of ``answer_text``'s first line in ``source_lines``.
 
     Returns:
-        List of {"qno": int, "answer": str, "explanation": str} dicts.
+        List of {"qno", "answer", "explanation", "answer_lines",
+        "explanation_lines"} dicts.
     """
     if not answer_text or len(answer_text.strip()) < 20:
         logger.info("Answer section too short (%d chars), skipping", len(answer_text or ""))
@@ -1334,6 +1648,7 @@ async def _extract_answers_from_section(
 
     # Split into lines for later extraction by line number
     raw_lines = answer_text.split("\n")
+    extract_lines = source_lines or raw_lines
 
     # Build condensed text with line numbers [N] for LLM
     condensed: list[str] = []
@@ -1396,8 +1711,11 @@ async def _extract_answers_from_section(
             # Extract answer content from line number
             answer_line = item.get("answer_line")
             answer = ""
+            answer_lines_meta = None
             if answer_line is not None:
-                raw_answer = _extract_line(raw_lines, int(answer_line))
+                original_answer_line = int(answer_line) + line_offset
+                answer_lines_meta = [original_answer_line, original_answer_line]
+                raw_answer = _extract_line(extract_lines, original_answer_line)
                 # S#163: If answer is an HTML table row, extract the specific cell
                 answer = _extract_answer_from_row(raw_answer, qno, qno_in_section)
                 if not answer or len(answer) > 20:
@@ -1409,16 +1727,22 @@ async def _extract_answers_from_section(
 
             # Extract explanation content from line range
             explanation = ""
+            explanation_lines_meta = None
             explanation_lines = item.get("explanation_lines")
             if explanation_lines and isinstance(explanation_lines, list) and len(explanation_lines) == 2:
+                original_start = int(explanation_lines[0]) + line_offset
+                original_end = int(explanation_lines[1]) + line_offset
+                explanation_lines_meta = [original_start, original_end]
                 explanation = _extract_lines_range(
-                    raw_lines, int(explanation_lines[0]), int(explanation_lines[1])
+                    extract_lines, original_start, original_end
                 )
 
             normalized.append({
                 "qno": qno,
                 "answer": answer,
                 "explanation": explanation,
+                "answer_lines": answer_lines_meta,
+                "explanation_lines": explanation_lines_meta,
             })
 
         logger.info("Answer extraction: %d answers parsed (annotation mode)", len(normalized))
@@ -1427,6 +1751,91 @@ async def _extract_answers_from_section(
     except Exception as exc:
         logger.error("Answer extraction failed: %s", exc)
         return []
+
+
+def _find_answer_section_start(markdown: str) -> int:
+    """Return the first full-document line index of the answer section."""
+    for idx, line in enumerate(markdown.split("\n")):
+        if _ANSWER_SECTION_RE.search(line.strip()):
+            return idx
+    return -1
+
+
+async def _apply_answer_key_pass(
+    markdown: str,
+    raw_lines: list[str],
+    questions: list[dict],
+    subject_code: str = "",
+    timeout: float = 45.0,
+) -> list[dict]:
+    """Run a focused answer-section pass after main question extraction.
+
+    The first QD call is optimized for question boundaries.  A second,
+    answer-only pass fills missing teacher answers/explanations and records
+    their original line ranges for the L2 mirror.
+    """
+    if not questions:
+        return questions
+
+    answer_start = _find_answer_section_start(markdown)
+    if answer_start < 0:
+        return questions
+
+    missing = [
+        q for q in questions
+        if not q.get("answer") or not q.get("explanation")
+    ]
+    if not missing:
+        return questions
+
+    answer_text = "\n".join(raw_lines[answer_start:])
+    if len(answer_text.strip()) < 20:
+        return questions
+
+    try:
+        items = await _extract_answers_from_section(
+            answer_text,
+            timeout=timeout,
+            source_lines=raw_lines,
+            line_offset=answer_start,
+        )
+    except Exception as exc:
+        logger.warning("Answer-key pass failed for %s: %s", subject_code, exc)
+        return questions
+
+    if not items:
+        return questions
+
+    by_qno = {q.get("qno"): q for q in questions}
+    merged = 0
+    for item in items:
+        q = by_qno.get(item.get("qno"))
+        if not q:
+            continue
+        qtype = str(q.get("type", "")).lower()
+        answer = str(item.get("answer", "")).strip()
+        answer_lines = item.get("answer_lines")
+
+        if answer:
+            if not q.get("answer"):
+                q["answer"] = answer
+                if answer_lines:
+                    q["answer_lines"] = answer_lines
+            q["answer_from_document"] = True
+
+        explanation = str(item.get("explanation", "")).strip()
+        explanation_lines = item.get("explanation_lines")
+        if explanation and not q.get("explanation"):
+            q["explanation"] = explanation
+            q["explanation_lines"] = explanation_lines
+            q["explanation_from_document"] = True
+        merged += 1
+
+    logger.info(
+        "Answer-key pass: merged %d/%d items for %s",
+        merged, len(items), subject_code or "unknown",
+    )
+    return questions
 
 
 async def _detect_markdown_sections(
@@ -1876,7 +2285,8 @@ For EACH question, output:
   "word_select", "seven_to_five", "writing", "experiment", "calculation",
   "essay", "multi_choice", "material_analysis", "proof", "other"
 - "stem_lines": [start, end] line range for the question body (stem + passage if composite)
-- "options_lines": array of [[start, end], ...] one per option, or [] if no options
+- "options_lines": array of [[start, end], ...] one per option, or [] if no options.
+  If options are on ONE physical line, use ONE range: [[N, N]].
 - "answer": the correct answer AS A STRING — for choice: letter (e.g. "A"),
   for fill: the value, for essay: "" (answer content is in answer_lines)
 - "answer_lines": [start, end] where the answer/solution text is located, or null
@@ -1891,8 +2301,18 @@ CRITICAL RULES:
    - Include the shared passage in the FIRST sub-question's stem_lines
    - Each sub-question is a SEPARATE entry with its own stem_lines and options_lines
 5. For questions WITHOUT visible answer text, set answer_lines to null.
-6. For choice questions, options_lines should capture each option line.
+6. For choice questions, options_lines should capture each option line. If
+   the options are on ONE physical line, output ONE range: [[N, N]].
 7. Question numbers appear as "N.", "N、", "N)", "(N)" at line start — recognize all.
+8. CHOICE ANSWER RULES:
+   - single choice ("choice"): "answer" must be EXACTLY one A-D letter, e.g. "A".
+   - multi choice ("multi_choice"): "answer" must be an A-D letter combination,
+     e.g. "ABD".
+   - "answer_lines" must point to this question's OWN answer position.
+   - NEVER point "answer_lines" at a whole shared HTML answer table or an answer
+     row containing many questions.
+   - If the only visible answer is a shared answer table, keep the letter in
+     "answer" and set "answer_lines" to null.
 
 Return ONLY a JSON object:
 {"questions": [
@@ -1938,6 +2358,10 @@ async def extract_questions_from_markdown(
         logger.warning("QD simple: markdown too short (%d chars)", len(markdown or ""))
         return None
 
+    # Keep the same normalization used by the pipeline before OCR markdown is
+    # persisted, so line metadata and documents.ocr_markdown stay aligned.
+    markdown = _normalize_qno_newlines(markdown)
+
     logger.info(
         "QD simple: extracting from %d chars markdown [%s]",
         len(markdown), subject_code or "unknown",
@@ -1956,7 +2380,10 @@ async def extract_questions_from_markdown(
         return None
 
     condensed_text = "\n".join(condensed)
-    full_prompt = f"{_QD_SIMPLE_ANNOTATION_PROMPT}\n\n```\n{condensed_text}\n```"
+    full_prompt = (
+        f"{_build_qd_prompt(_QD_SIMPLE_ANNOTATION_PROMPT, subject_code)}"
+        f"\n\n```\n{condensed_text}\n```"
+    )
 
     logger.info(
         "QD simple: %d condensed lines (%d chars) for LLM",
@@ -2033,13 +2460,14 @@ async def extract_questions_from_markdown(
         stem = _extract_text_from_lines(raw_lines, q.get("stem_lines"))
 
         options_raw = _extract_multiple_ranges(raw_lines, q.get("options_lines"))
-        options = [o.strip() for o in options_raw.split("\n") if o.strip()] if options_raw else []
+        options = _split_inline_choice_text(options_raw)
 
         answer = q.get("answer")
         if answer is not None:
             answer = str(answer).strip()
 
         qtype = str(q.get("type", "other")).strip().lower()
+        answer_from_document = False
 
         # If LLM provided answer_lines, use it ONLY when:
         # - string answer is empty, OR
@@ -2050,10 +2478,12 @@ async def extract_questions_from_markdown(
             answer_from_lines = _extract_text_from_lines(raw_lines, answer_lines)
             if answer_from_lines:
                 answer = answer_from_lines
+                answer_from_document = True
 
         explanation = _extract_text_from_lines(raw_lines, q.get("explanation_lines"))
         if not explanation:
             explanation = ""
+        explanation_from_document = bool(explanation and q.get("explanation_lines"))
 
         # Normalize unicode math → LaTeX
         stem = _normalize_unicode_math(stem)
@@ -2076,10 +2506,23 @@ async def extract_questions_from_markdown(
             "answer_lines": q.get("answer_lines"),
             "explanation_lines": q.get("explanation_lines"),
             "passage_lines": q.get("passage_lines"),
+            "answer_from_document": answer_from_document,
+            "explanation_from_document": explanation_from_document,
         })
 
     # Sort by QNO
     normalized.sort(key=lambda x: x["qno"])
+    if normalized:
+        normalized = await _apply_answer_key_pass(
+            markdown, raw_lines, normalized, subject_code=subject_code,
+        )
+    for q in normalized:
+        qtype = str(q.get("type", "other")).strip().lower()
+        if qtype in ("choice", "multi_choice"):
+            q["answer"] = _validate_choice_answer(q.get("answer", ""), qtype)
+            q["answer_lines"] = _clean_choice_answer_lines(
+                raw_lines, q.get("answer_lines"),
+            )
     actual_qnos = [q["qno"] for q in normalized]
 
     # ── Diagnostics ──

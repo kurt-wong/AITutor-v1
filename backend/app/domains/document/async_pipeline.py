@@ -427,18 +427,26 @@ class AsyncPipeline(_DocumentProcessing):
             return None
 
         task_id = uuid.uuid4().hex
+        document_id = next(
+            (sq.get("document_id") for sq in saved_questions if sq.get("document_id")),
+            None,
+        )
         task_data = {
             "task_id": task_id,
             "type": TASK_TYPE_ENRICHMENT,
             "document_key": document_key,
+            "document_id": document_id,
             "questions": [
                 {
                     "id": sq["id"],
+                    "document_id": sq.get("document_id"),
                     "content": sq.get("content", sq.get("question_text", "")),
                     "answer": sq.get("answer", ""),
                     "explanation": sq.get("explanation", ""),
                     "question_type": sq.get("question_type", ""),
                     "options": sq.get("options", []),
+                    "answer_from_document": sq.get("answer_from_document", False),
+                    "explanation_from_document": sq.get("explanation_from_document", False),
                 }
                 for sq in saved_questions
             ],
@@ -928,6 +936,36 @@ class AsyncPipeline(_DocumentProcessing):
         options = options or []
         stages_completed: list[str] = []
 
+        # Skip before any LLM call when the teacher edition already provided
+        # an explanation.  The later guard still protects existing rows, but
+        # this early check avoids spending tokens on a no-op.
+        try:
+            async with async_session_factory() as _early_session:
+                _early_existing = await SolutionRepository(_early_session).get_by_question(
+                    question_id
+                )
+                if (
+                    _early_existing
+                    and _early_existing.explanation
+                    and _early_existing.mode == "extracted"
+                ):
+                    logger.info(
+                        "Skip LLM explanation for Q%d: teacher explanation "
+                        "already exists (mode=extracted)",
+                        question_id,
+                    )
+                    return {
+                        "status": "ok",
+                        "stages": [],
+                        "model_source": _early_existing.model_source,
+                        "explanation_len": len(_early_existing.explanation),
+                    }
+        except Exception as _early_exc:
+            logger.warning(
+                "Early teacher-explanation check failed for Q%d: %s",
+                question_id, _early_exc,
+            )
+
         # ── Resolve subject name for routing ──────────────────────
         subject_name = ""
         try:
@@ -1194,6 +1232,18 @@ class AsyncPipeline(_DocumentProcessing):
                 sol_repo = SolutionRepository(session)
                 existing = await sol_repo.get_by_question(question_id)
                 if existing:
+                    if existing.explanation and existing.mode == "extracted":
+                        logger.info(
+                            "Skip LLM explanation for Q%d: teacher explanation "
+                            "already exists (mode=extracted)",
+                            question_id,
+                        )
+                        return {
+                            "status": "ok",
+                            "stages": [],
+                            "model_source": existing.model_source,
+                            "explanation_len": len(existing.explanation),
+                        }
                     await sol_repo.update(
                         existing.id,
                         explanation=final_explanation,
@@ -1244,6 +1294,18 @@ class AsyncPipeline(_DocumentProcessing):
         task_id = task_data["task_id"]
         questions: list[dict] = task_data.get("questions", [])
         document_key = task_data.get("document_key", "")
+        document_id = task_data.get("document_id")
+        if not document_id and questions:
+            try:
+                from sqlalchemy import text as _dtxt
+                async with async_session_factory() as _ds:
+                    _r = await _ds.execute(
+                        _dtxt("SELECT document_id FROM questions WHERE id = :qid"),
+                        {"qid": questions[0]["id"]},
+                    )
+                    document_id = _r.scalar()
+            except Exception as _derr:
+                logger.warning("Failed to resolve enrichment document_id: %s", _derr)
 
         if not questions:
             logger.warning("Enrichment task %s: no questions to process", task_id)
@@ -1260,6 +1322,10 @@ class AsyncPipeline(_DocumentProcessing):
         )
         await self._set_status(task_id, {"state": TASK_STATE_PROCESSING})
         await self._log_step(task_id, "start", f"Enriching {len(questions)} questions")
+        await self._log_to_db(
+            document_id, "enrich_start",
+            f"Enriching {len(questions)} questions",
+        )
 
         steps_completed: list[str] = []
 
@@ -1328,7 +1394,15 @@ class AsyncPipeline(_DocumentProcessing):
                             task_id, "knowledge_map",
                             f"知识点映射完成: {_kp_count} 条",
                         )
+                        await self._log_to_db(
+                            document_id, "enrich_knowledge_map",
+                            f"Knowledge mapped: {_kp_count} rows",
+                        )
                         steps_completed.append("knowledge_map")
+                        await self._set_status(task_id, {
+                            "steps_completed": steps_completed.copy(),
+                            "current_step": "knowledge_map",
+                        })
             except Exception as e:
                 logger.warning(
                     "KP mapping in enrichment failed (non-fatal): %s", e,
@@ -1367,7 +1441,15 @@ class AsyncPipeline(_DocumentProcessing):
                 task_id, "solve",
                 f"解答完成: {solved_count}/{len(questions)} (LLM {llm_called} 次)",
             )
+            await self._log_to_db(
+                document_id, "enrich_solve",
+                f"Solutions: {solved_count}/{len(questions)} (LLM {llm_called})",
+            )
             steps_completed.append("solve")
+            await self._set_status(task_id, {
+                "steps_completed": steps_completed.copy(),
+                "current_step": "solve",
+            })
 
             # ── Step 2: Difficulty evaluation (concurrent, semaphore=4) ──
             _diff_sem = asyncio.Semaphore(4)
@@ -1385,15 +1467,26 @@ class AsyncPipeline(_DocumentProcessing):
                         )
                         return False
 
-            diff_results = await asyncio.gather(
-                *[_eval_one(sq) for sq in questions],
+            diff_results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[_eval_one(sq) for sq in questions],
+                ),
+                timeout=420.0,
             )
             diff_count = sum(1 for ok in diff_results if ok)
             await self._log_step(
                 task_id, "difficulty",
                 f"难度评估完成: {diff_count}/{len(questions)}",
             )
+            await self._log_to_db(
+                document_id, "enrich_difficulty",
+                f"Difficulty: {diff_count}/{len(questions)}",
+            )
             steps_completed.append("difficulty")
+            await self._set_status(task_id, {
+                "steps_completed": steps_completed.copy(),
+                "current_step": "difficulty",
+            })
 
             # ── Step 3: Embedding (no longer pauses explain workers) ──
             # Session #117: explain workers route to MIMO API when
@@ -1415,15 +1508,26 @@ class AsyncPipeline(_DocumentProcessing):
                         )
                         return False
 
-            embed_results = await asyncio.gather(
-                *[_embed_one(sq) for sq in questions],
+            embed_results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[_embed_one(sq) for sq in questions],
+                ),
+                timeout=300.0,
             )
             embed_count = sum(1 for ok in embed_results if ok)
             await self._log_step(
                 task_id, "embed",
                 f"向量嵌入完成: {embed_count}/{len(questions)}",
             )
+            await self._log_to_db(
+                document_id, "enrich_embed",
+                f"Embeddings: {embed_count}/{len(questions)}",
+            )
             steps_completed.append("embed")
+            await self._set_status(task_id, {
+                "steps_completed": steps_completed.copy(),
+                "current_step": "embed",
+            })
 
             # ── Step 4: Enqueue explanation generation ──
             needs_explanation = [
@@ -1446,7 +1550,15 @@ class AsyncPipeline(_DocumentProcessing):
                     task_id, "explain_enqueue",
                     f"详解生成已入队: {enqueued} 道",
                 )
+                await self._log_to_db(
+                    document_id, "enrich_explain",
+                    f"Explanation tasks enqueued: {enqueued}",
+                )
                 steps_completed.append("explain_enqueue")
+                await self._set_status(task_id, {
+                    "steps_completed": steps_completed.copy(),
+                    "current_step": "explain_enqueue",
+                })
 
             await self._set_status(task_id, {
                 "state": TASK_STATE_COMPLETED,
@@ -1458,6 +1570,11 @@ class AsyncPipeline(_DocumentProcessing):
                 "question_count": len(questions),
             })
             await self._log_step(task_id, "done", "Enrichment batch completed")
+            await self._log_to_db(
+                document_id, "enrich_done",
+                f"Enrichment completed: {solved_count} solve, "
+                f"{diff_count} difficulty, {embed_count} embed",
+            )
             logger.info(
                 "Enrichment task %s completed: %d solve, %d diff, %d embed",
                 task_id, solved_count, diff_count, embed_count,
@@ -1475,6 +1592,11 @@ class AsyncPipeline(_DocumentProcessing):
             await self._log_step(
                 task_id, "error",
                 f"Enrichment failed at {steps_completed[-1] if steps_completed else 'start'}: {e}",
+            )
+            await self._log_to_db(
+                document_id, "enrich_error",
+                f"Enrichment failed at "
+                f"{steps_completed[-1] if steps_completed else 'start'}: {e}",
             )
 
     # ── Pipeline Steps (stub implementations) ─────────────────
@@ -1643,10 +1765,13 @@ class AsyncPipeline(_DocumentProcessing):
         try:
             from app.mcp.client import mcp_client
 
-            result = await mcp_client.call_tool("generate_embedding", {
-                "question_id": question_id,
-                "text": question_text,
-            })
+            result = await asyncio.wait_for(
+                mcp_client.call_tool("generate_embedding", {
+                    "question_id": question_id,
+                    "text": question_text,
+                }),
+                timeout=90.0,
+            )
             return result.get("data", {})
         except Exception as e:
             logger.warning(f"Embed step failed: {e}")
@@ -1683,9 +1808,37 @@ class AsyncPipeline(_DocumentProcessing):
                         "reason": f"existing solution (mode={existing.mode})",
                     }
 
+                from app.domains.document.async_document import _validate_llm_answer
+                from sqlalchemy import text as _qtext
+                qtype = "calculation"
+                try:
+                    _qr = await session.execute(
+                        _qtext("SELECT question_type FROM questions WHERE id = :qid"),
+                        {"qid": question_id},
+                    )
+                    _row = _qr.fetchone()
+                    if _row and _row[0]:
+                        qtype = _row[0]
+                except Exception as _qt_err:
+                    logger.warning(
+                        "Extracted solution type lookup failed for Q%d: %s",
+                        question_id, _qt_err,
+                    )
+
+                validated_answer = _validate_llm_answer(str(answer), qtype)
+                if not validated_answer:
+                    logger.warning(
+                        "Extracted solution rejected for Q%d (type=%s): %r",
+                        question_id, qtype, str(answer)[:80],
+                    )
+                    return {
+                        "status": "skipped",
+                        "reason": "extracted answer rejected by validation",
+                    }
+
                 await sol_repo.create(
                     question_id=question_id,
-                    final_answer=answer,
+                    final_answer=validated_answer,
                     explanation=explanation or None,
                     model_source="document_extract",
                     mode="extracted",
@@ -1710,6 +1863,33 @@ class AsyncPipeline(_DocumentProcessing):
         _save_annotated_questions() — creating another would pollute answers
         and double the solution count.
         """
+        from app.db.session import async_session_factory
+        from app.domains.question.solution_repository import SolutionRepository
+
+        # S#170: Do not spend an LLM call when Phase 1 already persisted a
+        # solution (especially extracted teacher-edition answer/explanation).
+        try:
+            async with async_session_factory() as _early_session:
+                existing = await SolutionRepository(_early_session).get_by_question(
+                    question_id
+                )
+                if existing is not None:
+                    logger.debug(
+                        "Skip auto_solve for Q%d: already has solution "
+                        "(mode=%s, id=%d)",
+                        question_id, existing.mode, existing.id,
+                    )
+                    return {
+                        "status": "skipped",
+                        "question_id": question_id,
+                        "reason": f"existing solution (mode={existing.mode})",
+                    }
+        except Exception as _early_exc:
+            logger.warning(
+                "Early solution check failed for Q%d: %s",
+                question_id, _early_exc,
+            )
+
         from app.mcp.client import mcp_client
 
         result = await mcp_client.call_tool("llm_gateway.solve_question", {
@@ -1816,9 +1996,12 @@ class AsyncPipeline(_DocumentProcessing):
         """
         from app.mcp.client import mcp_client
 
-        result = await mcp_client.call_tool("llm_gateway.evaluate_difficulty_v2", {
-            "question_text": question_text,
-        })
+        result = await asyncio.wait_for(
+            mcp_client.call_tool("llm_gateway.evaluate_difficulty_v2", {
+                "question_text": question_text,
+            }),
+            timeout=70.0,
+        )
 
         if not result.get("success"):
             logger.warning(f"evaluate_difficulty MCP failed for Q{question_id}: {result.get('error')}")

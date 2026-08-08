@@ -14,6 +14,7 @@ import {
   DollarOutlined,
   ExperimentOutlined,
   BarChartOutlined,
+  DashboardOutlined,
   EditOutlined,
   FolderOutlined,
   SunOutlined,
@@ -42,6 +43,7 @@ import SolutionPage from "./pages/SolutionPage";
 import TutorChatPage from "./pages/TutorChatPage";
 import WrongQuestionPage from "./pages/WrongQuestionPage";
 import KnowledgePage from "./pages/KnowledgePage";
+import MonitorPage from "./pages/MonitorPage";
 import CostPage from "./pages/CostPage";
 import TrainingPage from "./pages/TrainingPage";
 import ExamPage from "./pages/ExamPage";
@@ -54,6 +56,7 @@ const { Title } = Typography;
 const studentMenuItems = [
   { key: "/", icon: <HomeOutlined />, label: <Link to="/">提问</Link> },
   { key: "/wrong-book", icon: <WarningOutlined />, label: <Link to="/wrong-book">错题本</Link> },
+  { key: "/monitor", icon: <DashboardOutlined />, label: <Link to="/monitor">管线监控</Link> },
 ];
 
 function StudentLayout() {
@@ -305,6 +308,7 @@ function AppRoutes() {
       <Route element={<StudentLayout />}>
         <Route path="/" element={<AskPage />} />
         <Route path="/wrong-book" element={<WrongBookPage />} />
+        <Route path="/monitor" element={<MonitorPage />} />
       </Route>
 
       {/* Admin routes */}

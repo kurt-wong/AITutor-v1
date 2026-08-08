@@ -537,7 +537,10 @@ class TestPhase5_FullPipeline:
         _report.record_timing("全管线_数学", elapsed)
 
         assert result.success, f"管线失败: {result.error_message}"
-        assert result.provider == "parallel_extraction"
+        assert result.provider in (
+            "parallel_extraction",
+            "paddleocr_vl_api_full",
+        )
 
         # 统计
         total_text = sum(len(b.text) for b in result.text_blocks)

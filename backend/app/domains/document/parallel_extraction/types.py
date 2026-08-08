@@ -157,6 +157,44 @@ class ParallelExtractionResult:
             parts.append(f"{role_prefix}{block.text}")
         return "\n".join(parts)
 
+    @property
+    def full_markdown(self) -> str:
+        """Build a markdown-equivalent document from Route A C1-C4 blocks.
+
+        Route A does not have PP-StructureV3's ``markdown.text``.  Rebuild a
+        plain markdown from OCR text blocks and formula blocks so downstream
+        QD/LLM annotation can still run when the external API is unavailable.
+        """
+        pages = sorted({
+            b.page for b in self.text_blocks
+        } | {
+            f.page for f in self.formula_blocks
+        })
+        parts: list[str] = []
+        for page in pages:
+            items: list[tuple[float, int, int, str]] = []
+            for b in self.text_blocks:
+                if b.page != page:
+                    continue
+                y = b.bbox[1] if b.bbox and len(b.bbox) > 1 else 0
+                items.append((y, 0, b.block_index, b.text))
+            for f in self.formula_blocks:
+                if f.page != page:
+                    continue
+                latex = (f.latex or "").strip()
+                if not latex:
+                    continue
+                if f.display_math and not latex.startswith("$$"):
+                    latex = f"$${latex}$$"
+                elif not f.display_math and not latex.startswith("$"):
+                    latex = f"${latex}$"
+                source = f.source_block_index if f.source_block_index is not None else 0
+                items.append((float(source), 1, 0, latex))
+            for _, _, _, content in sorted(items):
+                if content.strip():
+                    parts.append(content.strip())
+        return "\n\n".join(parts)
+
 
 # ═══ PaddleOCR-VL Types (Phase 2 — simplified, Phase 1 verified) ═══════════
 

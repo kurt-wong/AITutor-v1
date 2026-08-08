@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-08-07 Session #168 (L2 标注镜像 + L1+L2 前端渲染) | **版本**: 1.57.0 | **完成度**: 核心链路 ~99%，整体 ~99%。
+> **最后更新**: 2026-08-07 Session #170 (L2 回写 solutions 完成) | **版本**: 1.58.0 | **完成度**: 核心链路 ~99%，整体 ~99%。
 >
 > **记录规范（2026-07-31 起严格执行）**：
 > - 本文档 §1-§15 为当前状态快照，可以原地编辑
@@ -17,7 +17,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.57.0 |
+| **版本** | 1.58.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -1331,3 +1331,33 @@ LLM 一次性提取全部题目（输出行号范围 + 答案）
 - §3.3 由 S#160/S#161 多步元数据架构更新为 S#167 单次 LLM 调用 Annotation Paradigm
 - 补充 S#167 关键参数、9 科 293 题回归结果、markdown 主路径回退策略
 - §3.3a Step 3 更新为 markdown 主路径已完成，blocks 兼容路径保留旧实现
+
+### 2026-08-07 — S#169: OCR markdown 兜底 + 答案校验 + 前端监控
+
+**版本**: 1.57.0（文档同步，未提交）
+
+**根因**: Codex 执行环境/后端进程外网受限，DNS 正常但 TCP 443 被 `WinError 10013` 拒绝；PP-StructureV3、DeepSeek、MIMO 均无法从后端进程连通，导致 PP-StructureV3 提交失败后走 Route A 回退，而 Route A 原本不生成 `paddleocr_markdown`。
+
+**修复**:
+- Route A 使用 C1-C4 blocks 重建 `full_markdown`，保证 OCR markdown 可持久化。
+- PaddleOCR client 改为 `trust_env=True`。
+- extracted 答案入库前增加 `_validate_llm_answer` 校验，拒绝 Q1/Q5 式污染答案。
+- answer-key pass 只补缺失答案，不覆盖已有答案。
+- 富化任务增加阶段进度、超时保护和节点持久化日志。
+- 新增 `GET /api/documents/monitor/latest` 与前端 `/monitor` 监控页。
+
+**验证**: OCR markdown `17278 chars` 已落库；后端相关测试 `94 passed`；前端构建通过。端到端 LLM 验证仍受当前外网限制阻塞，待重启电脑/Codex 后重新验证。
+
+### 2026-08-07 — S#170: L2 回写 solutions + 选择题 answer_lines 防御性清理（已完成）
+
+**版本**: 1.58.0（代码完成，常规测试通过，未提交）
+
+- 文档：`Docs/05_Development/2026-08-07-s170-l2-solution-writeback.md`
+- 实施范围：Step 1-3 P0 已完成
+- Prompt 增强：单选/多选 answer 与 `answer_lines` 规则，禁止指向整张 HTML 答案表。
+- 防御性清理：新增 `_validate_choice_answer` / `_clean_choice_answer_lines`，保留异常 answer 字母，只清理异常行号。
+- L2 回写：`_save_annotated_questions` 优先从 `answer_lines` / `explanation_lines` 重建 PDF 参考答案区内容并写入 `solutions`。
+- 富化保护：`_step_solve_question` 调用 LLM 前检查已有 solution，已有 extracted 内容时跳过 `auto_solve`。
+- 验证：后端常规 pytest `1284 passed / 5 skipped`；新增选择题防御、行号重建与富化跳过测试。
+- 完整 live pytest：`1345 passed / 5 skipped`。
+- 后续：Step 4 图片关联、Step 5 监控与 id2 重跑另行处理。

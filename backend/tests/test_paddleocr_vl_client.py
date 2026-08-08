@@ -107,6 +107,18 @@ class TestParseJsonl:
         contents = [b.block_content for b in pages[0].blocks]
         assert contents == ["第一段", "第二段", "第三段"]
 
+    def test_markdown_fallback_rebuilds_when_markdown_field_missing(self):
+        line = _make_jsonl_line([
+            {"label": "text", "content": "1. 已知 $x=1$，求 $y$。", "order": 1},
+            {"label": "display_formula", "content": "$$F=ma$$", "order": 2},
+            {"label": "inline_formula", "content": "$E=mc^2$", "order": 3},
+        ])
+        pages = PaddleOCRVlClient._parse_jsonl(line)
+        assert len(pages) == 1
+        assert "1. 已知 $x=1$，求 $y$。" in pages[0].markdown_text
+        assert "$$F=ma$$" in pages[0].markdown_text
+        assert "$E=mc^2$" in pages[0].markdown_text
+
     def test_formula_blocks_preserved(self):
         line = _make_jsonl_line([
             {"label": "text", "content": "计算：", "order": 1},

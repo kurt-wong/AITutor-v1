@@ -547,7 +547,7 @@ class ParallelExtractionPipeline:
                 )
             )
 
-            return ParallelExtractionResult(
+            result = ParallelExtractionResult(
                 text_blocks=all_blocks_flat,
                 formula_blocks=formula_blocks,
                 figure_anchors=figure_anchors,
@@ -556,6 +556,8 @@ class ParallelExtractionPipeline:
                 success=True,
                 answer_section=answer_section,
             )
+            result.paddleocr_markdown = result.full_markdown
+            return result
         finally:
             for tmp_path in page_images:
                 try:

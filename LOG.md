@@ -12400,3 +12400,57 @@ cd backend
 - 提交：`d551e3c`（feat: S#168 L2 annotation mirror and L1+L2 admin rendering）
 - 已 push 到 `origin/main`
 - `RESTART_PROMPT.md` Git 快照同步为已 push 状态
+
+---
+
+## Session #169 — 2026-08-07: OCR markdown 兜底、答案校验、前端监控
+
+### 根因
+
+- 当前执行环境/后端进程外网受限：DNS 正常，TCP 443 被 `WinError 10013` 拒绝。
+- 后端进程无法连通 PP-StructureV3、DeepSeek、MIMO；PP-StructureV3 提交失败后管线回退 Route A。
+- Route A 原实现不生成 `paddleocr_markdown`，导致 OCR markdown 为空、LLM 标注被跳过、题目走 regex 兜底。
+
+### 修改
+
+- `_paddleocr_vl_client.py`：`trust_env=True`，API 缺 markdown 时从 blocks 重建。
+- `types.py`：新增 `ParallelExtractionResult.full_markdown`。
+- `pipeline.py`：Route A 回退时写入 `paddleocr_markdown`。
+- `async_document.py`：OCR markdown 兜底返回、答案入库前校验、保存 `document_id`。
+- `async_pipeline.py`：富化阶段进度、超时保护、节点持久化日志、extracted 答案校验。
+- `_question_driven_extractor.py`：answer-key pass 只补缺失答案，不覆盖已有答案。
+- `documents.py`：新增 `GET /api/documents/monitor/latest`。
+- 前端：新增 `/monitor` 管线监控页。
+
+### 验证
+
+- OCR markdown 已成功落库：`17278 chars`。
+- 后端相关测试：`94 passed`。
+- 前端 `npm run build`：通过。
+- 当前测试数据已清空，后端与前端已启动。
+- 端到端 LLM 验证仍受外网限制阻塞；重启电脑/Codex 后需重新上传验证 L2 镜像与答案质量。
+
+## Session #170 — 2026-08-07: L2 回写 solutions + 选择题 answer_lines 防御性清理
+
+### 背景
+
+- L2 `answer_lines` / `explanation_lines` 已能准确切出 PDF 参考答案区原文，但未写回 `solutions`。
+- Q1-Q10 的 `answer_lines` 全部指向第 187 行 HTML 答案表，导致 L1+L2 渲染整张表。
+- Q8/Q17 无 inline image 时整页兜底默认 `position=0.0`，都关联到第 1 页。
+
+### 代码实施（Step 1-3）
+
+- 新增 `Docs/05_Development/2026-08-07-s170-l2-solution-writeback.md`。
+- 更新 `PROJECT_STATUS.md` 头部版本与 §16 变更日志。
+- `_QD_SIMPLE_ANNOTATION_PROMPT` 增加单选/多选 answer 与 `answer_lines` 规则。
+- `_question_driven_extractor.py` 新增 `_validate_choice_answer` / `_clean_choice_answer_lines`，HTML 答案表不再污染选择题 L2 标注。
+- `async_document.py` 新增 `_rebuild_content_from_lines`，`_save_annotated_questions` 将 L2 重建的答案/详解优先写入 `solutions`。
+- `async_pipeline.py` 的 `_step_solve_question` 在调用 LLM 前检查已有 solution，避免对 extracted 内容执行 `auto_solve`。
+- 新增测试：选择题防御、单选/多选校验、L2 行号重建、富化跳过已有 solution。
+
+### 验证
+
+- 后端常规 pytest：`1284 passed / 5 skipped`。
+- 完整 live pytest：`1345 passed / 5 skipped`。
+- 新增/相关单测：`74 passed`。
+- Step 4-5 后续单独处理。
