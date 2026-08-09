@@ -99,6 +99,26 @@ async def get_document(
     return create_response(result, request)
 
 
+@router.get("/{doc_id}/pages")
+async def get_document_pages(
+    doc_id: int,
+    request: Request = None,
+    session: AsyncSession = Depends(get_db),
+):
+    """Get document pages with image keys.
+
+    S#174: Returns page list so frontend can display page images
+    via /api/documents/images/{image_key}.
+    """
+    from sqlalchemy import text
+    result = await session.execute(
+        text("SELECT page_number, image_key, width, height FROM document_pages WHERE document_id = :did ORDER BY page_number"),
+        {"did": doc_id},
+    )
+    pages = [{"page_number": r[0], "image_key": r[1], "width": r[2], "height": r[3]} for r in result.fetchall()]
+    return create_response({"pages": pages}, request)
+
+
 @router.get("/")
 async def list_documents(
     skip: int = 0,

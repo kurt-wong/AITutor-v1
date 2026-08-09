@@ -247,6 +247,25 @@ class DocumentPipeline:
                         await _ps.commit()
                 except Exception as _pe:
                     logger.warning("doc_pages creation failed (non-critical): %s", _pe)
+
+                # S#174: Upload page images to MinIO for document_pages.image_key
+                try:
+                    from app.db.minio import upload_file
+                    import io as _io
+                    async with async_session_factory() as _up_session:
+                        for _pi, _page_path in enumerate(ctx.page_images, 1):
+                            _obj_key = f"doc_{ctx.doc_id}_page_{_pi}.png"
+                            with open(_page_path, "rb") as _f:
+                                _data = _f.read()
+                                upload_file(_obj_key, _io.BytesIO(_data), len(_data), "image/png")
+                            await _up_session.execute(
+                                text("UPDATE document_pages SET image_key = :key WHERE document_id = :did AND page_number = :pn"),
+                                {"key": _obj_key, "did": ctx.doc_id, "pn": _pi},
+                            )
+                        await _up_session.commit()
+                    logger.info(f"Uploaded {ctx.total_pages} page images to MinIO for doc {ctx.doc_id}")
+                except Exception as _up_err:
+                    logger.warning(f"Page image upload failed (non-fatal): {_up_err}")
         else:
             ext = (
                 file_ext
