@@ -30,6 +30,7 @@ class QuestionRepository:
         question_type: str | None = None,
         passage_text: str | None = None,
         sub_questions: list | None = None,
+        ocr_snapshot_id: int | None = None,
     ) -> Question:
         """Create a new question record."""
         question = Question(
@@ -43,6 +44,7 @@ class QuestionRepository:
             question_type=question_type,
             passage_text=passage_text,
             sub_questions=sub_questions,
+            ocr_snapshot_id=ocr_snapshot_id,
         )
         self.session.add(question)
         await self.session.flush()

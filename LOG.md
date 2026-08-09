@@ -12454,3 +12454,292 @@ cd backend
 - 完整 live pytest：`1345 passed / 5 skipped`。
 - 新增/相关单测：`74 passed`。
 - Step 4-5 后续单独处理。
+
+---
+
+## Session #171 — 2026-08-08: 管线收敛方向确立（5 阶段计划）
+
+### 背景
+
+数学教师版 PDF 上传验证暴露了多个问题：
+
+1. **QD JSON 解析失败**：`Invalid \escape` at char 1432，回退到 V3 text-mode
+2. **V3 回退无 L2 标注**：`answer_lines`/`explanation_lines` 全部为 null
+3. **配图错误关联**：Q8/Q14/Q20 错误关联第一页整页 JPG
+4. **内容提取问题**：Q4 绝对值缺失、Q6 分段函数格式、Q11 公式不完整、Q19 表格可读性差、Q17 茎叶图损坏
+5. **监控页 500**：`/api/documents/monitor/latest` 端点报错
+6. **重复上传产生两份试卷**：同一 PDF 上传两次产生两个 document
+
+### 第一性原理分析
+
+**用户核心设想**：
+
+```
+OCR markdown（原文，不变）
+    ↓
+LLM 只读、只标注（元数据：题号、题型、位置、年份、学校...）
+    ↓
+代码按标注从原文切出
+    ↓
+前端按元数据展示
+```
+
+**LLM 的职责**：语义理解 + 元数据标注
+**LLM 的定位**：给粗定位，代码做精确锚点校正
+
+**当前实现的问题**：试图让 LLM 做太多（抄写内容、精确行号），导致 LaTeX 转义崩溃、行号不准、需要大量防御性代码。
+
+### 历史教训回顾
+
+| Session | 问题 | 解决方案 | 后续问题 |
+|---------|------|----------|----------|
+| #36 | LaTeX 转义崩溃 | 正则修复 | `\frac`/`\times` 无法修复 |
+| #94 | JSON 不合法 | `response_format` | LaTeX 被静默损毁 |
+| #162 | 设计 Annotation Paradigm | LLM 只输出行号 | 行号不准 |
+| #167 | 实施 Annotation Paradigm | 单次 LLM 调用 | QD 失败回退 V3 |
+| #170 | L2 回写 solutions | 防御性清理 | Prompt 仍有 LaTeX |
+
+**核心教训**：
+- 正则修复是治标不治本
+- `response_format` 只是让 JSON 合法，但 LaTeX 内容仍被静默损毁
+- Annotation Paradigm 是正确方向，但实现需要简化
+- LLM 行号有 ±1 偏移，需要代码校正
+
+### 5 阶段收敛计划
+
+| 阶段 | 目标 | 核心动作 |
+|------|------|----------|
+| **1** | 元数据标注主链路跑通 | 修 Prompt + 锚点校正 + `_clean_json` 防御 |
+| **2** | OCR markdown 成为唯一来源 | 题库页优先显示 OCR 原文切片 |
+| **3** | 砍掉不必要复杂度 | V3 降级为调试工具，正则只作兜底 |
+| **4** | 单独处理 OCR 源数据缺陷 | Q17/Q19 从 PDF 页面恢复 |
+| **5** | 修图片关联 | 有真实图才配图，没有不配 |
+
+### 第一阶段具体步骤
+
+1. **修改 `_QD_SIMPLE_ANNOTATION_PROMPT`**
+   - 只输出：题号、题型、题干位置、选项位置、答案位置、详解位置、元数据
+   - 不再让 LLM 输出题目内容
+   - 选择题 answer 只允许 A/B/C/D 或 ABD
+   - 其他题型优先让 answer 为 null；如果 answer_lines 缺失、越界、指向 HTML 表或切出内容明显错误，允许用 LLM answer 兜底
+
+2. **代码侧做"锚点校正"**
+   - LLM 给的位置只作为粗定位
+   - 代码自动吸附到最近的题号、答案、详解标记
+   - 校验后把校正过的行号写入 `question_annotations`
+
+3. **`_clean_json` 防御加固**
+   - 不让 LaTeX 进 JSON 是主修复
+   - JSON 修复器只处理 LLM 偶尔违规的情况
+
+### 验证方式
+
+每一步都拿同一份数学教师版 PDF 重新跑：
+- QD 是否成功，不再回退 V3
+- `question_annotations` 是否生成
+- 答案/详解是否来自 OCR 原文
+- Q8/Q14/Q20 是否不再乱配第一页
+- 题库页、L1+L2 页、监控页是否正常
+- 后端常规测试和完整测试是否通过
+
+### 关键决策
+
+1. **不是继续打补丁**，而是分阶段把系统收敛到"OCR 原文 → LLM 元数据标注 → 代码切取 → 前端展示"
+2. **V3 从"默认回退"降级为"人工调试工具"**
+3. **交叉验证简化**：只检查题号是否连续、数量是否合理，不再让第二个 LLM 重新提取内容
+4. **OCR 源数据缺陷（Q17/Q19）独立处理**，不阻塞主链路简化
+5. **行号优先，LLM answer 兜底**：非选择题优先让 answer 为 null；answer_lines 无法切出有效答案时，允许用 LLM answer 兜底
+6. **L2 行号落库前必须校正**：校正后的行号必须写回 question_annotations，前端后续按该行号切原文，避免 LLM 行号 ±1 偏移被固化到数据库
+
+---
+
+## Session #172 — 2026-08-08: 管线收敛 Phase 1 实施 + 富化稳定性修复
+
+**版本**: 1.59.0
+
+**背景**: S#171 确立 5 阶段收敛计划后，用户上传数学教师版 PDF 验证，发现多个问题：
+- Q1-Q10 选择题选项前多 "A"（前端 `String.fromCharCode` 自动加前缀 + L2 未切分）
+- Q11-Q21 非选择题无 solutions（答案前缀 `N.【答案】` 未剥离 → `_validate_llm_answer` 拒绝）
+- Q12/Q19 HTML `<img>`/`<html><body>` 残留（L2 渲染未走 `_clean_text_for_db`）
+- Q14/Q20 整页 JPG 误配（`_mentions_figure` 正则过宽）
+- 富化 `_solve_one()` 在已有 solution 时仍触发无效 LLM 调用
+
+### 改动一览
+
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| `annotation_service.py` | `_clean_rendered_field()` | L2 渲染复用 L1 `_clean_text_for_db` + `<html><body>` 清理 + 答案 `N.【答案】` 前缀剥离 |
+| `annotation_service.py` | `_split_options_from_text()` | 按 `A./B./C./D.` 正则切分 options，前端不再重复加前缀 |
+| `annotation_service.py` | `_render()` | 全字段走 `_clean_rendered_field`，options 走 `_split_options_from_text` |
+| `async_document.py` | `_save_annotated_questions()` | 答案前缀剥离（`N.【答案】` / `【答案】`），mirrors L2 逻辑 |
+| `async_document.py` | `_clean_text_for_db()` | 新增 `<html><body>` 标签清理（L1 路径） |
+| `async_document.py` | `_mentions_figure` 正则 | 收窄为 `如图\|如图所示\|见图\|茎叶图\|直方图\|图象如` |
+| `async_document.py` | 整页截图 description | `page_context` 区分于精确图 `Figure for Q{N}` |
+| `async_pipeline.py` | `_solve_one()` fallback | `skipped` + `existing solution` 视为成功，不再触发 LLM |
+| `async_pipeline.py` | DeepSeek review 超时 | 90s 硬超时，超时/异常 fallback 到 Stage 1 草稿 + `_no_review` 标记 |
+| `async_pipeline.py` | `_cleanup_stale_processing_tasks()` | 启动时扫描 `processing` 超 600s 的 Redis 任务，标记为 failed |
+
+### 新增测试（17 个）
+
+| 测试文件 | 类 | 测试数 | 覆盖 |
+|----------|-----|:---:|------|
+| `test_question_driven_extractor.py` | `TestSplitOptionsFromText` | 5 | 选项切分：单行/多行/中文标记/空/无选项 |
+| `test_question_driven_extractor.py` | `TestCleanRenderedField` | 5 | L2 清洗：img→markdown/div清理/html+body清理/答案前缀/空输入 |
+| `test_question_driven_extractor.py` | `TestAnswerPrefixStripping` | 3 | 答案前缀：`11.【答案】B`→`B`、`【答案】 3/4`→`3/4` |
+| `test_question_driven_extractor.py` | `TestMentionsFigureRegex` | 4 | 图象正则：如图/见图/茎叶图/直方图/图象如 |
+| `test_question_annotation_repository.py` | (已有) | 1 | 更新断言：options 不再含 A./B. 前缀 |
+| `test_solve_one_fallback.py` | `TestSolveOneFallback` | 3 | fallback 逻辑：existing→不调LLM/rejected→调LLM/ok→不调LLM |
+| `test_solve_one_fallback.py` | `TestCleanupStaleProcessingTasks` | 4 | stale 清理：700s→failed/100s→不动/completed→不动/单调时钟验证 |
+
+### E2E 验证结果（数学教师版 PDF，3 轮上传）
+
+**第一轮**（S#172 代码改动前基线）：
+- Q1-Q10 有 solutions，Q11-Q21 无 solutions（答案前缀污染）
+- Q12 HTML `<img>` 残留，Q19 `<html><body>` 残留
+- Q14/Q20 整页 JPG 误配
+
+**第二轮**（S#172 代码改动后，未重启）：
+- 21/21 solutions ✅（答案前缀剥离生效）
+- Q12 L2 显示 Markdown 图片 ✅
+- Q19 `<html><body>` 仍存在 ⚠️（只在 L2 层修了，L1 未改）
+
+**第三轮**（重启后端 + P0/P1/P2 全部修复）：
+- 21/21 solutions ✅
+- 21/21 explanations ✅
+- 0 无效 LLM 调用 ✅（P0 fallback 修复）
+- DeepSeek review 90s 超时 ✅（P1）
+- Redis stale 任务 0 ✅（P2 启动兜底）
+- Q8/Q17 仍为 page_context（P3 Phase 4/5 待做）
+
+### 剩余问题
+
+| 优先级 | 问题 | 说明 |
+|--------|------|------|
+| P3 | Q8/Q17 精确图恢复 | 需从 PDF 页面坐标或视觉模型裁剪 |
+| P3 | Q4 绝对值符号缺失 | OCR 丢失 `\|` 符号 |
+| P3 | Q6/Q20 分段函数横向排列 | LaTeX `\begin{cases}` 被 OCR 拆成顺序文本 |
+| P3 | Q17 茎叶图 LaTeX 残缺 | OCR 无法正确识别茎叶图结构 |
+| P3 | Q13 详解缺配图 | 向量图在 OCR L233 但未关联到 Q13（`_mentions_figure` 只检查 stem） |
+| P3 | Q19 `<html><body>` L1 路径 | 已修 `_clean_text_for_db`，需重新上传验证 |
+
+---
+
+## Session #173 — 2026-08-09: 架构分析 + 图片元数据断链定位
+
+**版本**: 1.60.0
+
+**核心洞察**（用户第一性原理分析）：
+
+> 信息不是不存在，是断链了。
+> - C4 figure_anchors 已产出图片、bbox、page、minio_key，但没有传给 LLM 标注入库路径。
+> - OCR JSON 里的 image block 也没有被持久化为结构化元数据。
+> - markdown 里只有 Q12/Q13 的 `<img>`，所以只有这两题能自动关联。
+
+**三层信息源**：
+
+| 层 | 内容 | 当前状态 |
+|---|------|---------|
+| PDF 页面 | 最终事实来源 | ✅ 可渲染 |
+| OCR JSON | block、bbox、阅读顺序、图片引用、表格结构 | ⚠️ 未持久化为结构化元数据 |
+| OCR markdown | 从 JSON 派生的有损视图，适合 LLM 阅读 | ⚠️ 被当作唯一数据源 |
+
+**断链点**：
+1. C4 `figure_anchors`（bbox + page + minio_key）→ **没有传给 `_save_annotated_questions()`**
+2. OCR JSON image block → **没有持久化到 `question_images`**
+3. `question_images` 缺少关键字段：`page_no`、`bbox`、`ocr_line_index`、`placement`、`source`
+
+### 已实施的临时修复
+
+| 题号 | 修复 | 验证结果 |
+|------|------|---------|
+| Q6 | `question_recoveries` 写入 approved recovery + `service.py` 加 recovery overlay | ✅ 前端显示 `\begin{cases}` 正确格式 |
+| Q8 | 手动 PDF 裁剪（page 2, y=30-320）→ MinIO + `question_images` | ⚠️ 范围过大，包含选项和 Q9 |
+| Q13 | OCR 行号扫描（answer→explanation+10 gap）自动关联图片 | ✅ `Figure for Q13` 已关联 |
+| Q17 | 手动 PDF 裁剪（page 3, y=500-750）→ MinIO + `question_images` | ⚠️ 范围过大，包含完整题干 |
+| Q19 | `_clean_text_for_db` + `_clean_rendered_field` 清理 `<html><body>` | ✅ L1 content 已清除 |
+
+### 待实施：目标架构
+
+**1. 权威落库层**
+- 保存 OCR JSON blocks
+- 保存 C4 figure_anchors
+- 保存 PDF 页面图和恢复图
+
+**2. 标注层**
+- markdown 只给 LLM 读
+- LLM 输出行号元数据，代码从原文精确切题
+
+**3. 渲染层**
+- L1/L2/recovery 统一由同一套渲染逻辑输出
+- 图片按 page/bbox/ocr_line_index/placement 定位，不靠 keyword 猜
+
+### 实施顺序（下个 session 执行）
+
+1. 打通 C4 figure_anchors → 图片落库链路
+2. 扩展 `question_images` 元数据（page_no, bbox, ocr_line_index, placement, source）
+3. 统一 L1/L2/recovery 渲染 + Q13 图片进详解
+4. 修离线工具 JSON 解析，重跑 Q4/Q20
+5. 精裁 Q8/Q17（用 C4 元数据，不重复 VL）
+6. 重新上传验证整份 PDF
+
+### 验收标准
+
+- OCR JSON/C4 已检测到的图，前端按正确位置显示，不需要再跑 VL
+- Q4/Q6/Q20 公式在题库内容页和 L1+L2 页都正确
+- Q13 图片出现在详解正文
+- Q8/Q17 是精确裁剪图，不包含选项或其他题题干
+- 21 题 solution/explanation 完整，任务无卡死
+
+---
+
+## Session #173 — 2026-08-09: 图片元数据断链修复 + 端到端验证
+
+### 背景
+
+用户第一性原理分析：图片信息不是不存在，而是断链了。C4 figure_anchors 已产出完整元数据，但没有传给入库路径。确立三层信息源架构：权威落库层（PDF+OCR JSON+C4）、标注层（markdown→LLM→行号）、渲染层（L1/L2/recovery 统一）。
+
+### 数据模型变更
+
+- **Migration 019**: `question_recoveries` 表（recovery overlay）
+- **Migration 020**: `document_ocr_snapshots` 表（OCR 权威快照）+ `question_images` 扩展字段（page_no, bbox, placement, source, figure_id, anchor_type, label, figure_type）+ `document_pages` 扩展（snapshot_id, width, height）+ `question_annotations` 扩展（snapshot_id, markdown_hash）+ `questions` 扩展（ocr_snapshot_id）
+
+### 代码改动
+
+**核心管线打通**：
+- `_document_pipeline.py`: `PipelineContext` 新增 `figure_anchors`, `ocr_snapshot_id`, `qno_page_map`；创建 `DocumentOcrSnapshot` 记录（raw_json + figure_anchors + markdown + hash）；构建 `{qno: page}` 映射传入 `_save_annotated_questions`
+- `async_document.py`: `_save_annotated_questions()` 接收 `figure_anchors`, `ocr_snapshot_id`, `qno_page_map`；C4 图片关联逻辑：按 page 匹配 + 无 minio_key 时从页面图裁剪上传；新增 `_crop_figure_from_page()` 支持 image_bbox 像素坐标和 normalized_bbox 0-1000
+- `pipeline.py`: PaddleOCR 路径 FigureAnchor 将 `block_bbox` 存入 `image_bbox`（像素坐标），`normalized_bbox` 留空
+
+**bbox 坐标系修复**：
+- 确认 PaddleOCR `block_bbox` 是 `[x1, y1, x2, y2]` 像素坐标（非 0-1000 归一化）
+- `_crop_figure_from_page()` 优先使用 `image_bbox`（像素），其次 `normalized_bbox`（归一化转换）
+
+**Recovery overlay**：
+- `service.py`: `get_question_with_relations()` 新增 approved recovery 覆盖
+
+**Bug 修复**：
+- `_document_pipeline.py` 缺少 `import json` 导致 snapshot 创建异常被静默捕获
+
+### 测试
+
+- 新增 `test_crop_figure_from_page.py`: 9 个单测（image_bbox/normalized_bbox/优先级/边界条件）
+- 新增 `test_c4_figure_association.py`: 6 个行为测试（minio_key 存在/缺失/page 过滤/placement 推断）
+- 常规测试: 312 passed, 1 failed (预存隔离问题)
+
+### 端到端验证（真实 PDF）
+
+- **PDF**: `2026北京二中高一（上）期末数学（教师版）.pdf`（13 页，含图）
+- **结果**:
+  - `document_ocr_snapshots.raw_json`: 13 pages × 24 blocks/page，真实像素 bbox
+  - `figure_anchors`: `image_bbox=[108, 88, 345, 233]`（Page 3），`minio_key` 已填充
+  - `question_images.bbox`: `[108, 88, 345, 233]` 像素坐标（非零值）
+  - `question_images.source`: `c4_figure`
+  - MinIO: `paddleocr_0_3_figure.png` 259×159 已上传
+
+### 待完成
+
+1. 页级匹配 → 语义匹配（Q15-Q21 共享同图 → 只有关联题才标 stem/explanation）
+2. PP-StructureV3 `<img>` 图补元数据（Q13/Q14）
+3. 前端按 placement 渲染（stem/explanation/page_context）
+4. document_pages.image_key（页面图上传 MinIO）
+5. Q4/Q20 离线恢复、Q8/Q17 精裁

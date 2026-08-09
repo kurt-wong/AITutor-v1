@@ -1,11 +1,13 @@
 """Tests for question-driven extraction helper functions."""
 
+import json
 import pytest
 
 from app.domains.question._question_driven_extractor import (
     _QD_SIMPLE_ANNOTATION_PROMPT,
     _build_qd_prompt,
     _clean_choice_answer_lines,
+    _clean_json,
     _dedupe_ranges,
     _extract_multiple_ranges,
     _find_answer_section_start,
@@ -184,3 +186,213 @@ class TestSubjectPromptExtras:
     def test_unknown_subject_keeps_base_prompt(self):
         prompt = _build_qd_prompt(_QD_SIMPLE_ANNOTATION_PROMPT, "unknown")
         assert prompt == _QD_SIMPLE_ANNOTATION_PROMPT
+
+
+class TestCleanJson:
+    """S#171: Tests for _clean_json LaTeX handling."""
+
+    def test_single_backslash_latex_not_in(self):
+        """Single backslash \\in should be doubled."""
+        raw = '{"answer": "x \\in A"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert "x \\in A" in parsed["answer"]
+
+    def test_single_backslash_latex_not_in_command(self):
+        """\\not\\in with single backslash should be doubled."""
+        raw = '{"answer": "x \\not\\in A"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert "x \\not\\in A" in parsed["answer"]
+
+    def test_double_backslash_latex(self):
+        """Already-escaped \\\\not\\\\in should be preserved."""
+        raw = '{"answer": "x \\\\not\\\\in A"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert "x \\not\\in A" in parsed["answer"]
+
+    def test_latex_nu_not_confused_with_newline(self):
+        """\\nu (LaTeX) should not be confused with \\n (newline)."""
+        raw = '{"answer": "\\nu"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert parsed["answer"] == "\\nu"
+
+    def test_latex_nabla(self):
+        """\\nabla (LaTeX) should be doubled."""
+        raw = '{"answer": "\\nabla f"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert parsed["answer"] == "\\nabla f"
+
+    def test_real_newline_preserved(self):
+        """Real \\n (newline) in JSON string should be preserved.
+
+        Key: \\n must be followed by non-letter (like quote) to be JSON newline.
+        If followed by letter (like \\not), it's LaTeX and should be doubled.
+        """
+        # In JSON: "a\n" means the string ends with newline
+        raw = r'{"answer": "a\n"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert parsed["answer"] == "a\n"
+
+    def test_real_tab_preserved(self):
+        """Real \\t (tab) in JSON string should be preserved.
+
+        Key: \\t must be followed by non-letter to be JSON tab.
+        """
+        # In JSON: "a\t" means the string ends with tab
+        raw = r'{"answer": "a\t"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert parsed["answer"] == "a\t"
+
+    def test_unicode_escape_preserved(self):
+        """\\uXXXX should be preserved."""
+        raw = '{"answer": "\\u0041"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert parsed["answer"] == "A"
+
+    def test_latex_frac(self):
+        """\\frac should be doubled."""
+        raw = '{"answer": "\\frac{1}{2}"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert parsed["answer"] == "\\frac{1}{2}"
+
+    def test_latex_sqrt(self):
+        """\\sqrt should be doubled."""
+        raw = '{"answer": "\\sqrt{x}"}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert parsed["answer"] == "\\sqrt{x}"
+
+    def test_json_with_questions_array(self):
+        """Full QD-style JSON with LaTeX should parse."""
+        raw = '{"questions": [{"qno": 1, "type": "choice", "answer": "A", "stem_lines": [10, 15]}]}'
+        cleaned = _clean_json(raw)
+        parsed = json.loads(cleaned)
+        assert len(parsed["questions"]) == 1
+        assert parsed["questions"][0]["answer"] == "A"
+
+
+# ── S#172: Annotation service rendering tests ──────────────────────
+
+import re
+
+from app.domains.question.annotation_service import (
+    _clean_rendered_field,
+    _split_options_from_text,
+)
+
+
+class TestSplitOptionsFromText:
+    """Test A./B./C./D. option splitting for L2 rendering."""
+
+    def test_single_line_ABCD(self):
+        """All options on one line should split into 4."""
+        text = r"A.$\left\{-2,-1,2\right\}$ B.$\left\{-1,0,1,2\right\}$ C.$\left\{-2\right\}$ D.$\left\{0,1\right\}$"
+        result = _split_options_from_text(text)
+        assert len(result) == 4
+        assert r"\left\{-2,-1,2\right\}" in result[0]
+
+    def test_multi_line_options(self):
+        """Each option on its own line."""
+        text = "A. x > 0\nB. x < 0\nC. x = 0\nD. x >= 0"
+        result = _split_options_from_text(text)
+        assert len(result) == 4
+        assert result[0] == "x > 0"
+        assert result[3] == "x >= 0"
+
+    def test_chinese_option_markers(self):
+        """Options with Chinese period marker."""
+        text = "A、充分不必要条件\nB、必要不充分条件\nC、充要条件\nD、既不充分也不必要条件"
+        result = _split_options_from_text(text)
+        assert len(result) == 4
+        assert result[0] == "充分不必要条件"
+
+    def test_empty_input(self):
+        assert _split_options_from_text("") == []
+        assert _split_options_from_text(None) == []
+
+    def test_single_option_no_split(self):
+        """Text without A./B./C./D. markers returns as-is."""
+        text = "Just some text"
+        result = _split_options_from_text(text)
+        assert len(result) == 1
+        assert result[0] == "Just some text"
+
+
+class TestCleanRenderedField:
+    """Test that L2 rendering applies L1 cleaning rules."""
+
+    def test_strips_html_img_tag(self):
+        """<img> tags should be converted to markdown."""
+        text = '<div style="text-align: center;"><img src="/api/documents/images/test.jpg" alt="Image" /></div>'
+        result = _clean_rendered_field(text, "stem")
+        assert "<img" not in result
+        assert "<div" not in result
+
+    def test_strips_div_wrappers(self):
+        """<div> wrappers should be removed by _clean_text_for_db."""
+        text = '<div style="text-align: center;">content</div>'
+        result = _clean_rendered_field(text, "stem")
+        assert "<div" not in result
+        assert "content" in result
+
+    def test_strips_html_body_tags(self):
+        """<html><body> wrappers from OCR should be removed."""
+        text = '<html><body><p>some content</p></body></html>'
+        result = _clean_rendered_field(text, "stem")
+        assert "<html" not in result.lower()
+        assert "<body" not in result.lower()
+        assert "some content" in result
+
+    def test_strips_answer_prefix(self):
+        """L2 answer field should strip N.【答案】 prefix."""
+        assert _clean_rendered_field("11.【答案】B", "answer") == "B"
+        assert _clean_rendered_field("【答案】 3/4", "answer") == "3/4"
+
+    def test_empty_input(self):
+        assert _clean_rendered_field("", "stem") == ""
+        assert _clean_rendered_field(None, "answer") == ""
+
+
+class TestAnswerPrefixStripping:
+    """Test N.【答案】 prefix stripping regex."""
+
+    def test_strip_numbered_answer_prefix(self):
+        text = "11.【答案】$\\left[-2,0\\right)$"
+        result = re.sub(r'^\d+[.、．]\s*【答案】\s*', '', text.strip())
+        assert result == "$\\left[-2,0\\right)$"
+
+    def test_strip_bare_answer_prefix(self):
+        text = "【答案】$\\left[-2,0\\right)$"
+        result = re.sub(r'^【答案】\s*', '', text.strip())
+        assert result == "$\\left[-2,0\\right)$"
+
+    def test_no_prefix_unchanged(self):
+        text = "$\\left[-2,0\\right)$"
+        result = re.sub(r'^\d+[.、．]\s*【答案】\s*', '', text.strip())
+        assert result == "$\\left[-2,0\\right)$"
+
+
+class TestMentionsFigureRegex:
+    """Test narrowed _mentions_figure regex."""
+
+    def test_matches_ruru_tu(self):
+        assert re.search(r'如图|如图所示|见图|茎叶图|直方图|图象如', "如图所示的函数图象")
+
+    def test_matches_jingye(self):
+        assert re.search(r'如图|如图所示|见图|茎叶图|直方图|图象如', "茎叶图记录了数据")
+
+    def test_no_match_tuxiangshang(self):
+        """'图象上的两点' should NOT match — it's prose, not a figure ref."""
+        assert not re.search(r'如图|如图所示|见图|茎叶图|直方图|图象如', "图象上的相异两点")
+
+    def test_no_match_tuxiangheng(self):
+        """'图象恒在x轴下方' should NOT match."""
+        assert not re.search(r'如图|如图所示|见图|茎叶图|直方图|图象如', "图象恒在x轴下方")

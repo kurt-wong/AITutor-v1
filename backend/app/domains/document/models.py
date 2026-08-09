@@ -3,6 +3,7 @@ Document processing models.
 
 DSD §5: Document Processing Tables
 - documents: uploaded files
+- document_ocr_snapshots: authoritative OCR snapshot per processing run
 - document_pages: page-level extraction metadata
 - ocr_tasks: OCR execution tracking
 - document_processing_logs: pipeline execution logs
@@ -11,6 +12,7 @@ DSD §5: Document Processing Tables
 from datetime import datetime as _datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, IDMixin, TimestampMixin
@@ -41,6 +43,15 @@ class Document(Base, IDMixin, TimestampMixin):
     # downstream extraction.  Persisted for audit, re-processing, and
     # debugging when LLM annotation produces questionable results.
     ocr_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # S#173: Authoritative OCR snapshot (structured blocks + figure anchors
+    # + page image keys).  Markdown remains the LLM annotation input; this
+    # column preserves the machine-readable source of truth for rendering.
+    ocr_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # S#173: FK to the current authoritative OCR snapshot.
+    current_ocr_snapshot_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("document_ocr_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Relationships
     pages: Mapped[list["DocumentPage"]] = relationship(
@@ -53,6 +64,46 @@ class Document(Base, IDMixin, TimestampMixin):
         back_populates="document", cascade="all, delete-orphan"
     )
     questions: Mapped[list["Question"]] = relationship(back_populates="document")
+    ocr_snapshots: Mapped[list["DocumentOcrSnapshot"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan",
+        foreign_keys="[DocumentOcrSnapshot.document_id]",
+    )
+
+
+class DocumentOcrSnapshot(Base, IDMixin, TimestampMixin):
+    """Authoritative OCR snapshot — one row per processing run.
+
+    S#173: Preserves the machine-readable source of truth (structured blocks,
+    C4 figure anchors, page image keys) alongside the lossy markdown view.
+    Enables re-processing, audit, and precise figure association without
+    re-running OCR.
+    """
+
+    __tablename__ = "document_ocr_snapshots"
+
+    document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ocr_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="completed"
+    )
+    # Authoritative structured data
+    raw_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    figure_anchors: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    tables: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Markdown is the LLM input view (lossy, derived from raw_json)
+    markdown_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    markdown_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    page_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Relationships
+    document: Mapped["Document"] = relationship(
+        back_populates="ocr_snapshots",
+        foreign_keys="[DocumentOcrSnapshot.document_id]",
+    )
 
 
 class DocumentPage(Base, IDMixin, TimestampMixin):
@@ -68,6 +119,13 @@ class DocumentPage(Base, IDMixin, TimestampMixin):
     ocr_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending"
     )
+    # S#173: Link page to its OCR snapshot + store dimensions
+    snapshot_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("document_ocr_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Relationships
     document: Mapped["Document"] = relationship(back_populates="pages")

@@ -519,6 +519,14 @@ class AsyncPipeline(_DocumentProcessing):
             recovery_summary.get("explain", 0),
         )
 
+        # ── S#172: Stale task cleanup at startup ──
+        # Mark any "processing" tasks older than 10 minutes as failed.
+        # These are orphaned from crashed/killed workers.
+        try:
+            await self._cleanup_stale_processing_tasks(stale_seconds=600)
+        except Exception as _cleanup_err:
+            logger.warning("Stale task cleanup failed: %s", _cleanup_err)
+
         self._running = True
         num_workers = getattr(settings, "PIPELINE_WORKERS", 4)
         # Session #104: 3-queue allocation (doc + enrich + explain).
@@ -579,6 +587,70 @@ class AsyncPipeline(_DocumentProcessing):
         """
         self._explain_pause.clear()
         logger.info("Explain workers paused (embedding in progress)")
+
+    async def _cleanup_stale_processing_tasks(
+        self, stale_seconds: int = 600
+    ) -> None:
+        """Mark orphaned 'processing' tasks as failed at startup.
+
+        S#172: When the server crashes or is killed, tasks stuck in
+        "processing" state are never resumed.  This method finds them
+        and marks them as failed so the monitoring page is clean.
+
+        Uses the same monotonic clock as task creation
+        (asyncio.get_running_loop().time()) for age comparison.
+        """
+        status_keys = await redis_client.keys("async:task_b:status:*")
+        now = asyncio.get_running_loop().time()
+        cleaned = 0
+
+        for key in status_keys:
+            raw = await redis_client.get(key)
+            if not raw:
+                continue
+            try:
+                status = json.loads(raw)
+            except Exception:
+                continue
+
+            if status.get("state") != "processing":
+                continue
+
+            # created_at is set via asyncio.get_running_loop().time()
+            # (monotonic clock) — must compare with the same clock.
+            created_at_str = status.get("created_at", "")
+            try:
+                created_at = float(created_at_str)
+            except (ValueError, TypeError):
+                continue
+
+            age = now - created_at
+            if age < stale_seconds:
+                continue
+
+            # Mark as failed
+            task_id = key.rsplit(":", 1)[-1]
+            qid = status.get("question_id", "?")
+            status["state"] = "failed"
+            status["error"] = (
+                f"startup_cleanup: stale processing task "
+                f"({int(age)}s old, likely from crashed worker)"
+            )
+            await redis_client.set(key, json.dumps(status))
+
+            # Append cleanup log
+            log_key = f"async:task_b:log:{task_id}"
+            await redis_client.rpush(log_key, json.dumps({
+                "step": "startup_cleanup",
+                "message": f"Marked stale task as failed (Q{qid}, {int(age)}s old)",
+            }))
+            cleaned += 1
+
+        if cleaned:
+            logger.info(
+                "Stale task cleanup: marked %d orphaned processing tasks as failed",
+                cleaned,
+            )
 
     async def resume_explain_workers(self) -> None:
         """Resume explain workers after embedding batch completes."""
@@ -1203,19 +1275,41 @@ class AsyncPipeline(_DocumentProcessing):
             question_id, len(draft_explanation), model_source,
         )
 
-        deepseek_raw = await mcp_client.call_tool("llm_gateway.generate", {
-            "mode": "tutor", "prompt": stage2_prompt,
-        })
-        deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
-            "error": deepseek_raw.get("error", "MCP failure"), "response": "",
-        }
-        final_explanation = deepseek_result.get("response", "")
-        stages_completed.append("deepseek_review")
+        # S#172: Hard timeout for DeepSeek review — prevents indefinite
+        # blocking when DeepSeek is slow/down.  Timeout → use Stage 1 draft.
+        _DEEPSEEK_REVIEW_TIMEOUT = 90  # seconds
+        try:
+            deepseek_raw = await asyncio.wait_for(
+                mcp_client.call_tool("llm_gateway.generate", {
+                    "mode": "tutor", "prompt": stage2_prompt,
+                }),
+                timeout=_DEEPSEEK_REVIEW_TIMEOUT,
+            )
+            deepseek_result = deepseek_raw.get("data", {}) if deepseek_raw.get("success") else {
+                "error": deepseek_raw.get("error", "MCP failure"), "response": "",
+            }
+            final_explanation = deepseek_result.get("response", "")
+            stages_completed.append("deepseek_review")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "DeepSeek review TIMEOUT for Q%d after %ds — using draft",
+                question_id, _DEEPSEEK_REVIEW_TIMEOUT,
+            )
+            deepseek_result = {"error": "timeout", "response": ""}
+            final_explanation = ""
+        except Exception as _ds_err:
+            logger.warning(
+                "DeepSeek review ERROR for Q%d: %s — using draft",
+                question_id, _ds_err,
+            )
+            deepseek_result = {"error": str(_ds_err), "response": ""}
+            final_explanation = ""
 
         if not final_explanation.strip():
+            _fail_reason = deepseek_result.get("error", "empty")
             logger.warning(
                 "DeepSeek review failed for Q%d (%s) — using draft",
-                question_id, deepseek_result.get("error", "empty"),
+                question_id, _fail_reason,
             )
             final_explanation = draft_explanation
             model_source = model_source + "_no_review"
@@ -1420,7 +1514,27 @@ class AsyncPipeline(_DocumentProcessing):
                             sol_result = await self._save_extracted_solution(
                                 sq["id"], existing_answer, existing_explanation,
                             )
-                            return (sol_result.get("status") == "ok", False)
+                            sol_status = sol_result.get("status", "")
+                            # "ok" = newly created; "skipped" with
+                            # "existing solution" = already saved (idempotent).
+                            # Both are success — no LLM fallback needed.
+                            if sol_status == "ok" or (
+                                sol_status == "skipped"
+                                and "existing solution" in sol_result.get("reason", "")
+                            ):
+                                return (True, False)
+                            # S#172: Only fallback when extracted answer was
+                            # genuinely rejected (validation fail, empty, etc.),
+                            # NOT on idempotent skip.
+                            logger.info(
+                                "Extracted answer failed for Q%d (reason=%s), "
+                                "falling back to LLM solve",
+                                sq["id"], sol_result.get("reason", "unknown"),
+                            )
+                            sol_result = await self._step_solve_question(
+                                sq["id"], sq["content"]
+                            )
+                            return (sol_result.get("status") == "ok", True)
                         else:
                             sol_result = await self._step_solve_question(
                                 sq["id"], sq["content"]

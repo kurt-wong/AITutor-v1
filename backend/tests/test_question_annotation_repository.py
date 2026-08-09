@@ -73,6 +73,8 @@ def test_render_annotation_from_lines():
     rendered = service._render(lines, annotation)
 
     assert rendered["stem"] == "第一行题干\n第二行题干"
-    assert rendered["options"] == ["A. 甲", "B. 乙"]
+    # S#172: Options no longer include A./B. prefix — frontend adds them
+    # via String.fromCharCode(65 + index) in QuestionEditPage.
+    assert rendered["options"] == ["甲", "乙"]
     assert rendered["answer"] == "答案是B"
     assert rendered["explanation"] == ""

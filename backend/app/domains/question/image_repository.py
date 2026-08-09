@@ -24,13 +24,33 @@ class QuestionImageRepository:
         image_key: str,
         image_type: str,
         description: str | None = None,
+        page_no: int | None = None,
+        bbox: list | None = None,
+        placement: str | None = None,
+        source: str | None = None,
+        figure_id: str | None = None,
+        anchor_type: str | None = None,
+        label: str | None = None,
+        figure_type: str | None = None,
     ) -> QuestionImage:
-        """Create a question image association record."""
+        """Create a question image association record.
+
+        S#173: All optional metadata comes from the authoritative OCR layer
+        (page/bbox/placement/source/figure anchor identity).
+        """
         img = QuestionImage(
             question_id=question_id,
             image_key=image_key,
             image_type=image_type,
             description=description,
+            page_no=page_no,
+            bbox=bbox,
+            placement=placement,
+            source=source,
+            figure_id=figure_id,
+            anchor_type=anchor_type,
+            label=label,
+            figure_type=figure_type,
         )
         self.session.add(img)
         await self.session.flush()

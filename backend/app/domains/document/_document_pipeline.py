@@ -8,6 +8,7 @@ Each pipeline phase is an independent method for readability and testability.
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +54,14 @@ class PipelineContext:
     # Extraction
     merged_blocks: list[dict] = field(default_factory=list)
     llm_full_extraction_ok: bool = False
+    # S#173: C4 figure anchors from parallel extraction pipeline.
+    # Passed to _save_annotated_questions() for precise image association.
+    figure_anchors: list = field(default_factory=list)
+    # S#173: OCR snapshot ID for traceability.
+    ocr_snapshot_id: int | None = None
+    # S#173: {question_number: page_number} from structurer blocks,
+    # for C4 figure matching when LLM path lacks page field.
+    qno_page_map: dict = field(default_factory=dict)
 
     # Store
     saved_questions: list[dict] = field(default_factory=list)
@@ -271,6 +280,7 @@ class DocumentPipeline:
         )
         (
             merged_blocks, paddleocr_markdown, paddleocr_job_id, paddleocr_result,
+            figure_anchors,
         ) = await self._service._step_parallel_extract(
             ctx.task_id, ctx.data, pages_to_process, subject=ctx.subject_code,
         )
@@ -279,6 +289,20 @@ class DocumentPipeline:
         )
         paddleocr_markdown = _normalize_qno_newlines(paddleocr_markdown or "")
         ctx.merged_blocks = merged_blocks
+        ctx.figure_anchors = figure_anchors or []
+        # S#173: Build {qno: page} map from structurer blocks for C4 matching.
+        # LLM-normalized questions don't have 'page' field, so we derive it
+        # from the structurer output which does track source_page.
+        _qno_page_map: dict[int, int] = {}
+        for _blk in (merged_blocks or []):
+            try:
+                _bqno = int(_blk.get("question_no", 0))
+                _bpage = _blk.get("page", 0)
+                if _bqno and _bpage:
+                    _qno_page_map[_bqno] = _bpage
+            except (ValueError, TypeError):
+                pass
+        ctx.qno_page_map = _qno_page_map
         ctx.steps_completed.append("extract")
         await _get_doc_processing()._log_to_db(
             ctx.doc_id, "ocr_extract",
@@ -314,6 +338,123 @@ class DocumentPipeline:
                 )
             except Exception as _mde:
                 logger.warning("Failed to save OCR Markdown for doc %d: %s", ctx.doc_id, _mde)
+
+            # ── S#173: Create OCR snapshot for traceability ──
+            logger.info("S#173: Starting OCR snapshot creation for doc %d", ctx.doc_id)
+            try:
+                import hashlib
+                _md_hash = hashlib.sha256(paddleocr_markdown.encode()).hexdigest()[:16]
+                # Serialize figure_anchors to JSONB-compatible list
+                _fa_json = []
+                for _fa in (figure_anchors or []):
+                    _fa_json.append({
+                        "figure_id": getattr(_fa, "figure_id", ""),
+                        "normalized_bbox": getattr(_fa, "normalized_bbox", []),
+                        "image_bbox": getattr(_fa, "image_bbox", []),
+                        "minio_key": getattr(_fa, "minio_key", ""),
+                        "anchor_type": str(getattr(_fa, "anchor_type", "")),
+                        "label": getattr(_fa, "label", None),
+                        "figure_type": getattr(_fa, "figure_type", "other"),
+                        "description": getattr(_fa, "description", ""),
+                        "page": getattr(_fa, "page", 1),
+                    })
+                # S#173: Serialize PaddleOCRResult (OCR JSON) to raw_json.
+                # NOT merged_blocks — those are structured question blocks,
+                # not the raw OCR output with blocks, bbox, reading order.
+                _ocr_json = None
+                if paddleocr_result is not None:
+                    try:
+                        from app.domains.document.parallel_extraction.types import (
+                            PaddleOCRResult,
+                        )
+                        if isinstance(paddleocr_result, PaddleOCRResult):
+                            _pages_json = []
+                            for _p in paddleocr_result.pages:
+                                _blocks_json = []
+                                for _b in _p.blocks:
+                                    _blocks_json.append({
+                                        "block_label": _b.block_label,
+                                        "block_content": _b.block_content,
+                                        "block_bbox": _b.block_bbox,
+                                        "block_order": _b.block_order,
+                                        "block_id": _b.block_id,
+                                        "group_id": _b.group_id,
+                                    })
+                                _pages_json.append({
+                                    "page_num": _p.page_num,
+                                    "width": _p.width,
+                                    "height": _p.height,
+                                    "blocks": _blocks_json,
+                                })
+                            _ocr_json = {
+                                "job_id": paddleocr_result.job_id,
+                                "provider": paddleocr_result.provider,
+                                "page_count": len(paddleocr_result.pages),
+                                "pages": _pages_json,
+                            }
+                        else:
+                            # Fallback: try as dict/JSON-serializable
+                            _ocr_json = paddleocr_result
+                    except Exception as _ser_exc:
+                        logger.warning("Failed to serialize OCR result: %s", _ser_exc)
+                async with async_session_factory() as _snap_session:
+                    _snap_result = await _snap_session.execute(
+                        text("""
+                            INSERT INTO document_ocr_snapshots
+                                (document_id, provider, model_name, status,
+                                 raw_json, figure_anchors, markdown_text,
+                                 markdown_hash, page_count)
+                            VALUES
+                                (:doc_id, 'pp_structure_v3', 'pp-structure-v3',
+                                 'completed', :raw_json, :figure_anchors,
+                                 :markdown_text, :markdown_hash, :page_count)
+                            RETURNING id
+                        """),
+                        {
+                            "doc_id": ctx.doc_id,
+                            "raw_json": json.dumps(_ocr_json) if _ocr_json else None,
+                            "figure_anchors": json.dumps(_fa_json) if _fa_json else None,
+                            "markdown_text": paddleocr_markdown,
+                            "markdown_hash": _md_hash,
+                            "page_count": len(ctx.page_images),
+                        },
+                    )
+                    _snap_row = _snap_result.fetchone()
+                    if _snap_row:
+                        ctx.ocr_snapshot_id = _snap_row[0]
+                        # Link document to current snapshot
+                        await _snap_session.execute(
+                            text("UPDATE documents SET current_ocr_snapshot_id = :sid WHERE id = :did"),
+                            {"sid": ctx.ocr_snapshot_id, "did": ctx.doc_id},
+                        )
+                        # S#173: Link document_pages to this snapshot
+                        await _snap_session.execute(
+                            text("UPDATE document_pages SET snapshot_id = :sid WHERE document_id = :did"),
+                            {"sid": ctx.ocr_snapshot_id, "did": ctx.doc_id},
+                        )
+                        # S#173: Populate width/height from OCR pages if available
+                        if _ocr_json and _ocr_json.get("pages"):
+                            for _pg in _ocr_json["pages"]:
+                                _pg_num = _pg.get("page_num")
+                                _pg_w = _pg.get("width")
+                                _pg_h = _pg.get("height")
+                                if _pg_num and (_pg_w or _pg_h):
+                                    await _snap_session.execute(
+                                        text("""
+                                            UPDATE document_pages
+                                            SET width = :w, height = :h
+                                            WHERE document_id = :did AND page_number = :pn
+                                        """),
+                                        {"w": _pg_w, "h": _pg_h, "did": ctx.doc_id, "pn": _pg_num},
+                                    )
+                        await _snap_session.commit()
+                        logger.info(
+                            "OCR snapshot created: id=%d, hash=%s, figures=%d, ocr_pages=%d",
+                            ctx.ocr_snapshot_id, _md_hash, len(_fa_json),
+                            len(_ocr_json.get("pages", [])) if _ocr_json else 0,
+                        )
+            except Exception as _snap_exc:
+                logger.warning("Failed to create OCR snapshot for doc %d: %s", ctx.doc_id, _snap_exc)
         elif ctx.doc_id and not paddleocr_markdown:
             await _get_doc_processing()._log_to_db(
                 ctx.doc_id, "ocr_markdown",
@@ -347,6 +488,9 @@ class DocumentPipeline:
                         pages_to_process=pages_to_process,
                         paddleocr_job_id=paddleocr_job_id,
                         ocr_markdown=paddleocr_markdown,
+                        figure_anchors=ctx.figure_anchors,
+                        ocr_snapshot_id=ctx.ocr_snapshot_id,
+                        qno_page_map=ctx.qno_page_map,
                     )
                     if saved:
                         ctx.saved_questions = saved

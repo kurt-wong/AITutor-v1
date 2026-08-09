@@ -51,6 +51,11 @@ class Question(Base, IDMixin, TimestampMixin):
         sa.JSON().with_variant(sa.JSON, "postgresql"),
         nullable=True,
     )
+    # S#173: Traceability back to the OCR snapshot that produced this question.
+    ocr_snapshot_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("document_ocr_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Relationships
     document: Mapped["Document | None"] = relationship(back_populates="questions")
@@ -75,6 +80,9 @@ class Question(Base, IDMixin, TimestampMixin):
     )
     annotations: Mapped[list["QuestionAnnotation"]] = relationship(
         back_populates="question", cascade="all, delete-orphan"
+    )
+    recovery: Mapped["QuestionRecovery | None"] = relationship(
+        back_populates="question", cascade="all, delete-orphan", uselist=False
     )
 
 
@@ -102,6 +110,12 @@ class QuestionAnnotation(Base, IDMixin, TimestampMixin):
     explanation_lines: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     passage_lines: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     model_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # S#173: Bind annotation to specific OCR snapshot + markdown version
+    snapshot_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("document_ocr_snapshots.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    markdown_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     question: Mapped["Question"] = relationship(back_populates="annotations")
 
@@ -122,6 +136,17 @@ class QuestionImage(Base, IDMixin, TimestampMixin):
         String(50), nullable=False
     )  # original, enhanced, structured
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # S#173: Precise source metadata for figure rendering.  C4/PaddleOCR
+    # produce page + bbox + placement information that the markdown path
+    # loses; persisting it lets the frontend render images in context.
+    page_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bbox: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    placement: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    figure_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    anchor_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    figure_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     # Relationships
     question: Mapped["Question"] = relationship(back_populates="images")
@@ -145,3 +170,31 @@ class QuestionKnowledge(Base, IDMixin, TimestampMixin):
     knowledge_node: Mapped["KnowledgeNode"] = relationship(
         back_populates="question_knowledge"
     )
+
+
+class QuestionRecovery(Base, IDMixin, TimestampMixin):
+    """Offline recovery overlay for OCR/PDF source data defects.
+
+    S#172: Stores visual-model-recovered content that overrides L1/L2
+    rendering when present.  Does NOT modify the immutable OCR markdown.
+    Status workflow: pending_review → approved → applied (or rejected).
+    """
+
+    __tablename__ = "question_recoveries"
+
+    question_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("questions.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True,
+    )
+    recovered_stem: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recovered_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recovered_explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recovered_image_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # pending_review → approved → applied (or rejected)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending_review",
+    )
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_source: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    question: Mapped["Question"] = relationship(back_populates="recovery")

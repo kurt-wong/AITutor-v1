@@ -19,11 +19,41 @@ class QuestionService:
         self.repo = QuestionRepository(session)
 
     async def get_question(self, question_id: int) -> dict | None:
-        """Get question by ID."""
+        """Get question by ID.
+
+        S#172: If an approved QuestionRecovery exists, its recovered fields
+        override the base question content (recovery overlay pattern).
+        """
         question = await self.repo.get_by_id(question_id)
         if not question:
             return None
-        return self._to_dict(question)
+        result = self._to_dict(question)
+
+        # S#172: Recovery overlay
+        try:
+            from app.domains.question.models import QuestionRecovery
+            from sqlalchemy import select as _sel
+            recovery = (
+                await self.session.execute(
+                    _sel(QuestionRecovery).where(
+                        QuestionRecovery.question_id == question_id,
+                        QuestionRecovery.status == "approved",
+                    )
+                )
+            ).scalar_one_or_none()
+            if recovery:
+                if recovery.recovered_stem:
+                    result["content"] = recovery.recovered_stem
+                if recovery.recovered_answer:
+                    result["recovered_answer"] = recovery.recovered_answer
+                if recovery.recovered_explanation:
+                    result["recovered_explanation"] = recovery.recovered_explanation
+                if recovery.recovered_image_key:
+                    result["recovered_image"] = recovery.recovered_image_key
+        except Exception:
+            pass
+
+        return result
 
     async def list_questions(
         self,
@@ -95,7 +125,10 @@ class QuestionService:
         }
 
     async def get_question_with_relations(self, question_id: int) -> dict | None:
-        """Admin: get question detail with subject, solution, and images."""
+        """Admin: get question detail with subject, solution, and images.
+
+        S#173: Applies recovery overlay so admin sees approved recoveries.
+        """
         question = await self.repo.get_by_id(question_id)
         if not question:
             return None
@@ -108,6 +141,31 @@ class QuestionService:
         # Include associated images
         img_service = QuestionImageService(self.session)
         result["images"] = await img_service.get_images(question_id)
+
+        # S#173: Recovery overlay — approved recoveries override L1 content
+        try:
+            from app.domains.question.models import QuestionRecovery
+            from sqlalchemy import select as _sel
+            recovery = (
+                await self.session.execute(
+                    _sel(QuestionRecovery).where(
+                        QuestionRecovery.question_id == question_id,
+                        QuestionRecovery.status == "approved",
+                    )
+                )
+            ).scalar_one_or_none()
+            if recovery:
+                if recovery.recovered_stem:
+                    result["content"] = recovery.recovered_stem
+                if recovery.recovered_answer:
+                    result["recovered_answer"] = recovery.recovered_answer
+                if recovery.recovered_explanation:
+                    result["recovered_explanation"] = recovery.recovered_explanation
+                if recovery.recovered_image_key:
+                    result["recovered_image"] = recovery.recovered_image_key
+        except Exception:
+            pass
+
         return result
 
     async def update_question(

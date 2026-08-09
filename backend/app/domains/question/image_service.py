@@ -34,6 +34,14 @@ class QuestionImageService:
         question_id: int,
         image_key: str,
         description: str | None = None,
+        page_no: int | None = None,
+        bbox: list | None = None,
+        placement: str | None = None,
+        source: str | None = None,
+        figure_id: str | None = None,
+        anchor_type: str | None = None,
+        label: str | None = None,
+        figure_type: str | None = None,
     ) -> dict:
         """Associate an original image with a question.
 
@@ -41,6 +49,14 @@ class QuestionImageService:
             question_id: Target question ID
             image_key: MinIO object key for the original image
             description: Optional description of the image
+            page_no: Source page number (1-based)
+            bbox: Source bounding box metadata (normalized or pixel list)
+            placement: Where the image belongs in rendered question output
+            source: Provenance (c4, pp_ocr_markdown, page_fallback, etc.)
+            figure_id: C4/PaddleOCR figure identity
+            anchor_type: C4 anchor type when available
+            label: Figure label when available
+            figure_type: Detected figure type
 
         Returns:
             {
@@ -48,6 +64,10 @@ class QuestionImageService:
                 "question_id": int,
                 "image_key": str,
                 "image_type": "original",
+                "page_no": int | None,
+                "bbox": list | None,
+                "placement": str | None,
+                "source": str | None,
             }
         """
         question = await self.question_repo.get_by_id(question_id)
@@ -59,6 +79,14 @@ class QuestionImageService:
             image_key=image_key,
             image_type="original",
             description=description,
+            page_no=page_no,
+            bbox=bbox,
+            placement=placement,
+            source=source,
+            figure_id=figure_id,
+            anchor_type=anchor_type,
+            label=label,
+            figure_type=figure_type,
         )
 
         logger.info(
@@ -70,6 +98,14 @@ class QuestionImageService:
             "question_id": question_id,
             "image_key": img.image_key,
             "image_type": "original",
+            "page_no": getattr(img, "page_no", None),
+            "bbox": getattr(img, "bbox", None),
+            "placement": getattr(img, "placement", None),
+            "source": getattr(img, "source", None),
+            "figure_id": getattr(img, "figure_id", None),
+            "anchor_type": getattr(img, "anchor_type", None),
+            "label": getattr(img, "label", None),
+            "figure_type": getattr(img, "figure_type", None),
         }
 
     async def associate_enhanced(
@@ -179,6 +215,14 @@ class QuestionImageService:
                 "image_type": img.image_type,
                 "description": img.description,
                 "created_at": img.created_at.isoformat(),
+                "page_no": getattr(img, "page_no", None),
+                "bbox": getattr(img, "bbox", None),
+                "placement": getattr(img, "placement", None),
+                "source": getattr(img, "source", None),
+                "figure_id": getattr(img, "figure_id", None),
+                "anchor_type": getattr(img, "anchor_type", None),
+                "label": getattr(img, "label", None),
+                "figure_type": getattr(img, "figure_type", None),
             }
             for img in images
         ]
@@ -194,6 +238,14 @@ class QuestionImageService:
                 "image_key": img.image_key,
                 "image_type": img.image_type,
                 "description": img.description,
+                "page_no": getattr(img, "page_no", None),
+                "bbox": getattr(img, "bbox", None),
+                "placement": getattr(img, "placement", None),
+                "source": getattr(img, "source", None),
+                "figure_id": getattr(img, "figure_id", None),
+                "anchor_type": getattr(img, "anchor_type", None),
+                "label": getattr(img, "label", None),
+                "figure_type": getattr(img, "figure_type", None),
             }
             for img in images
         ]

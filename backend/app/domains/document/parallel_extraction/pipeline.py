@@ -436,9 +436,14 @@ class ParallelExtractionPipeline:
                 result.pages,
             )
             for fd in figure_dicts:
+                # S#173: PaddleOCR block_bbox is [x1,y1,x2,y2] pixel coords,
+                # NOT [ymin,xmin,ymax,xmax] 0-1000 normalized.  Store in
+                # image_bbox (pixel) and leave normalized_bbox empty.
+                _bbox = fd["bbox"] or [0, 0, 0, 0]
                 figure_anchors.append(FigureAnchor(
                     figure_id=fd["figure_id"],
-                    normalized_bbox=fd["bbox"],
+                    normalized_bbox=[0.0, 0.0, 0.0, 0.0],
+                    image_bbox=[int(b) for b in _bbox[:4]],
                     figure_type=fd["figure_type"],
                     description=fd["description"],
                     page=fd["page"],
@@ -633,9 +638,14 @@ class ParallelExtractionPipeline:
                 result.pages,
             )
             for fd in figure_dicts:
+                # S#173: PaddleOCR block_bbox is [x1,y1,x2,y2] pixel coords,
+                # NOT [ymin,xmin,ymax,xmax] 0-1000 normalized.  Store in
+                # image_bbox (pixel) and leave normalized_bbox empty.
+                _bbox = fd["bbox"] or [0, 0, 0, 0]
                 figure_anchors.append(FigureAnchor(
                     figure_id=fd["figure_id"],
-                    normalized_bbox=fd["bbox"],
+                    normalized_bbox=[0.0, 0.0, 0.0, 0.0],
+                    image_bbox=[int(b) for b in _bbox[:4]],
                     figure_type=fd["figure_type"],
                     description=fd["description"],
                     page=fd["page"],

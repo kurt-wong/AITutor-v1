@@ -716,6 +716,11 @@ def _clean_text_for_db(text: str, *, is_stem: bool = True) -> str:
     # from PP-StructureV3 like <div style="text-align: center;">)
     text = re.sub(r'<div[^>]*>', '', text)
     text = re.sub(r'</div>', '', text)
+    # S#172: Strip <html><body> wrapper tags from OCR output.
+    text = re.sub(r'<html[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</html>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<body[^>]*>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'</body>', '', text, flags=re.IGNORECASE)
     # S#134: Remove teacher-edition [T] annotation markers
     text = re.sub(r'\s*\[T\]', '', text)
     # S#136: Clean orphan | markers from OCR table artifacts.
@@ -1824,6 +1829,86 @@ def _rebuild_content_from_lines(markdown: str, line_range: list | None) -> str:
     return "\n".join(lines[start:end + 1]).strip()
 
 
+def _anchor_correct_line_range(
+    markdown: str,
+    line_range: list | None,
+    qno: int | None,
+    total_lines: int,
+) -> list | None:
+    """S#171: Anchor-correct LLM line range with ±1 tolerance.
+
+    LLM may give approximate line numbers. This function tries to find the
+    best matching line by checking ±1 offset, then validates the content
+    contains expected markers (question number, answer/explanation keywords).
+
+    Args:
+        markdown: Full OCR markdown text
+        line_range: LLM-provided [start, end] or null
+        qno: Question number for validation
+        total_lines: Total number of lines in markdown
+
+    Returns:
+        Corrected [start, end] or null if invalid
+    """
+    if not line_range or not isinstance(line_range, list) or len(line_range) != 2:
+        return None
+
+    try:
+        start, end = int(line_range[0]), int(line_range[1])
+    except (ValueError, TypeError):
+        return None
+
+    if start < 0 or end < start:
+        return None
+
+    lines = markdown.split("\n")
+
+    # Try original position first
+    candidates = [(start, end)]
+
+    # Add ±1 offsets for start
+    if start > 0:
+        candidates.insert(0, (start - 1, end))
+    if start < total_lines - 1:
+        candidates.append((start + 1, end))
+
+    # Try each candidate and pick the best
+    best = None
+    best_score = -1
+
+    for s, e in candidates:
+        if s < 0 or e >= total_lines or s > e:
+            continue
+
+        # Clamp to valid range
+        s = max(0, min(s, total_lines - 1))
+        e = max(s, min(e, total_lines - 1))
+
+        # Get content snippet for validation
+        snippet = "\n".join(lines[s:min(s + 5, e + 1)]).lower()
+
+        # Score based on content quality
+        score = 0
+
+        # Prefer non-empty content
+        if snippet.strip():
+            score += 1
+
+        # Prefer content that looks like an answer/explanation
+        if any(kw in snippet for kw in ["【答案】", "【详解】", "【分析】", "答案", "详解"]):
+            score += 2
+
+        # Prefer content that doesn't look like HTML table
+        if "<table" not in snippet and "<html" not in snippet:
+            score += 1
+
+        if score > best_score:
+            best_score = score
+            best = [s, e]
+
+    return best
+
+
 def _validate_llm_answer(answer: str, qtype: str) -> str:
     """Validate and clean an LLM-returned answer before DB insertion.
 
@@ -2159,6 +2244,94 @@ async def _crop_figures_from_pages(
             q[field] = text
 
     return questions
+
+
+async def _crop_figure_from_page(
+    page_images: list[str],
+    page_num: int,
+    figure_id: str,
+    image_bbox: list[int] | None = None,
+    normalized_bbox: list[float] | None = None,
+) -> str:
+    """Crop a figure from a page image and upload to MinIO.
+
+    S#173: Used when C4 FigureAnchor has bbox but no minio_key
+    (PaddleOCR path).  Two input formats:
+
+      image_bbox: [x1, y1, x2, y2] in page pixel coords (PaddleOCR path).
+                  Preferred when available — direct pixel mapping, no conversion.
+
+      normalized_bbox: [ymin, xmin, ymax, xmax] in 0-1000 scale (C4/VL path).
+                       Converted to pixel coords using page dimensions.
+
+    Priority: image_bbox > normalized_bbox.  If both empty, returns "".
+
+    Returns:
+        MinIO object key, or empty string on failure.
+    """
+    if not page_images or page_num < 1 or page_num > len(page_images):
+        return ""
+    if not image_bbox and not normalized_bbox:
+        return ""
+
+    try:
+        from PIL import Image
+        from app.db.minio import upload_file
+        import io
+
+        page_path = page_images[page_num - 1]
+        if not os.path.exists(page_path):
+            return ""
+
+        with Image.open(page_path) as img:
+            img_w, img_h = img.size
+
+            # Convert to pixel (left, top, right, bottom)
+            if image_bbox and len(image_bbox) >= 4 and any(image_bbox[:4]):
+                # PaddleOCR: [x1, y1, x2, y2] pixel coords — use directly
+                left, top, right, bottom = (
+                    int(image_bbox[0]), int(image_bbox[1]),
+                    int(image_bbox[2]), int(image_bbox[3]),
+                )
+            elif normalized_bbox and len(normalized_bbox) >= 4:
+                # C4/VL: [ymin, xmin, ymax, xmax] 0-1000 — convert
+                ymin, xmin, ymax, xmax = normalized_bbox[:4]
+                left = int(xmin / 1000 * img_w)
+                top = int(ymin / 1000 * img_h)
+                right = int(xmax / 1000 * img_w)
+                bottom = int(ymax / 1000 * img_h)
+            else:
+                return ""
+
+            # Add 5% padding
+            pad_x = int((right - left) * 0.05)
+            pad_y = int((bottom - top) * 0.05)
+            crop_box = (
+                max(0, left - pad_x),
+                max(0, top - pad_y),
+                min(img_w, right + pad_x),
+                min(img_h, bottom + pad_y),
+            )
+            cropped = img.crop(crop_box)
+
+            buf = io.BytesIO()
+            cropped.save(buf, format="PNG")
+            buf.seek(0)
+            data = buf.getvalue()
+
+            object_key = f"questions/figures/{figure_id}_figure.png"
+            upload_file(
+                object_name=object_key,
+                data=io.BytesIO(data),
+                length=len(data),
+                content_type="image/png",
+                bucket="images",
+            )
+            logger.debug("Cropped figure uploaded: %s", object_key)
+            return object_key
+    except Exception as e:
+        logger.warning("Figure crop failed for %s: %s", figure_id, e)
+        return ""
 
 
 async def _rewrite_stem_image_urls(
@@ -3315,6 +3488,7 @@ class _DocumentProcessing:
             ),
             getattr(result, "paddleocr_job_id", ""),
             getattr(result, "paddleocr_result", None),
+            getattr(result, "figure_anchors", []),
         )
 
 
@@ -4779,6 +4953,9 @@ class _DocumentProcessing:
         pages_to_process: list[str] | None = None,
         paddleocr_job_id: str = "",
         ocr_markdown: str = "",
+        figure_anchors: list | None = None,
+        ocr_snapshot_id: int | None = None,
+        qno_page_map: dict[int, int] | None = None,
     ) -> list[dict]:
         """Save LLM-annotated questions directly to DB (one transaction).
 
@@ -4794,6 +4971,9 @@ class _DocumentProcessing:
             pages_to_process: Page image paths (for image association)
             paddleocr_job_id: PP-StructureV3 API job ID (for image upload)
             ocr_markdown: Raw OCR markdown (for option supplement fallback)
+            figure_anchors: C4 FigureAnchor list for precise image association
+            ocr_snapshot_id: OCR snapshot ID for traceability
+            qno_page_map: {question_number: page_number} from structurer blocks
 
         Returns:
             List of saved question dicts: [{id, content, answer, ...}]
@@ -4802,6 +4982,16 @@ class _DocumentProcessing:
         questions = annotation.get("questions", [])
         if not questions:
             return []
+
+        # ── S#173: Inject snapshot_id + markdown_hash for annotation binding ──
+        import hashlib as _hashlib
+        _md_hash = (
+            _hashlib.sha256(ocr_markdown.encode()).hexdigest()[:16]
+            if ocr_markdown else None
+        )
+        for _q in questions:
+            _q["_snapshot_id"] = ocr_snapshot_id
+            _q["_markdown_hash"] = _md_hash
 
         # ── Session #115: Rewrite PP-StructureV3 image URLs ──────────
         # Stems + explanations may contain <img src="imgs/..."> paths
@@ -5032,10 +5222,12 @@ class _DocumentProcessing:
                         question_type=qtype,
                         passage_text=_passage,
                         sub_questions=_sub_qs,
+                        ocr_snapshot_id=ocr_snapshot_id,
                     )
                     await session.flush()
 
                     # Step 2: persist L2 annotation mirror when line metadata exists
+                    # S#171: Anchor-correct line ranges before persisting
                     try:
                         _line_fields = (
                             "stem_lines", "options_lines", "answer_lines",
@@ -5045,6 +5237,30 @@ class _DocumentProcessing:
                             from app.domains.question.annotation_repository import (
                                 QuestionAnnotationRepository,
                             )
+
+                            # S#171: Anchor-correct all line ranges
+                            _total_lines = len(ocr_markdown.split("\n")) if ocr_markdown else 0
+                            _corrected_answer_lines = _anchor_correct_line_range(
+                                ocr_markdown or "", q.get("answer_lines"), qno, _total_lines,
+                            )
+                            _corrected_explanation_lines = _anchor_correct_line_range(
+                                ocr_markdown or "", q.get("explanation_lines"), qno, _total_lines,
+                            )
+
+                            # Use corrected lines for rebuild if available
+                            if _corrected_answer_lines and _corrected_answer_lines != q.get("answer_lines"):
+                                rebuilt_answer = _rebuild_content_from_lines(
+                                    ocr_markdown, _corrected_answer_lines,
+                                )
+                                if rebuilt_answer:
+                                    answer = rebuilt_answer
+                            if _corrected_explanation_lines and _corrected_explanation_lines != q.get("explanation_lines"):
+                                rebuilt_explanation = _rebuild_content_from_lines(
+                                    ocr_markdown, _corrected_explanation_lines,
+                                )
+                                if rebuilt_explanation:
+                                    llm_explanation = rebuilt_explanation
+
                             await QuestionAnnotationRepository(session).create(
                                 question_id=db_q.id,
                                 annotation_type=metadata.get(
@@ -5061,10 +5277,12 @@ class _DocumentProcessing:
                                 },
                                 stem_lines=q.get("stem_lines"),
                                 options_lines=q.get("options_lines"),
-                                answer_lines=q.get("answer_lines"),
-                                explanation_lines=q.get("explanation_lines"),
+                                answer_lines=_corrected_answer_lines or q.get("answer_lines"),
+                                explanation_lines=_corrected_explanation_lines or q.get("explanation_lines"),
                                 passage_lines=q.get("passage_lines"),
                                 model_name=metadata.get("model"),
+                                snapshot_id=q.get("_snapshot_id"),
+                                markdown_hash=q.get("_markdown_hash"),
                             )
                     except Exception as _ann_err:
                         logger.warning(
@@ -5104,6 +5322,19 @@ class _DocumentProcessing:
                                     answer = candidate
                             else:
                                 answer = rebuilt_answer
+                    # S#172: Strip N.【答案】 / 【答案】 prefix from
+                    # non-choice answers before validation.  The LLM
+                    # annotator outputs line ranges that include the
+                    # answer-section markup; without stripping, the
+                    # contamination marker check rejects the answer
+                    # and enrichment skips auto_solve — losing data.
+                    if answer and qtype not in ("choice", "multi_choice"):
+                        answer = re.sub(
+                            r'^\d+[.、．]\s*【答案】\s*', '', answer.strip(),
+                        )
+                        answer = re.sub(
+                            r'^【答案】\s*', '', answer.strip(),
+                        )
                         rebuilt_explanation = _rebuild_content_from_lines(
                             ocr_markdown, q.get("explanation_lines")
                         )
@@ -5160,8 +5391,14 @@ class _DocumentProcessing:
                     # P2 fallback: OCR markdown often loses function graphs as
                     # <img> tags, but the stem still says "如图/图象".  Associate
                     # the estimated source page so the figure is not silently lost.
+                    # S#172: Narrowed regex — only match explicit figure
+                    # references, not generic "图象" in prose text.
+                    # "图象上的两点" / "图象恒在x轴下方" are NOT figures.
                     _mentions_figure = bool(
-                        re.search(r"图|图象|图像", _stem_text)
+                        re.search(
+                            r'如图|如图所示|见图|茎叶图|直方图|图象如',
+                            _stem_text,
+                        )
                     )
                     _q_has_image = (
                         _has_md_img
@@ -5173,6 +5410,79 @@ class _DocumentProcessing:
                     # precise figure images, so we can skip the whole-page
                     # screenshot fallback below.
                     _associated_keys: set[str] = set()
+
+                    # ── S#173: C4 figure_anchors → question_images ──
+                    # Match C4-detected figures to this question by page
+                    # proximity.  If anchor has minio_key, reuse directly;
+                    # if not (PaddleOCR path), crop from page image and upload.
+                    if figure_anchors and q.get("stem_lines"):
+                        try:
+                            from app.domains.question.image_service import (
+                                QuestionImageService as _QIS_C4,
+                            )
+                            _img_svc_c4 = _QIS_C4(session)
+                            # S#173: Derive page from qno_page_map (structurer blocks)
+                            # instead of q.get("page") which is None in LLM path.
+                            _q_page = None
+                            if qno_page_map and qno:
+                                _q_page = qno_page_map.get(qno)
+                            _q_stem_lines = q.get("stem_lines")
+                            _q_answer_lines = q.get("answer_lines")
+                            for _fa in figure_anchors:
+                                _fa_page = getattr(_fa, "page", None)
+                                _fa_key = getattr(_fa, "minio_key", "")
+                                _fa_id = getattr(_fa, "figure_id", "")
+                                if not _fa_id:
+                                    continue
+                                # Match by page: figure on same page as question
+                                if _q_page and _fa_page and _fa_page != _q_page:
+                                    continue
+                                # S#173: If no minio_key, crop from page image
+                                if not _fa_key and pages_to_process and _fa_page:
+                                    _fa_key = await _crop_figure_from_page(
+                                        page_images=pages_to_process,
+                                        page_num=_fa_page,
+                                        figure_id=_fa_id,
+                                        image_bbox=getattr(_fa, "image_bbox", None),
+                                        normalized_bbox=getattr(_fa, "normalized_bbox", None),
+                                    )
+                                if not _fa_key:
+                                    continue
+                                # Deduplicate: skip if already associated
+                                if _fa_key in _associated_keys:
+                                    continue
+                                _associated_keys.add(_fa_key)
+                                # Infer placement from line ranges
+                                _placement = "stem"  # default
+                                if _q_answer_lines and _q_stem_lines:
+                                    # Figure appears after answer lines → explanation
+                                    _placement = "associated"
+                                await _img_svc_c4.associate_original(
+                                    question_id=db_q.id,
+                                    image_key=_fa_key,
+                                    description=getattr(_fa, "description", "")
+                                        or f"C4 figure for Q{qno or db_q.id}",
+                                    page_no=_fa_page,
+                                    # S#173: Prefer image_bbox (pixel coords) over
+                                    # normalized_bbox (may be zeros for PaddleOCR path)
+                                    bbox=getattr(_fa, "image_bbox", None)
+                                        or getattr(_fa, "normalized_bbox", None),
+                                    placement=_placement,
+                                    source="c4_figure",
+                                    figure_id=_fa_id,
+                                    anchor_type=str(getattr(_fa, "anchor_type", "")),
+                                    label=getattr(_fa, "label", None),
+                                    figure_type=getattr(_fa, "figure_type", None),
+                                )
+                                logger.debug(
+                                    "Associated C4 figure: %s (page %s) → Q%d",
+                                    _fa_id[:12], _fa_page, db_q.id,
+                                )
+                        except Exception as _c4_exc:
+                            logger.warning(
+                                "C4 figure association failed for Q%d: %s",
+                                db_q.id, _c4_exc,
+                            )
 
                     # Fix 2 (S#133/#134): Extract individual figure images from
                     # stem_raw + explanation (still has <img> tags after Fix 1
@@ -5211,6 +5521,66 @@ class _DocumentProcessing:
                             logger.warning(
                                 "Figure association failed for Q%d: %s",
                                 db_q.id, _exc,
+                            )
+
+                    # S#172: Scan OCR lines within the question's annotation
+                    # range + a small trailing gap for images that fell outside
+                    # the extracted text but are still logically part of this
+                    # question (e.g. Q13 vector diagram at L233, explanation
+                    # ends at L230).
+                    if not _associated_keys and ocr_markdown:
+                        try:
+                            from app.domains.question.image_service import (
+                                QuestionImageService as _QIS2,
+                            )
+                            _img_svc2 = _QIS2(session)
+                            # S#172: Match both rewritten URLs and原始 imgs/ paths
+                            _img_tag_re = re.compile(
+                                r'<img\s*src="(?:/api/documents/images/|)([^"]+)"'
+                            )
+                            _md_lines = ocr_markdown.split("\n")
+                            _q_answer_lines = q.get("answer_lines")
+                            _q_expl_lines = q.get("explanation_lines")
+                            # Determine scan range: from answer start to
+                            # explanation end + 10 lines trailing gap.
+                            _scan_start = (
+                                (_q_answer_lines[0] - 1) if _q_answer_lines
+                                else ((_q_expl_lines[0] - 1) if _q_expl_lines else 0)
+                            )
+                            _scan_end = (
+                                (_q_expl_lines[1] + 10) if _q_expl_lines
+                                else (_scan_start + 20)
+                            )
+                            _scan_start = max(0, _scan_start)
+                            _scan_end = min(len(_md_lines), _scan_end)
+                            for _li in range(_scan_start, _scan_end):
+                                for _m in _img_tag_re.finditer(_md_lines[_li]):
+                                    _img_key = _m.group(1)
+                                    # Strip /api/documents/images/ prefix
+                                    _img_key_short = _img_key.replace(
+                                        "/api/documents/images/", "",
+                                    )
+                                    if _img_key_short in _associated_keys:
+                                        continue
+                                    _associated_keys.add(_img_key_short)
+                                    await _img_svc2.associate_original(
+                                        question_id=db_q.id,
+                                        image_key=_img_key_short,
+                                        description=(
+                                            f"Figure for Q{qno or db_q.id}"
+                                        ),
+                                    )
+                                    logger.info(
+                                        "OCR line scan: associated %s "
+                                        "(L%d) → Q%d",
+                                        _img_key_short[:60], _li + 1,
+                                        db_q.id,
+                                    )
+                        except Exception as _scan_exc:
+                            logger.warning(
+                                "OCR line scan figure association "
+                                "failed for Q%d: %s",
+                                db_q.id, _scan_exc,
                             )
 
                         # Path B (S#134): on-the-fly crop when rewritten URLs
@@ -5349,9 +5719,10 @@ class _DocumentProcessing:
                                 await img_service.associate_original(
                                     question_id=db_q.id,
                                     image_key=_obj_name,
-                                    description=(
-                                        f"Source page image for Q{qno or db_q.id}"
-                                    ),
+                                    # S#172: Mark as page_context, not a
+                                    # precise figure — frontend should render
+                                    # these differently (e.g. collapsible).
+                                    description="page_context",
                                 )
                             else:
                                 logger.warning(

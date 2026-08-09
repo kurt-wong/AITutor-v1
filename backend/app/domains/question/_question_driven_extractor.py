@@ -429,7 +429,12 @@ def _normalize_unicode_math(text: str) -> str:
 # ═══ LLM Extraction ═════════════════════════════════════════════════════════
 
 def _clean_json(raw: str) -> str:
-    """Clean LLM output to extract JSON object."""
+    r"""Clean LLM output to extract JSON object.
+
+    S#171: More robust handling of LaTeX backslashes.
+    Key insight: LLM may output \\not\\in (already escaped) or \not\in (single).
+    We must handle both without breaking real \\n/\\t escapes.
+    """
     raw = raw.strip()
     # Remove markdown code fences
     if raw.startswith("```"):
@@ -440,16 +445,32 @@ def _clean_json(raw: str) -> str:
     end = raw.rfind("}")
     if start >= 0 and end > start:
         raw = raw[start:end + 1]
-    # S#167: Fix invalid JSON escape characters from LLM
-    # LLM output may contain LaTeX commands like \frac, \sqrt, \times etc.
-    # These backslashes are NOT valid JSON escapes but share the \ prefix
-    # with valid ones like \", \\, \/, \n, \t, \uXXXX.
-    #
-    # We preserve only the essential JSON escapes: \" \\ \/ \n \t \uXXXX
-    # \b, \f, \r are also valid JSON BUT they're extremely common LaTeX
-    # command prefixes (\begin, \beta, \frac, \right, \rho etc.) —
-    # treating them as LaTeX is always safe in this context.
-    raw = re.sub(r'\\(?!(?:["\\/nt]|u[0-9a-fA-F]{4}))', r'\\\\', raw)
+
+    # S#171: Step 1 - Protect already-escaped backslashes (\\)
+    # Replace \\ with placeholder to avoid double-processing
+    raw = raw.replace('\\\\', '\x00DBL\x00')
+
+    # S#171: Step 2 - Protect real \n and \t (followed by non-letter or end)
+    # This distinguishes \n (newline) from \not (LaTeX command)
+    # IMPORTANT: These are ACTUAL escape sequences in the JSON string,
+    # not literal backslash-n. The regex matches the two-character sequence
+    # backslash-n (or backslash-t) that represents a newline (or tab).
+    raw = re.sub(r'\\n(?![a-zA-Z])', '\x00N\x00', raw)
+    raw = re.sub(r'\\t(?![a-zA-Z])', '\x00T\x00', raw)
+
+    # S#171: Step 3 - Protect \uXXXX (unicode escapes)
+    raw = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: '\x00U' + m.group(1) + '\x00', raw)
+
+    # S#171: Step 4 - Double all remaining backslashes (LaTeX commands)
+    # After protecting real JSON escapes, all remaining \ are LaTeX
+    raw = raw.replace('\\', '\\\\')
+
+    # S#171: Step 5 - Restore protected sequences
+    raw = raw.replace('\x00DBL\x00', '\\\\')
+    raw = raw.replace('\x00N\x00', '\\n')
+    raw = raw.replace('\x00T\x00', '\\t')
+    raw = re.sub(r'\x00U([0-9a-fA-F]{4})\x00', r'\\u\1', raw)
+
     return raw
 
 
@@ -2287,16 +2308,18 @@ For EACH question, output:
 - "stem_lines": [start, end] line range for the question body (stem + passage if composite)
 - "options_lines": array of [[start, end], ...] one per option, or [] if no options.
   If options are on ONE physical line, use ONE range: [[N, N]].
-- "answer": the correct answer AS A STRING — for choice: letter (e.g. "A"),
-  for fill: the value, for essay: "" (answer content is in answer_lines)
+- "answer": for choice/multi_choice: the letter(s) ONLY (e.g. "A" or "ABD").
+  For ALL other types: use null (answer content is in answer_lines).
 - "answer_lines": [start, end] where the answer/solution text is located, or null
 - "explanation_lines": [start, end] where detailed explanation is located, or null
 
 CRITICAL RULES:
 1. Extract EVERY question. Count them against visible question numbers.
 2. If the document has an answer key section ("参考答案"/"答案"), LOOK UP each
-   question's answer from it and set "answer" to the correct value.
-3. Line numbers MUST be within the document's range. Use EXACT line numbers.
+   question's answer from it. For choice/multi_choice, set "answer" to the letter(s).
+   For other types, set "answer" to null and set "answer_lines" to the line range.
+3. Line numbers MUST be within the document's range. Use APPROXIMATE line numbers —
+   code will auto-correct to the nearest question/answer/explanation marker.
 4. For composite questions (reading/cloze):
    - Include the shared passage in the FIRST sub-question's stem_lines
    - Each sub-question is a SEPARATE entry with its own stem_lines and options_lines
@@ -2313,6 +2336,11 @@ CRITICAL RULES:
      row containing many questions.
    - If the only visible answer is a shared answer table, keep the letter in
      "answer" and set "answer_lines" to null.
+9. NON-CHOICE ANSWER RULES:
+   - For fill/calculation/proof/essay types, set "answer" to null.
+   - Set "answer_lines" to the line range where the answer text is located.
+   - The answer content will be extracted from OCR原文 by code, NOT from your output.
+   - This prevents LaTeX from entering JSON and causing parse errors.
 
 Return ONLY a JSON object:
 {"questions": [

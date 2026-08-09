@@ -30,6 +30,8 @@ class QuestionAnnotationRepository:
         explanation_lines: list | None = None,
         passage_lines: list | None = None,
         model_name: str | None = None,
+        snapshot_id: int | None = None,
+        markdown_hash: str | None = None,
     ) -> QuestionAnnotation:
         """Create one annotation mirror row."""
         annotation = QuestionAnnotation(
@@ -43,6 +45,8 @@ class QuestionAnnotationRepository:
             explanation_lines=explanation_lines,
             passage_lines=passage_lines,
             model_name=model_name,
+            snapshot_id=snapshot_id,
+            markdown_hash=markdown_hash,
         )
         self.session.add(annotation)
         await self.session.flush()

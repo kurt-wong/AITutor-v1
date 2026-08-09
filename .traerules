@@ -3,6 +3,7 @@
 详细规则见 `05_Development/Project rules.md`（v3.0，已合并 AGD）。
 
 ## 核心红线
+- **【死命令】禁止在项目文件夹外创建任何文件**：所有产出物（代码、文档、测试、临时文件等）必须严格限定在 `d:\Project\AI Tutors` 根目录范围内。禁止向桌面、用户目录、系统临时目录等任何项目外路径写入文件。
 - MCP-first：所有 AI 能力通过 MIS.md 定义的 MCP Tools
 - 分层架构：API → Service → Repository → DB，禁止跳层
 - 禁止存储 COT：PostgreSQL 仅存结构化事实

@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-08-07 Session #170 (L2 回写 solutions 完成) | **版本**: 1.58.0 | **完成度**: 核心链路 ~99%，整体 ~99%。
+> **最后更新**: 2026-08-09 Session #173 (图片元数据断链修复 + 端到端验证) | **版本**: 1.61.0 | **完成度**: 核心链路 ~99%，图片元数据后端链路已闭环，前端渲染待实现。
 >
 > **记录规范（2026-07-31 起严格执行）**：
 > - 本文档 §1-§15 为当前状态快照，可以原地编辑
@@ -17,7 +17,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.58.0 |
+| **版本** | 1.60.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -228,6 +228,8 @@ Phase 3 (explain worker ×2): Stage 1 学科路由 → Stage 2 DeepSeek 审核 �
 
 | 日期 | Session | 事项 |
 |------|:---:|------|
+| 08-09 | **#173** | **架构分析 + 图片元数据断链定位**: 用户第一性原理分析——"信息不是不存在，是断链了"。三层信息源架构（PDF → OCR JSON → markdown）。断链点：C4 figure_anchors 未传给入库路径、OCR JSON image block 未持久化、question_images 缺少 placement 元数据。临时修复：Q6 recovery overlay 写入 questions.content、Q13 OCR 行号扫描自动关联图片、Q8/Q17 手动 PDF 裁剪。目标架构：权威落库层 + 标注层 + 渲染层统一。详见 LOG.md #173。 |
+| 08-08 | **#172** | **管线收敛 Phase 1 实施 + 富化稳定性修复**: (1) L2 渲染统一清洗层 `_clean_rendered_field` 复用 L1 + `<html><body>` 清理 + 答案前缀剥离 (2) options 切分 `_split_options_from_text` 按 A./B./C./D. 正则 (3) `_solve_one()` fallback 逻辑修复：skipped+existing 视为成功，不再触发无效 LLM (4) DeepSeek review 90s 硬超时 + 区分 timeout/exception (5) 启动 stale task 清理 `_cleanup_stale_processing_tasks` (6) `_mentions_figure` 正则收窄 (7) 17 个新增测试。E2E 验证：21/21 solutions、21/21 explanations、0 无效 LLM 调用。详见 LOG.md #172。 |
 | 08-06 | **#167** | **QD 管线简化重构**: 砍掉 section detection → batch splitting → QNO remap → answer merge 整条中间链。`extract_questions_from_markdown()` 重写为单次 LLM 调用（Annotation Paradigm：LLM 输出行号范围，代码提取内容）。`_clean_json` 修复 `\b` `\f` `\r` 被误认为 JSON escape 的 bug。9 科全量回归：293 题 100% 题干/答案覆盖，168/168 选择题字母答案正确，仅地理 3 题缺失（文档特定问题）。英语 54 题复合题型全对（旧管线 35 碎片）。详见 LOG.md #167。 |
 | 08-02 | **#165** | **PaddleOCR-VL-1.6 化学PDF丢页Bug根因定位与修复**: VL-1.6 JSONL 每行打包 ~4 个 `layoutParsingResults`（PP-StructureV3 每行 1 个），原代码 `_parse_single_page()` 只取 [0] → 丢 75% 页面。修复：`_parse_jsonl()` 遍历所有条目 + `_parse_single_page` → `_parse_single_layout_result` + `_poll_job()` 新增 `extractProgress` 诊断日志。验证：化学 14/14 页完整返回，25,048 chars（修复前 ~5,775）。详见 LOG.md #165。 |
 | 08-01 | **#163** | **标注范式 Step 1 实施 + 选择题超时修复 + HTML 表格解析 + QD LaTeX 问题暴露**: 答案区标注范式改造完成（LLM 输出行号→代码切原文）。选择题超时根因定位（max_tokens=65536 放大推理模型冗长输出）并修复（mode=fast + max_tokens=16384 + 批量拆分）。HTML 表格答案键解析修复（`_extract_answer_from_row()`）。填空题 QD 提取暴露同样的 LaTeX JSON 问题——annotation 范式只做了一半，Step 3（QD 题干标注化）需提升为 P0。详见 LOG.md #163。 |
@@ -756,13 +758,14 @@ anchor_assembly 成功（31题, 16 image）
 | 维度 | 状态 |
 |------|------|
 | **解析侧（Phase 1）** | ✅ S#167 markdown 主路径为单次 LLM 调用 Annotation Paradigm（行号输出，JSON 仅含整数）。✅ S#168 L2 标注镜像库 + 管理端 L1+L2 渲染切换。全量 29 份 OCR markdown 验证：832 题，题干 99.9%，答案 99.8%，选择题字母 98.6%。 |
-| **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成 |
+| **闭环侧（Phase 2-3）** | ✅ 写路径已接通：解答落库、KP 映射、嵌入生成、详解生成。✅ S#172: L2 渲染统一清洗、选项切分、答案前缀剥离、fallback 逻辑修复、DeepSeek 超时保护、stale task 兜底。 |
+| **图片元数据** | ✅ S#173 后端链路已闭环：document_ocr_snapshots（raw_json + figure_anchors）、question_images（page_no/bbox/placement/source/figure_id）、C4 裁剪上传、bbox 像素坐标确认。待实现：前端按 placement 渲染、语义匹配替代页级匹配、PP-StructureV3 img 补元数据。 |
 | **管线监控** | ✅ S#137h: 7 个 PIPELINE_CHECKPOINT；S#157: 新增逐环节耗时统计 |
 | **架构合规** | ✅ 8 MCP Server / 37 Tools，唯一调用链，零违规 |
-| **测试** | ✅ 常规测试 1250 passed / 5 skipped（live-only VL 测试默认跳过，见 §5） |
-| **文档同步** | ✅ LOG + PROJECT_STATUS 已更新至 S#168；PIPELINE v3.2 |
+| **测试** | ✅ S#172 新增 17 个测试 + 4 个 OCR line scan 测试 |
+| **文档同步** | ✅ LOG + PROJECT_STATUS 已更新至 S#173 |
 | **Git** | ✅ `main` 已合并 `refactor/annotation-architecture`（merge commit `4580846`，2026-08-06） |
-| **整体完成度** | **核心链路 ~99%，整体 ~99%**。下一步：标注镜像历史回填（可选）+ 确认 push。 |
+| **整体完成度** | **核心链路 ~99%，图片元数据后端链路已闭环**。下一步：前端按 placement 渲染 + 语义匹配 + PP-StructureV3 img 补元数据。 |
 
 ---
 
@@ -1361,3 +1364,108 @@ LLM 一次性提取全部题目（输出行号范围 + 答案）
 - 验证：后端常规 pytest `1284 passed / 5 skipped`；新增选择题防御、行号重建与富化跳过测试。
 - 完整 live pytest：`1345 passed / 5 skipped`。
 - 后续：Step 4 图片关联、Step 5 监控与 id2 重跑另行处理。
+
+---
+
+### 2026-08-08 — S#171: 管线收敛方向确立（5 阶段计划）
+
+**版本**: 1.58.0
+
+**背景**: 数学教师版 PDF 上传验证暴露多个问题：QD JSON 解析失败（`Invalid \escape`）、V3 回退无 L2 标注、配图错误关联第一页、内容提取问题（Q4/Q6/Q8/Q11/Q14/Q17/Q19/Q20/Q21）、监控页 500、重复上传产生两份试卷。
+
+**第一性原理分析**:
+
+用户核心设想：
+```
+OCR markdown（原文，不变）
+    ↓
+LLM 只读、只标注（元数据：题号、题型、位置、年份、学校...）
+    ↓
+代码按标注从原文切出
+    ↓
+前端按元数据展示
+```
+
+LLM 的职责：语义理解 + 元数据标注
+LLM 的定位：给粗定位，代码做精确锚点校正
+
+**历史教训**:
+- Session #36: 正则修复 LaTeX 转义 → `\frac`/`\times` 无法修复
+- Session #94: `response_format` 保证 JSON 合法 → LaTeX 被静默损毁
+- Session #162: 设计 Annotation Paradigm → 行号不准
+- Session #167: 实施 Annotation Paradigm → QD 失败回退 V3
+- Session #170: L2 回写 solutions → Prompt 仍有 LaTeX
+
+**5 阶段收敛计划**:
+
+| 阶段 | 目标 | 核心动作 |
+|------|------|----------|
+| **1** | 元数据标注主链路跑通 | 修 Prompt + 锚点校正 + `_clean_json` 防御 |
+| **2** | OCR markdown 成为唯一来源 | 题库页优先显示 OCR 原文切片 |
+| **3** | 砍掉不必要复杂度 | V3 降级为调试工具，正则只作兜底 |
+| **4** | 单独处理 OCR 源数据缺陷 | Q17/Q19 从 PDF 页面恢复 |
+| **5** | 修图片关联 | 有真实图才配图，没有不配 |
+
+**关键决策**:
+1. 不是继续打补丁，而是分阶段收敛到"OCR 原文 → LLM 元数据标注 → 代码切取 → 前端展示"
+2. V3 从"默认回退"降级为"人工调试工具"
+3. 交叉验证简化：只检查题号连续性，不再让第二个 LLM 重新提取内容
+4. OCR 源数据缺陷（Q17/Q19）独立处理，不阻塞主链路
+5. **行号优先，LLM answer 兜底**：非选择题优先让 answer 为 null；answer_lines 无法切出有效答案时，允许用 LLM answer 兜底
+6. **L2 行号落库前必须校正**：校正后的行号必须写回 question_annotations，前端后续按该行号切原文，避免 LLM 行号 ±1 偏移被固化到数据库
+
+**文档更新**: LOG.md 追加 Session #171，PROJECT_STATUS.md §16 追加本条目。
+
+### 2026-08-08 — S#172: 管线收敛 Phase 1 实施 + 富化稳定性修复
+
+**版本**: 1.59.0
+
+**改动文件**:
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| `annotation_service.py` | `_clean_rendered_field()` | L2 复用 L1 清洗 + `<html><body>` 清理 + 答案前缀剥离 |
+| `annotation_service.py` | `_split_options_from_text()` | 按 A./B./C./D. 切分 options |
+| `annotation_service.py` | `_render()` | 全字段走 `_clean_rendered_field` |
+| `async_document.py` | `_save_annotated_questions()` | 答案前缀剥离 |
+| `async_document.py` | `_clean_text_for_db()` | 新增 `<html><body>` 清理 |
+| `async_document.py` | `_mentions_figure` 正则 | 收窄为 6 个精确关键词 |
+| `async_document.py` | 整页截图 description | `page_context` 区分于精确图 |
+| `async_pipeline.py` | `_solve_one()` fallback | skipped+existing 视为成功 |
+| `async_pipeline.py` | DeepSeek review 超时 | 90s 硬超时 + timeout/exception 区分 |
+| `async_pipeline.py` | `_cleanup_stale_processing_tasks()` | 启动时清理 stale processing 任务 |
+
+**新增测试**: 17 个（选项切分 5 + L2 清洗 5 + 答案前缀 3 + 图象正则 4 + fallback 3 + stale 清理 4）
+
+**E2E 验证**: 数学教师版 PDF 3 轮上传验证，最终 21/21 solutions、21/21 explanations、0 无效 LLM 调用。
+
+**剩余 P3 问题**: Q4 绝对值缺失、Q6/Q20 分段函数横向排列、Q8/Q17 精确图、Q13 详解配图、Q17 茎叶图 LaTeX。
+
+### 2026-08-09 — S#173: 图片元数据断链修复 + 端到端验证
+
+**版本**: 1.61.0
+
+**改动文件**:
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| `alembic/versions/020_add_image_metadata.py` | 扩展 migration | document_ocr_snapshots 表 + question_images/document_pages/question_annotations/questions 扩展字段 |
+| `document/models.py` | 新增 DocumentOcrSnapshot 模型 | OCR 权威快照（raw_json + figure_anchors + markdown） |
+| `question/models.py` | 扩展 QuestionAnnotation/Question | snapshot_id, markdown_hash, ocr_snapshot_id |
+| `_document_pipeline.py` | PipelineContext + snapshot 创建 | figure_anchors/qno_page_map 传递 + DocumentOcrSnapshot 入库 + import json 修复 |
+| `async_document.py` | _save_annotated_questions + C4 关联 | 接收 figure_anchors/qno_page_map + 按页匹配 + 无 minio_key 时裁剪上传 + _crop_figure_from_page() |
+| `pipeline.py` | FigureAnchor 创建 | PaddleOCR block_bbox 存入 image_bbox（像素坐标） |
+| `service.py` | recovery overlay | get_question_with_relations() 应用 approved recovery |
+| `repository.py` / `annotation_repository.py` | create() 参数扩展 | ocr_snapshot_id, snapshot_id, markdown_hash |
+
+**新增测试**: 15 个（_crop_figure_from_page 9 + C4 关联行为 6）
+
+**端到端验证**: 真实 PDF `2026北京二中高一（上）期末数学（教师版）.pdf`（13 页）
+- document_ocr_snapshots.raw_json: 13 pages × 24 blocks/page，真实像素 bbox
+- figure_anchors: image_bbox=[108, 88, 345, 233]（Page 3），minio_key 已填充
+- question_images.bbox: [108, 88, 345, 233] 像素坐标
+- MinIO: paddleocr_0_3_figure.png 259×159 已上传
+
+**bbox 坐标系确认**: PaddleOCR block_bbox 是 [x1, y1, x2, y2] 像素坐标（非 0-1000 归一化）
+
+**待完成**: 前端按 placement 渲染、语义匹配替代页级匹配、PP-StructureV3 img 补元数据、document_pages.image_key
+
+**文档更新**: LOG.md 追加 Session #173，PROJECT_STATUS.md §1/§7/§16 更新。

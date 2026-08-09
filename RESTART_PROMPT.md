@@ -1,7 +1,7 @@
 # AI Tutors 系统重启提示词
 
 > **使用方式**：将此文件全部内容复制粘贴给新会话的 Claude/TRAE，即可快速恢复完整工作上下文。
-> **最后更新**: 2026-08-07 Session #170 | **版本**: 1.58.0
+> **最后更新**: 2026-08-09 Session #173 | **版本**: 1.61.0
 
 ---
 
@@ -275,6 +275,8 @@ python scripts/reset_test_data.py
 ## 七、Session 历史（近期，倒序）
 
 | Session | 日期 | 内容 |
+|---------|------|------|
+| **#171** | **08-08** | **管线收敛方向确立**: 数学教师版 PDF 上传验证暴露 QD JSON 解析失败（LaTeX `\not\in`）+ V3 回退无 L2 标注。第一性原理分析：LLM 只做元数据标注，代码做精确提取。确立 5 阶段收敛计划。Phase 1 Step 1/3 完成（Prompt 修改 + _clean_json LaTeX 防御），Step 2 锚点校正已实现但不完整，Step 4 待重新上传验证。关键决策：行号优先 LLM answer 兜底 + L2 行号落库前必须校正。常规 pytest 1295 passed / 5 skipped。 |
 | **#170** | **08-07** | **L2 回写 solutions + 选择题 answer_lines 防御清理**: LLM 语义识别为主，新增单选/多选 answer 规则与 HTML 答案表防御清理；L2 行号重建内容写回 solutions；富化已有 extracted solution 时跳过 auto_solve。常规 pytest 1284 passed / 5 skipped。 |
 | **#169** | **08-07** | **OCR markdown 兜底、答案校验、前端监控**: Route A 回退写入 paddleocr_markdown，extracted 答案入库前校验，新增监控页。 |
 |---------|------|------|
@@ -302,33 +304,49 @@ python scripts/reset_test_data.py
 ## 八、给 Claude/TRAE 的工作指令
 
 ```
-继续 AI Tutors 项目。版本 1.58.0。
+继续 AI Tutors 项目。版本 1.60.0。
 
 == 当前重点 ==
 
-简化管线已落地（S#167）— 已合并到 `main`（merge commit 4580846，2026-08-06）：
+Session #173 — 架构分析 + 图片元数据断链定位:
 
-核心变化：
-  OCR markdown (≤40K chars) → extract_questions_from_markdown() → 单次 LLM 调用 → 直接入库
+核心洞察（用户第一性原理分析）：
+  "信息不是不存在，是断链了。"
+  - C4 figure_anchors 已产出图片、bbox、page、minio_key，但没有传给入库路径
+  - OCR JSON 里的 image block 也没有被持久化为结构化元数据
+  - markdown 里只有 Q12/Q13 的 <img>，所以只有这两题能自动关联
 
-已砍掉:
-  ❌ section detection（_detect_markdown_sections）— 文档仅 15K tokens，512K 上下文无需分段
-  ❌ batch splitting（_split_section_into_batches）— 单次调用提取全部题目
-  ❌ QNO remap（_calculate_qno_offset）— 不再分批，无需重映射
-  ❌ composite merge（关键词驱动）— LLM 直接输出完整复合题
+三层信息源架构：
+  PDF 页面 → 最终事实来源 ✅
+  OCR JSON → block、bbox、阅读顺序、图片引用 ⚠️ 未持久化
+  OCR markdown → 有损视图，适合 LLM ⚠️ 被当作唯一数据源
 
-Annotation Paradigm（行号标注）:
-  - LLM 输出: {qno, type, stem_lines, options_lines, answer, answer_lines, explanation_lines}
-  - 代码从 OCR 原文按行号切出 → JSON 永不包含 LaTeX 字符串
-  - _clean_json() 修复: regex 为 \\(?!["\\/ntu])，\b \f \r 视为 LaTeX 转义
+目标架构（待实施）：
+  权威落库层：保存 OCR JSON blocks + C4 figure_anchors + PDF 页面图
+  标注层：markdown 只给 LLM 读，LLM 输出行号元数据
+  渲染层：L1/L2/recovery 统一，图片按 page/bbox/placement 定位
 
-9 科回归结果:
-  - 293 题，100% 题干/答案覆盖，168/168 选择题字母答案正确
-  - 仅地理 3 题缺失（文档特定问题，非结构性）
-  - 英语 54 题复合题型全对（旧管线仅 35 碎片 + Q1-Q10 丢失）
+已修复:
+  - Q6: recovery overlay 写入 questions.content，前端显示 \begin{cases} 正确格式
+  - Q13: OCR 行号扫描自动关联图片（Figure for Q13）
+  - Q8/Q17: 手动 PDF 裁剪（⚠️ 范围过大，待用 C4 元数据精裁）
+  - Q19: <html><body> 清理（L1+L2 双路径）
+  - P0/P1/P2: fallback + DeepSeek 超时 + stale 清理（S#172）
 
-旧函数保留（仅 blocks 路径使用）:
-  - _detect_markdown_sections() / _extract_answers_from_section() / extract_questions_from_section()
+遗留问题:
+  - 图片元数据链路断链（C4→入库、JSON→结构化、question_images 字段不足）
+  - Q8/Q17 裁剪范围过大（需要 C4 bbox 而非手动定位）
+  - Q4/Q20 公式恢复（MIMO API 不稳定）
+  - Q13 图片应出现在详解而非关联图片区（placement 问题）
+  - 前端文档列表加载失败（反复出现）
+
+实施顺序（下个 session）:
+  1. 打通 C4 figure_anchors → 图片落库链路
+  2. 扩展 question_images 元数据（page_no, bbox, placement, source）
+  3. 统一 L1/L2/recovery 渲染 + Q13 图片进详解
+  4. 修离线工具 JSON 解析，重跑 Q4/Q20
+  5. 精裁 Q8/Q17（用 C4 元数据，不重复 VL）
+  6. 重新上传验证整份 PDF
 
 == Git ==
 
