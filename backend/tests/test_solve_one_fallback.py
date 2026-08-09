@@ -212,18 +212,17 @@ class TestOCRLineScanFigureAssociation:
     """Verify OCR line scan finds images in trailing gap (S#172 Q13 fix)."""
 
     def test_scan_range_calculation(self):
-        """Scan range: answer_start-1 to explanation_end+10."""
-        # Simulate Q13: answer_lines=[213,214], explanation_lines=[215,230]
+        """Scan range: answer_start-1 to explanation_end+20."""
         answer_lines = [213, 214]
         expl_lines = [215, 230]
 
         scan_start = (answer_lines[0] - 1) if answer_lines else (
             (expl_lines[0] - 1) if expl_lines else 0
         )
-        scan_end = (expl_lines[1] + 10) if expl_lines else (scan_start + 20)
+        scan_end = (expl_lines[1] + 20) if expl_lines else (scan_start + 30)
 
-        assert scan_start == 212  # 0-based index for L213
-        assert scan_end == 240    # L230 + 10 lines gap
+        assert scan_start == 212
+        assert scan_end == 250  # L230 + 20 lines gap
 
         # Image at L233 (0-based 232) should be within range
         assert scan_start <= 232 < scan_end
@@ -231,8 +230,7 @@ class TestOCRLineScanFigureAssociation:
     def test_scan_finds_img_in_gap(self):
         """Image at L233 (outside explanation [215,230]) is found in scan."""
         import re
-        # Simulate OCR markdown lines
-        md_lines = [""] * 240
+        md_lines = [""] * 250
         md_lines[232] = (
             '<div style="text-align: center;">'
             '<img src="/api/documents/images/ppsv3-images/...'
@@ -243,7 +241,7 @@ class TestOCRLineScanFigureAssociation:
         answer_lines = [213, 214]
         expl_lines = [215, 230]
         scan_start = answer_lines[0] - 1
-        scan_end = expl_lines[1] + 10
+        scan_end = expl_lines[1] + 20
 
         img_tag_re = re.compile(
             r'<img\s*src="(/api/documents/images/[^"]+)"'
@@ -254,19 +252,48 @@ class TestOCRLineScanFigureAssociation:
                 found.append((li + 1, m.group(1)))
 
         assert len(found) == 1
-        assert found[0][0] == 233  # 1-based line number
+        assert found[0][0] == 233
         assert "img_in_image_box_108_132_368_303" in found[0][1]
+
+    def test_q13_scenario_img_at_expl_end_plus_11(self):
+        """Q13: image at explanation_end+11 (L196) is found with +20 gap."""
+        import re
+        # Simulate Q13: explanation ends at L186, image at L196
+        md_lines = [""] * 200
+        md_lines[195] = (  # 0-based 195 = L196
+            '<div style="text-align: center;">'
+            '<img src="/api/documents/images/ppsv3-images/...'
+            '/img_in_image_box_191_1099_429_1243.jpg" />'
+            '</div>'
+        )
+
+        answer_lines = [173, 174]
+        expl_lines = [175, 186]
+        scan_start = answer_lines[0] - 1  # 172
+        scan_end = expl_lines[1] + 20     # 206
+
+        img_tag_re = re.compile(
+            r'<img\s*src="(?:/api/documents/images/|)([^"]+)"'
+        )
+        found = []
+        for li in range(scan_start, min(scan_end, len(md_lines))):
+            for m in img_tag_re.finditer(md_lines[li]):
+                found.append((li + 1, m.group(1)))
+
+        assert len(found) == 1
+        assert found[0][0] == 196  # L196 found
+        assert "img_in_image_box_191_1099_429_1243" in found[0][1]
 
     def test_no_img_in_range_returns_empty(self):
         """No image in scan range returns empty list."""
         import re
-        md_lines = [""] * 240
+        md_lines = [""] * 250
         md_lines[232] = "some text without images"
 
         answer_lines = [213, 214]
         expl_lines = [215, 230]
         scan_start = answer_lines[0] - 1
-        scan_end = expl_lines[1] + 10
+        scan_end = expl_lines[1] + 20
 
         img_tag_re = re.compile(
             r'<img\s*src="(/api/documents/images/[^"]+)"'
@@ -279,17 +306,17 @@ class TestOCRLineScanFigureAssociation:
         assert len(found) == 0
 
     def test_img_outside_gap_not_found(self):
-        """Image beyond +10 gap is NOT associated (too far from question)."""
+        """Image beyond +20 gap is NOT associated (too far from question)."""
         import re
-        md_lines = [""] * 260
-        md_lines[250] = (  # L251, way beyond explanation+10
+        md_lines = [""] * 280
+        md_lines[260] = (  # L261, beyond explanation+20
             '<img src="/api/documents/images/some/far_away.jpg" />'
         )
 
         answer_lines = [213, 214]
         expl_lines = [215, 230]
         scan_start = answer_lines[0] - 1
-        scan_end = expl_lines[1] + 10  # 240
+        scan_end = expl_lines[1] + 20  # 250
 
         img_tag_re = re.compile(
             r'<img\s*src="(?:/api/documents/images/|)([^"]+)"'
@@ -299,12 +326,12 @@ class TestOCRLineScanFigureAssociation:
             for m in img_tag_re.finditer(md_lines[li]):
                 found.append((li + 1, m.group(1)))
 
-        assert len(found) == 0  # L251 > 240, not scanned
+        assert len(found) == 0  # L261 > 250, not scanned
 
     def test_scan_finds_raw_imgs_path(self):
         """原始 imgs/... path (not rewritten) is also matched."""
         import re
-        md_lines = [""] * 240
+        md_lines = [""] * 250
         md_lines[220] = (
             '<div style="text-align: center;">'
             '<img src="imgs/img_in_image_box_108_132_368_303.jpg" />'
@@ -314,7 +341,7 @@ class TestOCRLineScanFigureAssociation:
         answer_lines = [213, 214]
         expl_lines = [215, 230]
         scan_start = answer_lines[0] - 1
-        scan_end = expl_lines[1] + 10
+        scan_end = expl_lines[1] + 20
 
         img_tag_re = re.compile(
             r'<img\s*src="(?:/api/documents/images/|)([^"]+)"'
@@ -326,3 +353,13 @@ class TestOCRLineScanFigureAssociation:
 
         assert len(found) == 1
         assert "img_in_image_box_108_132_368_303" in found[0][1]
+
+    def test_bbox_parsed_from_filename(self):
+        """bbox is correctly parsed from img_in_image_box filename."""
+        import re
+        _bbox_re = re.compile(r'img_in_image_box_(\d+)_(\d+)_(\d+)_(\d+)')
+        img_key = "ppsv3-images/123/imgs/img_in_image_box_191_1099_429_1243.jpg"
+        m = _bbox_re.search(img_key)
+        assert m is not None
+        bbox = [int(m.group(i)) for i in range(1, 5)]
+        assert bbox == [191, 1099, 429, 1243]
