@@ -5629,18 +5629,36 @@ class _DocumentProcessing:
                                     if _img_key_short in _associated_keys:
                                         continue
                                     _associated_keys.add(_img_key_short)
+                                    # S#173: Extract bbox from filename + set metadata
+                                    _scan_bbox = None
+                                    _scan_bbox_m = re.search(
+                                        r'img_in_image_box_(\d+)_(\d+)_(\d+)_(\d+)',
+                                        _img_key_short,
+                                    )
+                                    if _scan_bbox_m:
+                                        _scan_bbox = [int(_scan_bbox_m.group(i)) for i in range(1, 5)]
+                                    # Determine placement from scan line position
+                                    _scan_placement = "associated"
+                                    if _q_answer_lines and _li < _q_answer_lines[0]:
+                                        _scan_placement = "stem"
+                                    elif _q_expl_lines and _li >= _q_expl_lines[0]:
+                                        _scan_placement = "explanation"
                                     await _img_svc2.associate_original(
                                         question_id=db_q.id,
                                         image_key=_img_key_short,
                                         description=(
                                             f"Figure for Q{qno or db_q.id}"
                                         ),
+                                        page_no=_q_page,
+                                        bbox=_scan_bbox,
+                                        placement=_scan_placement,
+                                        source="ocr_line_scan",
                                     )
                                     logger.info(
                                         "OCR line scan: associated %s "
-                                        "(L%d) → Q%d",
+                                        "(L%d, placement=%s) → Q%d",
                                         _img_key_short[:60], _li + 1,
-                                        db_q.id,
+                                        _scan_placement, db_q.id,
                                     )
                         except Exception as _scan_exc:
                             logger.warning(
