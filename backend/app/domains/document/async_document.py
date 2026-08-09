@@ -5614,8 +5614,8 @@ class _DocumentProcessing:
                                 else ((_q_expl_lines[0] - 1) if _q_expl_lines else 0)
                             )
                             _scan_end = (
-                                (_q_expl_lines[1] + 10) if _q_expl_lines
-                                else (_scan_start + 20)
+                                (_q_expl_lines[1] + 20) if _q_expl_lines
+                                else (_scan_start + 30)
                             )
                             _scan_start = max(0, _scan_start)
                             _scan_end = min(len(_md_lines), _scan_end)
