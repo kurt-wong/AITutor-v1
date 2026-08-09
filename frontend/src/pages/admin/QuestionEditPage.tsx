@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import {
   Card, Typography, Input, Select, Button, Space, Spin, Alert, message, Tag, Divider, Image, Segmented,
 } from "antd";
-import { EditOutlined, SaveOutlined, DeleteOutlined, PictureOutlined } from "@ant-design/icons";
+import { EditOutlined, SaveOutlined, DeleteOutlined } from "@ant-design/icons";
 import { apiGet, apiPutForm, apiDelete } from "../../services/api";
 import { DIFFICULTY_LABELS } from "../../types";
 import MathRenderer from "../../components/MathRenderer";
@@ -16,6 +16,12 @@ interface QuestionImage {
   image_type: string;
   description: string | null;
   created_at: string;
+  // S#173: Placement metadata for rendering
+  page_no?: number | null;
+  bbox?: number[] | null;
+  placement?: string | null;  // stem | explanation | page_context | associated
+  source?: string | null;     // c4_figure | pp_ocr_markdown | ocr_line_scan | page_fallback
+  figure_id?: string | null;
 }
 
 interface QuestionDetail {
@@ -249,27 +255,20 @@ export default function QuestionEditPage() {
               </>
             )}
             {question.subject_name && <Tag>{question.subject_name}</Tag>}
-            {question.images && question.images.length > 0 && (
-              <>
-                <Divider />
-                <Title level={5}><PictureOutlined style={{ marginRight: "var(--radius)" }} />关联图片</Title>
-                <Space wrap>
-                  {question.images.map((img) => (
-                    <div key={img.image_id} style={{ textAlign: "center" }}>
-                      <Image
-                        src={`/api/documents/images/${img.image_key}`}
-                        alt={img.description || `图片 ${img.image_id}`}
-                        width={200}
-                        style={{ borderRadius: 8, border: "1px solid #f0f0f0" }}
-                      />
-                      <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>
-                        {img.image_type} · {img.description || ""}
-                      </div>
-                    </div>
-                  ))}
-                </Space>
-              </>
-            )}
+            {/* S#173: Render stem images inline after content */}
+            {question.images?.filter(img => img.placement === "stem").map(img => (
+              <div key={img.image_id} style={{ textAlign: "center", margin: "12px 0" }}>
+                <Image
+                  src={`/api/documents/images/${img.image_key}`}
+                  alt={img.description || `题干配图`}
+                  width={280}
+                  style={{ borderRadius: 8, border: "1px solid #f0f0f0" }}
+                />
+                <div style={{ fontSize: 11, color: "#999" }}>
+                  {img.source || "image"} · {img.description || ""}
+                </div>
+              </div>
+            ))}
             <Divider />
             <Space>
               <Text strong>难度:</Text>
@@ -286,6 +285,41 @@ export default function QuestionEditPage() {
             <Paragraph style={{ background: "#fafafa", padding: 8, borderRadius: 4, minHeight: 32, whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: "break-word", maxWidth: "100%" }}>
               <MathRenderer content={editExplanation || (question?.solution?.explanation || "")} />
             </Paragraph>
+            {/* S#173: Render explanation images inline */}
+            {question.images?.filter(img => img.placement === "explanation").map(img => (
+              <div key={img.image_id} style={{ textAlign: "center", margin: "8px 0" }}>
+                <Image
+                  src={`/api/documents/images/${img.image_key}`}
+                  alt={img.description || `详解配图`}
+                  width={240}
+                  style={{ borderRadius: 8, border: "1px solid #f0f0f0" }}
+                />
+                <div style={{ fontSize: 11, color: "#999" }}>
+                  {img.source || "image"} · {img.description || ""}
+                </div>
+              </div>
+            ))}
+            {/* S#173: Page context images (collapsed) */}
+            {question.images?.filter(img => img.placement === "page_context").length > 0 && (
+              <details style={{ marginTop: 8 }}>
+                <summary style={{ cursor: "pointer", color: "#999", fontSize: 12 }}>
+                  同页参考图 ({question.images.filter(img => img.placement === "page_context").length} 张)
+                </summary>
+                <Space wrap style={{ marginTop: 8 }}>
+                  {question.images.filter(img => img.placement === "page_context").map(img => (
+                    <div key={img.image_id} style={{ textAlign: "center" }}>
+                      <Image
+                        src={`/api/documents/images/${img.image_key}`}
+                        alt={img.description || `同页参考`}
+                        width={120}
+                        style={{ borderRadius: 4, border: "1px solid #f0f0f0", opacity: 0.7 }}
+                      />
+                      <div style={{ fontSize: 10, color: "#bbb" }}>page {img.page_no}</div>
+                    </div>
+                  ))}
+                </Space>
+              </details>
+            )}
             <Space>
               <Button type="primary" icon={<SaveOutlined />} onClick={handleSaveSolution} loading={saving}>保存解答</Button>
               <Button danger icon={<DeleteOutlined />} onClick={handleDelete}>删除题目</Button>
