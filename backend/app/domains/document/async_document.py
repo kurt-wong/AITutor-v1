@@ -2246,6 +2246,53 @@ async def _crop_figures_from_pages(
     return questions
 
 
+def _infer_figure_placement(
+    stem_text: str,
+    explanation_text: str,
+    anchor_text: str | None,
+    label: str | None,
+) -> str | None:
+    """Infer figure placement by semantic matching.
+
+    S#173: Uses anchor_text (e.g. "如图1所示") and label (e.g. "图1")
+    to determine if a figure belongs to the stem or explanation.
+    Falls back to page_context when no semantic match is found.
+
+    Returns:
+        "stem" if figure is referenced in stem text
+        "explanation" if figure is referenced in explanation text
+        "page_context" if same page but no semantic reference found
+        None if no match at all (don't associate)
+    """
+    # Build search patterns from anchor_text and label
+    _patterns: list[str] = []
+    if anchor_text:
+        # Extract the core reference, e.g. "如图1所示" → "图1"
+        _patterns.append(anchor_text.strip())
+    if label:
+        _patterns.append(label.strip())
+        # Also try "如图{N}" pattern
+        _patterns.append(f"如图{label}")
+
+    if not _patterns:
+        return "page_context"
+
+    # Check stem text first
+    _stem_lower = (stem_text or "").lower()
+    for _pat in _patterns:
+        if _pat.lower() in _stem_lower:
+            return "stem"
+
+    # Check explanation text
+    _expl_lower = (explanation_text or "").lower()
+    for _pat in _patterns:
+        if _pat.lower() in _expl_lower:
+            return "explanation"
+
+    # No semantic match → page_context (same page, might be related)
+    return "page_context"
+
+
 async def _crop_figure_from_page(
     page_images: list[str],
     page_num: int,
@@ -5388,6 +5435,11 @@ class _DocumentProcessing:
                     _expl_text = str(q.get("explanation", ""))
                     _has_md_img = bool(q.get("_has_images", False))
                     _has_inline_img = "<img" in _stem_text or "<img" in _expl_text
+                    # S#173: Derive page from qno_page_map (available for both
+                    # C4 and inline <img> association paths)
+                    _q_page = None
+                    if qno_page_map and qno:
+                        _q_page = qno_page_map.get(qno)
                     # P2 fallback: OCR markdown often loses function graphs as
                     # <img> tags, but the stem still says "如图/图象".  Associate
                     # the estimated source page so the figure is not silently lost.
@@ -5413,21 +5465,17 @@ class _DocumentProcessing:
 
                     # ── S#173: C4 figure_anchors → question_images ──
                     # Match C4-detected figures to this question by page
-                    # proximity.  If anchor has minio_key, reuse directly;
-                    # if not (PaddleOCR path), crop from page image and upload.
+                    # proximity + semantic matching.  If anchor has minio_key,
+                    # reuse directly; if not, crop from page image and upload.
+                    # Placement is inferred from anchor_text/label matching
+                    # stem/explanation text, with page_context as fallback.
                     if figure_anchors and q.get("stem_lines"):
                         try:
                             from app.domains.question.image_service import (
                                 QuestionImageService as _QIS_C4,
                             )
                             _img_svc_c4 = _QIS_C4(session)
-                            # S#173: Derive page from qno_page_map (structurer blocks)
-                            # instead of q.get("page") which is None in LLM path.
-                            _q_page = None
-                            if qno_page_map and qno:
-                                _q_page = qno_page_map.get(qno)
                             _q_stem_lines = q.get("stem_lines")
-                            _q_answer_lines = q.get("answer_lines")
                             for _fa in figure_anchors:
                                 _fa_page = getattr(_fa, "page", None)
                                 _fa_key = getattr(_fa, "minio_key", "")
@@ -5448,23 +5496,26 @@ class _DocumentProcessing:
                                     )
                                 if not _fa_key:
                                     continue
+                                # S#173: Semantic placement inference
+                                # Uses anchor_text/label to match stem/explanation
+                                _placement = _infer_figure_placement(
+                                    stem_text=_stem_text or "",
+                                    explanation_text=_expl_text or "",
+                                    anchor_text=getattr(_fa, "anchor_text", None),
+                                    label=getattr(_fa, "label", None),
+                                )
+                                if _placement is None:
+                                    continue
                                 # Deduplicate: skip if already associated
                                 if _fa_key in _associated_keys:
                                     continue
                                 _associated_keys.add(_fa_key)
-                                # Infer placement from line ranges
-                                _placement = "stem"  # default
-                                if _q_answer_lines and _q_stem_lines:
-                                    # Figure appears after answer lines → explanation
-                                    _placement = "associated"
                                 await _img_svc_c4.associate_original(
                                     question_id=db_q.id,
                                     image_key=_fa_key,
                                     description=getattr(_fa, "description", "")
                                         or f"C4 figure for Q{qno or db_q.id}",
                                     page_no=_fa_page,
-                                    # S#173: Prefer image_bbox (pixel coords) over
-                                    # normalized_bbox (may be zeros for PaddleOCR path)
                                     bbox=getattr(_fa, "image_bbox", None)
                                         or getattr(_fa, "normalized_bbox", None),
                                     placement=_placement,
@@ -5475,8 +5526,8 @@ class _DocumentProcessing:
                                     figure_type=getattr(_fa, "figure_type", None),
                                 )
                                 logger.debug(
-                                    "Associated C4 figure: %s (page %s) → Q%d",
-                                    _fa_id[:12], _fa_page, db_q.id,
+                                    "Associated C4 figure: %s (page %s, placement=%s) → Q%d",
+                                    _fa_id[:12], _fa_page, _placement, db_q.id,
                                 )
                         except Exception as _c4_exc:
                             logger.warning(
@@ -5490,6 +5541,7 @@ class _DocumentProcessing:
                     # question_images table.  Deduplicate via associated_keys so
                     # the same image referenced in both stem and explanation
                     # only creates one record.
+                    # S#173: Parse bbox from filename and set placement/source.
                     if _has_inline_img:
                         try:
                             from app.domains.question.image_service import (
@@ -5497,6 +5549,11 @@ class _DocumentProcessing:
                             )
                             _img_service_fig = _QIS(session)
                             _img_re = r'<img\s*src="/api/documents/images/([^"]+)"'
+                            # S#173: Pattern to extract bbox from filename
+                            # e.g. img_in_image_box_108_88_345_233.jpg
+                            _bbox_re = re.compile(
+                                r'img_in_image_box_(\d+)_(\d+)_(\d+)_(\d+)'
+                            )
                             for _field, _field_text in [
                                 ("stem", _stem_text),
                                 ("explanation", _expl_text),
@@ -5506,16 +5563,25 @@ class _DocumentProcessing:
                                     if _img_key in _associated_keys:
                                         continue
                                     _associated_keys.add(_img_key)
+                                    # S#173: Extract bbox from filename
+                                    _img_bbox = None
+                                    _bbox_m = _bbox_re.search(_img_key)
+                                    if _bbox_m:
+                                        _img_bbox = [int(_bbox_m.group(i)) for i in range(1, 5)]
                                     await _img_service_fig.associate_original(
                                         question_id=db_q.id,
                                         image_key=_img_key,
                                         description=(
                                             f"Figure for Q{qno or db_q.id}"
                                         ),
+                                        page_no=_q_page,
+                                        bbox=_img_bbox,
+                                        placement=_field,  # stem or explanation
+                                        source="pp_ocr_markdown",
                                     )
                                     logger.debug(
-                                        "Associated figure (from %s): %s → Q%d",
-                                        _field, _img_key[:80], db_q.id,
+                                        "Associated figure (from %s): %s → Q%d, bbox=%s",
+                                        _field, _img_key[:80], db_q.id, _img_bbox,
                                     )
                         except Exception as _exc:
                             logger.warning(
