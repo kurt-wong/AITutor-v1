@@ -23,6 +23,7 @@ class QuestionService:
 
         S#172: If an approved QuestionRecovery exists, its recovered fields
         override the base question content (recovery overlay pattern).
+        S#173: Includes question_images with placement metadata.
         """
         question = await self.repo.get_by_id(question_id)
         if not question:
@@ -52,6 +53,13 @@ class QuestionService:
                     result["recovered_image"] = recovery.recovered_image_key
         except Exception:
             pass
+
+        # S#173: Attach question images
+        try:
+            img_svc = QuestionImageService(self.session)
+            result["question_images"] = await img_svc.get_images(question_id)
+        except Exception:
+            result["question_images"] = []
 
         return result
 

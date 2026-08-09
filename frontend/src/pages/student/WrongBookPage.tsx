@@ -4,6 +4,7 @@ import { WarningOutlined, FilterOutlined, EyeOutlined, LoadingOutlined } from "@
 import { apiGetParams, apiGet } from "../../services/api";
 import { DIFFICULTY_LABELS, ERROR_COLORS } from "../../types";
 import MathRenderer from "../../components/MathRenderer";
+import QuestionImagesRenderer, { type QuestionImage } from "../../components/QuestionImagesRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -19,6 +20,7 @@ interface WrongQuestion {
   subject: string | null;
   difficulty: number | null;
   created_at: string | null;
+  question_images?: QuestionImage[];
 }
 
 interface SolutionData {
@@ -172,6 +174,12 @@ export default function WrongBookPage() {
                         <Divider style={{ margin: "8px 0" }} />
                         <Text type="secondary"><MathRenderer content={solution.explanation} /></Text>
                       </>
+                    )}
+                    {/* S#173: Placement-aware images from question_images */}
+                    {item.question_images && item.question_images.length > 0 && (
+                      <div style={{ marginTop: 8 }}>
+                        <QuestionImagesRenderer images={item.question_images} />
+                      </div>
                     )}
                   </div>
                 )}

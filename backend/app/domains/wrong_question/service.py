@@ -38,11 +38,43 @@ class WrongQuestionService:
         subject: str | None = None,
         error_type: str | None = None,
     ) -> dict:
-        """List wrong questions. error_type filtered at SQL level (Session #78)."""
+        """List wrong questions. error_type filtered at SQL level (Session #78).
+
+        S#173: Batch-fetches question_images for all listed questions
+        to avoid N+1 queries.
+        """
         questions = await self.repo.list_filtered(
             error_type=error_type, subject=subject, skip=skip, limit=limit
         )
         total = await self.repo.count(error_type=error_type, subject=subject)
+
+        # S#173: Batch-fetch question_images for all question_ids
+        question_ids = [q.question_id for q in questions if q.question_id]
+        images_map: dict[int, list[dict]] = {}
+        if question_ids:
+            try:
+                from app.domains.question.models import QuestionImage
+                from sqlalchemy import select
+                result = await self.session.execute(
+                    select(QuestionImage)
+                    .where(QuestionImage.question_id.in_(question_ids))
+                    .order_by(QuestionImage.created_at)
+                )
+                for img in result.scalars().all():
+                    images_map.setdefault(img.question_id, []).append({
+                        "image_id": img.id,
+                        "image_key": img.image_key,
+                        "image_type": img.image_type,
+                        "description": img.description,
+                        "page_no": getattr(img, "page_no", None),
+                        "bbox": getattr(img, "bbox", None),
+                        "placement": getattr(img, "placement", None),
+                        "source": getattr(img, "source", None),
+                        "figure_id": getattr(img, "figure_id", None),
+                        "label": getattr(img, "label", None),
+                    })
+            except Exception:
+                pass
 
         result = []
         for q in questions:
@@ -55,6 +87,7 @@ class WrongQuestionService:
                 "mastery_level": getattr(q, "mastery_level", 0),
                 "review_count": getattr(q, "review_count", 0),
                 "created_at": q.created_at.isoformat(),
+                "question_images": images_map.get(q.question_id, []),
             }
             result.append(item)
 

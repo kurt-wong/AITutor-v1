@@ -1,10 +1,11 @@
 import { useState, useEffect } from "react";
-import { Card, List, Tag, Typography, Select, Space, Empty, Spin } from "antd";
-import { FileTextOutlined } from "@ant-design/icons";
-import { apiGetParams } from "../services/api";
+import { Card, List, Tag, Typography, Select, Space, Empty, Spin, Button } from "antd";
+import { FileTextOutlined, EyeOutlined, LoadingOutlined } from "@ant-design/icons";
+import { apiGetParams, apiGet } from "../services/api";
 import type { Question } from "../types";
 import { DIFFICULTY_COLORS } from "../types";
 import MathRenderer from "../components/MathRenderer";
+import QuestionImagesRenderer, { type QuestionImage } from "../components/QuestionImagesRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -17,6 +18,9 @@ export default function QuestionPage() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [loading, setLoading] = useState(false);
   const [subjectFilter, setSubjectFilter] = useState<number | undefined>();
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [expandedImages, setExpandedImages] = useState<QuestionImage[]>([]);
+  const [imagesLoading, setImagesLoading] = useState(false);
 
   useEffect(() => {
     fetchQuestions();
@@ -33,6 +37,25 @@ export default function QuestionPage() {
       setQuestions([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const toggleExpand = async (q: Question) => {
+    if (expandedId === q.id) {
+      setExpandedId(null);
+      setExpandedImages([]);
+      return;
+    }
+    setExpandedId(q.id);
+    setImagesLoading(true);
+    setExpandedImages([]);
+    try {
+      const data = await apiGet<{ question_images?: QuestionImage[] }>(`/api/questions/${q.id}`);
+      setExpandedImages(data.question_images || []);
+    } catch {
+      setExpandedImages([]);
+    } finally {
+      setImagesLoading(false);
     }
   };
 
@@ -66,6 +89,20 @@ export default function QuestionPage() {
                   </Space>
                   <Paragraph style={{ marginTop: 8, whiteSpace: "pre-wrap" }}><MathRenderer content={q.content || ""} /></Paragraph>
                   <Text type="secondary">{q.source_type}</Text>
+                  <Button
+                    type="link"
+                    icon={imagesLoading && expandedId === q.id ? <LoadingOutlined /> : <EyeOutlined />}
+                    onClick={() => toggleExpand(q)}
+                    style={{ padding: 0, marginTop: 4 }}
+                  >
+                    {expandedId === q.id ? "收起图片" : "查看配图"}
+                  </Button>
+                  {/* S#173: Stem images when expanded */}
+                  {expandedId === q.id && expandedImages.length > 0 && (
+                    <div style={{ marginTop: 8 }}>
+                      <QuestionImagesRenderer images={expandedImages} placements={["stem"]} />
+                    </div>
+                  )}
                 </Card>
               </List.Item>
             )}

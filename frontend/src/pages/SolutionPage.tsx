@@ -3,13 +3,16 @@ import { Card, Input, Button, Typography, Space, Spin, Empty, Steps, Divider } f
 import { SearchOutlined, CheckCircleOutlined } from "@ant-design/icons";
 import { apiGet } from "../services/api";
 import type { SolutionData } from "../types";
+import type { QuestionImage } from "../components/QuestionImagesRenderer";
 import MathRenderer from "../components/MathRenderer";
+import QuestionImagesRenderer from "../components/QuestionImagesRenderer";
 
 const { Title, Text, Paragraph } = Typography;
 
 export default function SolutionPage() {
   const [questionId, setQuestionId] = useState<string>("");
   const [solution, setSolution] = useState<SolutionData | null>(null);
+  const [questionImages, setQuestionImages] = useState<QuestionImage[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -18,6 +21,7 @@ export default function SolutionPage() {
     setLoading(true);
     setError(null);
     setSolution(null);
+    setQuestionImages([]);
     try {
       const data = await apiGet<{
         data?: {
@@ -28,6 +32,7 @@ export default function SolutionPage() {
           answer?: string;
           steps?: { step: number; description: string }[];
           summary?: string;
+          question_images?: QuestionImage[];
         };
       }>(`/api/solutions/${questionId}`);
       if (data.data) {
@@ -36,6 +41,8 @@ export default function SolutionPage() {
           solution_steps: data.data.solution_steps || data.data.steps || [],
           explanation: data.data.explanation || data.data.summary || "",
         });
+        // S#173: Extract placement-aware images
+        setQuestionImages(data.data.question_images || []);
       } else {
         setError("题目未找到");
       }
@@ -109,6 +116,8 @@ export default function SolutionPage() {
                 </Paragraph>
               </>
             )}
+            {/* S#173: Explanation + page_context images */}
+            <QuestionImagesRenderer images={questionImages} placements={["explanation", "page_context"]} />
           </Card>
         ) : (
           !error && !loading && <Empty description="请输入题目 ID 查询" />

@@ -8,6 +8,7 @@ Architecture rule: Service layer contains business logic, no direct DB access.
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.question.solution_repository import SolutionRepository
+from app.domains.question.image_service import QuestionImageService
 
 
 class SolutionService:
@@ -18,11 +19,24 @@ class SolutionService:
         self.repo = SolutionRepository(session)
 
     async def get_solution_by_question(self, question_id: int) -> dict | None:
-        """Get solution by question ID."""
+        """Get solution by question ID.
+
+        S#173: Includes question_images with placement metadata so
+        student-end pages can render figures in correct positions.
+        """
         solution = await self.repo.get_by_question(question_id)
         if not solution:
             return None
-        return self._to_dict(solution)
+        result = self._to_dict(solution)
+
+        # Attach question images (stem/explanation/page_context)
+        try:
+            img_service = QuestionImageService(self.session)
+            result["question_images"] = await img_service.get_images(question_id)
+        except Exception:
+            result["question_images"] = []
+
+        return result
 
     async def create_solution(
         self,

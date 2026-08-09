@@ -1,6 +1,6 @@
 # AI Tutor — 项目开发状态
 
-> **最后更新**: 2026-08-09 Session #173 (图片元数据断链修复 + 端到端验证) | **版本**: 1.61.0 | **完成度**: 核心链路 ~99%，图片元数据后端链路已闭环，前端渲染待实现。
+> **最后更新**: 2026-08-09 Session #174 (学生端图片渲染 + 共享 QuestionImagesRenderer) | **版本**: 1.62.0 | **完成度**: 核心链路 ~99%，图片元数据链路已闭环，前端四页面渲染已集成。
 >
 > **记录规范（2026-07-31 起严格执行）**：
 > - 本文档 §1-§15 为当前状态快照，可以原地编辑
@@ -17,7 +17,7 @@
 |------|-----|
 | **定位** | 家长把北京高一试卷 PDF 扔进去，自动解析 → 题目切分 → 知识点映射 → 详解生成 → 错题本 + 个性化辅导 |
 | **项目名称** | AI Tutor — 本地 AI 辅导平台 |
-| **版本** | 1.60.0 |
+| **版本** | 1.62.0 |
 | **目标用户** | 个人 / 小规模部署 / 低并发 |
 | **硬件目标** | i7-14700 + RTX 4060 8GB + 64GB RAM + NVMe SSD |
 
@@ -1469,3 +1469,25 @@ LLM 的定位：给粗定位，代码做精确锚点校正
 **待完成**: 前端按 placement 渲染、语义匹配替代页级匹配、PP-StructureV3 img 补元数据、document_pages.image_key
 
 **文档更新**: LOG.md 追加 Session #173，PROJECT_STATUS.md §1/§7/§16 更新。
+
+---
+
+### S#174 — 2026-08-09: 学生端图片渲染 + 共享 QuestionImagesRenderer
+
+**版本**: 1.62.0
+
+**改动文件**:
+| 文件 | 改动 | 说明 |
+|------|------|------|
+| `question/solution_service.py` | get_solution_by_question() 扩展 | 返回 question_images（通过 QuestionImageService） |
+| `question/service.py` | get_question() 扩展 | 返回 question_images |
+| `wrong_question/service.py` | list_wrong_questions() 扩展 | 批量预取 question_images 避免 N+1 |
+| `components/QuestionImagesRenderer.tsx` | 新增共享组件 | placement-aware 图片渲染器（stem/explanation/page_context） |
+| `admin/QuestionEditPage.tsx` | 重构 | 替换内联渲染为 QuestionImagesRenderer |
+| `QuestionPage.tsx` | 集成 | 新增"查看配图"按钮，按 placement 渲染 stem 图片 |
+| `SolutionPage.tsx` | 集成 | 讲解区后渲染 explanation + page_context 图片 |
+| `student/WrongBookPage.tsx` | 集成 | 展开解答时渲染所有 placement 图片 |
+
+**测试**: S#173 测试 84 passed + MCP 测试 20 passed + Frontend build ✅
+
+**文档更新**: LOG.md 追加 Session #174，PROJECT_STATUS.md §1/§16 更新。

@@ -12743,3 +12743,54 @@ LLM 只读、只标注（元数据：题号、题型、位置、年份、学校.
 3. 前端按 placement 渲染（stem/explanation/page_context）
 4. document_pages.image_key（页面图上传 MinIO）
 5. Q4/Q20 离线恢复、Q8/Q17 精裁
+
+---
+
+## Session #174 — 2026-08-09: 学生端图片渲染 + 共享 QuestionImagesRenderer
+
+### 背景
+
+Session #173 完成了后端图片元数据链路闭环（OCR snapshot → figure anchor → 裁剪上传 → question_images 元数据），管理端 QuestionEditPage 已按 placement 渲染图片。但学生端三个页面（QuestionPage、SolutionPage、WrongBookPage）仍不渲染图片，最终用户（家长/学生）看不到 OCR 识别的配图。
+
+### 修改
+
+#### 1. Backend: API 返回 question_images
+
+- **`solution_service.py`**: `get_solution_by_question()` 新增 `question_images` 字段，通过 `QuestionImageService.get_images()` 获取
+- **`service.py`**: `get_question()` 新增 `question_images` 字段
+- **`wrong_question/service.py`**: `list_wrong_questions()` 批量预取所有 `question_images`（避免 N+1），每个 wrong_question 项新增 `question_images` 列表
+
+#### 2. Frontend: 共享 QuestionImagesRenderer 组件
+
+- **新增 `components/QuestionImagesRenderer.tsx`**: 从 QuestionEditPage 提取的 placement-aware 图片渲染器
+  - 导出 `QuestionImage` 接口和 `QuestionImagesRenderer` 组件
+  - 支持 `placements` prop 过滤指定类型
+  - 支持 `widthMap` prop 自定义宽度
+  - stem: 居中内联 (280px)、explanation: 居中内联 (240px)、page_context/associated: 折叠 details (120px, opacity 0.7)
+
+#### 3. Frontend: 四页面集成
+
+- **`QuestionEditPage.tsx`**: 替换内联渲染为 `<QuestionImagesRenderer>`，移除本地 `QuestionImage` 接口（改用共享导出）
+- **`QuestionPage.tsx`**: 新增"查看配图"按钮，点击后从 `/api/questions/{id}` 获取 `question_images`，渲染 `placement=stem` 图片
+- **`SolutionPage.tsx`**: 从 `/api/solutions/{id}` 提取 `question_images`，在讲解区后渲染 `explanation` + `page_context` 图片
+- **`WrongBookPage.tsx`**: 从列表响应提取 `question_images`，展开解答时渲染所有 placement 图片；保留旧 `image_key` 字段兼容
+
+### 测试
+
+- S#173 相关测试: 84 passed
+- MCP server 测试: 20 passed
+- Frontend build: ✅ 成功
+- 预存失败（DB 连接/LM 集成）: 3 个，非本次变更引入
+
+### 文件变更
+
+| 文件 | 类型 |
+|------|------|
+| `backend/app/domains/question/solution_service.py` | 修改 |
+| `backend/app/domains/question/service.py` | 修改 |
+| `backend/app/domains/wrong_question/service.py` | 修改 |
+| `frontend/src/components/QuestionImagesRenderer.tsx` | 新增 |
+| `frontend/src/pages/admin/QuestionEditPage.tsx` | 修改 |
+| `frontend/src/pages/QuestionPage.tsx` | 修改 |
+| `frontend/src/pages/SolutionPage.tsx` | 修改 |
+| `frontend/src/pages/student/WrongBookPage.tsx` | 修改 |
